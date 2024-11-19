@@ -14,6 +14,10 @@ python_version
 The Python version for your virtualenv. If not specified, automatically parsed from ``.python-version`` file. This is only
 required if the installation mode is set to ``python-package``
 
+requirements
+------------
+Optional path to your requirements file. This will only be used when the installation mode is set to ``python-package``
+
 versions_to_keep
 ----------------
 The number of versions to keep on the host. After each deploy, older versions are pruned based on this setting. By default, it keeps the latest 5 versions,
@@ -38,10 +42,6 @@ The ``binary`` option disables specific Python-related features, such as virtual
 release_command
 ---------------
 Optional command to run at the end of deployment (e.g., database migrations).
-
-requirements
-------------
-Optional path to your requirements file. This will only be used when the installation mode is set to ``python-package``
 
 Webserver
 ---------
