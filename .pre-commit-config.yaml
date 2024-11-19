@@ -9,6 +9,12 @@ repos:
         language: system
         files: '\.py$'
 
+      - id: logchanges
+        name: update changelog
+        entry: just logchanges || true
+        language: system
+        pass_filenames: false
+
   - repo: https://github.com/myint/autoflake
     rev: v2.3.1
     hooks:

@@ -6,28 +6,155 @@ on:
       - "v*.*.*"
 
 jobs:
-  publish:
-    name: Publish to pypi
+  build-python-wheel-and-sdist:
+    name: Build a pure Python wheel and source distribution
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Bootstrap
+        run: just bootstrap
+
+      - name: Build
+        run: uv build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+
+  build-binaries:
+    name: Build binary application for ${{ matrix.job.target }} (${{ matrix.job.os }})
+    runs-on: ${{ matrix.job.os }}
+    needs: build-python-wheel-and-sdist
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          # Linux
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+            release_suffix: x86_64-linux
+          # - target: x86_64-unknown-linux-musl
+          #   os: ubuntu-latest
+          #   cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+            release_suffix: aarch64-linux
+          # - target: i686-unknown-linux-gnu
+          #   os: ubuntu-latest
+          #   cross: true
+          #   release_suffix: i686-linux
+          # Windows
+          # - target: x86_64-pc-windows-msvc
+          #   os: windows-2022
+          #   release_suffix: x86_64-windows
+          # - target: i686-pc-windows-msvc
+          #   os: windows-2022
+          #   release_suffix: i686-windows
+          # macOS
+          # - target: aarch64-apple-darwin
+          #   os: macos-12
+          #   release_suffix: aarch64-osx
+          # - target: x86_64-apple-darwin
+          #   os: macos-12
+          #   release_suffix: x86_64-osx
+
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.job.target }}
+
     steps:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-      - name: Build Wheel
-        run: uv build
-      - name: Publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Code Checkout
+        uses: actions/checkout@v4
+
+      - name: Install musl-tools on Linux
+        run: sudo apt-get install --yes musl musl-dev musl-tools
+        if: ${{ matrix.job.os == 'ubuntu-latest' }}
+
+      - name: Install Rust toolchain
+        if: ${{ !matrix.job.cross }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.job.target }}
+
+      - name: Set up cross compiling tools
+        if: matrix.job.cross
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.job.target}}
+
+      - name: Show toolchain information
+        run: |-
+          rustup toolchain list
+          rustup default
+          rustup -V
+          rustc -V
+          cargo -V
+          uv --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: ${{ github.workspace }}/dist
+          merge-multiple: true
+
+      - name: Bootstrap
+        run: just bootstrap
+
+      - name: Build binary
+        run: just build-bin
+
+      - name: Rename
+        working-directory: ${{ github.workspace }}
+        run: |-
+          mv dist/bin/{% endraw %}{{ cookiecutter.project_name }}{% raw %}* dist/bin/{% endraw %}{{ cookiecutter.project_name }}{% raw %}-${{ matrix.job.release_suffix }}
+
+      - name: Upload built binary package
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.job.release_suffix }}
+          path: dist/bin/*
+          if-no-files-found: error
 
   release:
     name: Create a GitHub release
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    needs: [build-python-wheel-and-sdist, build-binaries]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Generate Changelog
         run: |
           awk '/^## /{if (p) exit; p=1; next} p' ${{ github.workspace }}/CHANGELOG.md | tee ${{ github.workspace }}-CHANGELOG.txt
+      
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+     
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
