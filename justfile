@@ -49,7 +49,7 @@ fujin *ARGS:
     uv run --group docs sphinx-autobuild docs docs/_build/html --port 8002 --watch src/fujin
 
 @docs-requirements:
-    uv export --group docs --format requirements-txt > docs/requirements.txt
+    uv export --no-hashes --group docs --format requirements-txt > docs/requirements.txt
 
 # -------------------------------------------------------------------------
 # RELEASE UTILITIES
