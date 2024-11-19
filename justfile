@@ -81,7 +81,7 @@ build-bin:
     export PYAPP_PYTHON_VERSION="3.12"
     export PYAPP_FULL_ISOLATION="1"
     export PYAPP_EXPOSE_METADATA="1"
-    export PYAPP_PROJECT_NAME="fujin-cli"
+    export PYAPP_PROJECT_NAME="fujin"
     export PYAPP_PROJECT_VERSION="${current_version}"
     export PYAPP_PROJECT_PATH="${PWD}/dist/fujin_cli-${current_version}-py3-none-any.whl"
     export PYAPP_DISTRIBUTION_EMBED="1"
