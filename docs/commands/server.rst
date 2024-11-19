@@ -1,4 +1,4 @@
-Server
+server
 ======
 
 .. cappa:: fujin.commands.up.Server

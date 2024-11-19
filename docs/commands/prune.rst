@@ -1,4 +1,4 @@
-Prune
+prune
 ======
 
 .. cappa:: fujin.commands.prune.Prune

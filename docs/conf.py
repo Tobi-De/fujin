@@ -21,6 +21,7 @@ extensions = [
     "sphinx_design",
     "sphinx_copybutton",
     "jupyter_sphinx",
+    "sphinx_togglebutton"
 ]
 
 templates_path = ["_templates"]

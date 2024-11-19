@@ -1,0 +1,23 @@
+app = "pocketbase"
+version = "0.22.26"
+build_command = "unzip pocketbase_0.22.26_linux_amd64.zip" # first download with curl -LO https://github.com/pocketbase/pocketbase/releases/download/v0.22.26/pocketbase_0.22.26_linux_amd64.zip
+distfile = "pocketbase"
+release_command = "pocketbase migrate"
+installation_mode = "binary"
+
+[webserver]
+upstream = "localhost:8090"
+type = "fujin.proxies.caddy"
+
+[processes]
+web = "pocketbase serve --http 0.0.0.0:8090"
+
+[aliases]
+shell = "server exec --appenv -i bash"
+
+[host]
+domain_name = "localhost"
+envfile = ".env.prod"
+user = "vagrant"
+key_filename = "../../../.vagrant/machines/default/virtualbox/private_key"
+ssh_port = 2222

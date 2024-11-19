@@ -1,4 +1,4 @@
-Config
+config
 ======
 
 .. cappa:: fujin.commands.config.ConfigCMD

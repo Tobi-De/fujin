@@ -1,4 +1,4 @@
-Down
+down
 ====
 
 .. cappa:: fujin.commands.down.Down

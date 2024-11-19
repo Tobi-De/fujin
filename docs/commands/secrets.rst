@@ -1,5 +1,5 @@
-Secrets
-======
+secrets
+=======
 
 .. cappa:: fujin.commands.secrets.Secrets
    :style: terminal

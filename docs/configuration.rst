@@ -11,7 +11,7 @@ This is a minimal working example.
 
 .. tab-set::
 
-    .. tab-item:: simple python package
+    .. tab-item:: python package
 
         .. jupyter-execute::
             :hide-code:

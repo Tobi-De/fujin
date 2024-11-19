@@ -1,4 +1,4 @@
-Docs
+docs
 ====
 
 .. cappa:: fujin.commands.docs.Docs

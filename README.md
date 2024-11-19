@@ -15,12 +15,12 @@
 it expects your app to be a packaged Python application ideally with a CLI entry point defined. For other languages, you need to provide a self-contained single executable file with all necessary dependencies.
 The main job of `fujin` is to bootstrap your server (installing caddy, etc.), copy the files onto the server with a structure that supports rollback, and automatically generate configs for systemd and caddy that you can manually edit if needed.
 
-Check out the [documentation📚](https://fujin.readthedocs.io/en/latest/) for installation, features, and usage guides.
+Check out the [documentation📚](https://fujin.oluwatobi.dev/en/latest/) for installation, features, and usage guides.
 
 ## Why?
 
 I wanted [kamal](https://kamal-deploy.org/) but without Docker, and I thought the idea was fun. At its core, this project automates versions of this [tutorial](https://www.digitalocean.com/community/tutorials/how-to-set-up-django-with-postgres-nginx-and-gunicorn-on-ubuntu). If you've been a Django beginner 
-trying to get your app in production, you probably went through this. I'm using caddy instead of nginx because the configuration file simpler and it's is a no-brainer for SSL certificates. Systemd is the default on most Linux distributions and does a good enough job.
+trying to get your app in production, you probably went through this. I'm using caddy instead of nginx because it's configurable via an API and it's is a no-brainer for SSL certificates. Systemd is the default on most Linux distributions and does a good enough job.
 
 Fujin was initially planned to be a Python-only project, but the core concepts can be applied to any language that can produce a single distributable file (e.g., Go, Rust). I wanted to recreate kamal's nice local-to-remote app management API, but I'm skipping Docker to keep things simple. 
 I'm currently rocking SQLite in production for my side projects and ths setup is enough for my use case.

@@ -1,4 +1,4 @@
-Proxy
+proxy
 ======
 
 .. cappa:: fujin.commands.proxy.Proxy

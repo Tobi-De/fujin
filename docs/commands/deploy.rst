@@ -1,4 +1,4 @@
-Deploy
+deploy
 ======
 
 

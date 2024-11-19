@@ -599,7 +599,7 @@ wheels = [
 
 [[package]]
 name = "fujin-cli"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "cappa" },
@@ -624,6 +624,7 @@ docs = [
     { name = "sphinx-autodoc2" },
     { name = "sphinx-copybutton" },
     { name = "sphinx-design" },
+    { name = "sphinx-togglebutton" },
 ]
 
 [package.metadata]
@@ -650,6 +651,7 @@ docs = [
     { name = "sphinx-autodoc2", specifier = ">=0.5" },
     { name = "sphinx-copybutton" },
     { name = "sphinx-design" },
+    { name = "sphinx-togglebutton", specifier = ">=0.3.2" },
 ]
 
 [[package]]
@@ -1796,6 +1798,15 @@ wheels = [
 ]
 
 [[package]]
+name = "setuptools"
+version = "75.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c8/db/722a42ffdc226e950c4757b3da7b56ff5c090bb265dccd707f7b8a3c6fee/setuptools-75.5.0.tar.gz", hash = "sha256:5c4ccb41111392671f02bb5f8436dfc5a9a7185e80500531b133f5775c4163ef", size = 1336032 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fe/df/88ccbee85aefbca071db004fdc8f8d2507d55d5a9dc27ebb93c92edb1bd8/setuptools-75.5.0-py3-none-any.whl", hash = "sha256:87cb777c3b96d638ca02031192d40390e0ad97737e27b6b4fa831bea86f2f829", size = 1222710 },
+]
+
+[[package]]
 name = "shibuya"
 version = "2024.10.15"
 source = { registry = "https://pypi.org/simple" }
@@ -1924,6 +1935,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2b/69/b34e0cb5336f09c6866d53b4a19d76c227cdec1bbc7ac4de63ca7d58c9c7/sphinx_design-0.6.1.tar.gz", hash = "sha256:b44eea3719386d04d765c1a8257caca2b3e6f8421d7b3a5e742c0fd45f84e632", size = 2193689 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c6/43/65c0acbd8cc6f50195a3a1fc195c404988b15c67090e73c7a41a9f57d6bd/sphinx_design-0.6.1-py3-none-any.whl", hash = "sha256:b11f37db1a802a183d61b159d9a202314d4d2fe29c163437001324fe2f19549c", size = 2215338 },
+]
+
+[[package]]
+name = "sphinx-togglebutton"
+version = "0.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "docutils" },
+    { name = "setuptools" },
+    { name = "sphinx" },
+    { name = "wheel" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/df/d151dfbbe588116e450ca7e898750cb218dca6b2e557ced8de6f9bd7242b/sphinx-togglebutton-0.3.2.tar.gz", hash = "sha256:ab0c8b366427b01e4c89802d5d078472c427fa6e9d12d521c34fa0442559dc7a", size = 8324 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/18/267ce39f29d26cdc7177231428ba823fe5ca94db8c56d1bed69033b364c8/sphinx_togglebutton-0.3.2-py3-none-any.whl", hash = "sha256:9647ba7874b7d1e2d43413d8497153a85edc6ac95a3fea9a75ef9c1e08aaae2b", size = 8249 },
 ]
 
 [[package]]
@@ -2286,6 +2312,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/67/33/ae82a7b860fa8a08aba68818bdf7ff61f04598aa5ab96df4cd5a3e418ca4/websockets-13.1-pp310-pypy310_pp73-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:004280a140f220c812e65f36944a9ca92d766b6cc4560be652a0a3883a79ed8a", size = 156654 },
     { url = "https://files.pythonhosted.org/packages/63/0b/a1b528d36934f833e20f6da1032b995bf093d55cb416b9f2266f229fb237/websockets-13.1-pp310-pypy310_pp73-win_amd64.whl", hash = "sha256:e2620453c075abeb0daa949a292e19f56de518988e079c36478bacf9546ced23", size = 159192 },
     { url = "https://files.pythonhosted.org/packages/56/27/96a5cd2626d11c8280656c6c71d8ab50fe006490ef9971ccd154e0c42cd2/websockets-13.1-py3-none-any.whl", hash = "sha256:a9a396a6ad26130cdae92ae10c36af09d9bfe6cafe69670fd3b6da9b07b4044f", size = 152134 },
+]
+
+[[package]]
+name = "wheel"
+version = "0.45.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e7/52/fd4516fb8f7d11a08e3f9cd69eb1558f098ab67e79f32d920c4974ee550f/wheel-0.45.0.tar.gz", hash = "sha256:a57353941a3183b3d5365346b567a260a0602a0f8a635926a7dede41b94c674a", size = 107426 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/81/65ae90d584a73ca976d8f1eb83e2f58447a4055a9fb3ae69b28721070bdf/wheel-0.45.0-py3-none-any.whl", hash = "sha256:52f0baa5e6522155090a09c6bd95718cc46956d1b51d537ea5454249edb671c7", size = 72497 },
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-App
+app
 ===
 
 .. cappa:: fujin.commands.app.App

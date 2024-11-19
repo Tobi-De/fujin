@@ -1,4 +1,4 @@
-Init
+init
 ====
 
 .. cappa:: fujin.commands.init.Init

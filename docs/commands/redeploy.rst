@@ -1,4 +1,4 @@
-Redeploy
+redeploy
 ========
 
 .. cappa:: fujin.commands.redeploy.Redeploy

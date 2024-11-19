@@ -1,4 +1,4 @@
-Rollback
+rollback
 ========
 
 .. cappa:: fujin.commands.rollback.Rollback

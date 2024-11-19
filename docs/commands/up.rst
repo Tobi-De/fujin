@@ -1,4 +1,4 @@
-Up
+up
 ==
 
 .. cappa:: fujin.commands.up.Up
