@@ -28,7 +28,7 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
 
 8. **Completion**: A success message is displayed, and the URL to access the deployed project is provided.
 
-Below is an example file layout and structure of the deployed application:
+Below is an example of the layout and structure of a deployed application:
 
 .. tab-set::
 
