@@ -29,10 +29,11 @@ For more details, check out the [documentation📚](https://fujin.oluwatobi.dev/
 ## Why?
 
 I wanted [kamal](https://kamal-deploy.org/) but without Docker, and I thought the idea was fun. At its core, this project automates versions of this [tutorial](https://www.digitalocean.com/community/tutorials/how-to-set-up-django-with-postgres-nginx-and-gunicorn-on-ubuntu). If you've been a Django beginner 
-trying to get your app in production, you probably went through this. I'm using caddy instead of nginx because it's configurable via an API and it's is a no-brainer for SSL certificates. Systemd is the default on most Linux distributions and does a good enough job.
+trying to get your app in production, you probably went through this.
 
-Fujin was initially planned to be a Python-only project, but the core concepts can be applied to any language that can produce a single distributable file (e.g., Go, Rust). I wanted to recreate kamal's nice local-to-remote app management API, but I'm skipping Docker to keep things simple. 
-I'm currently rocking SQLite in production for my side projects and ths setup is enough for my use case.
+I'm using `caddy` here by default instead of `nginx` because it's configurable via an API and it's is a no-brainer for SSL certificates. `Systemd` is the default on most Linux distributions and does a good enough job.
+
+Fujin was initially planned to be a Python-only project, but the core concepts can be applied to any language that can produce a single distributable file (e.g., Go, Rust).
 
 The goal is to automate deployment while leaving you in full control of your Linux box. It's not a CLI PaaS - it's simple and expects you to be able to SSH into your server and troubleshoot if necessary. For beginners, it makes the initial deployment easier while you get your hands dirty with Linux.
 If you need a never-break, worry-free, set-it-and-forget-it setup that auto-scales and does all the magic, fujin probably isn't for you.
