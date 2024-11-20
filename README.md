@@ -1,21 +1,30 @@
 # fujin
 
-[![PyPI - Version](https://img.shields.io/pypi/v/fujin-cli.svg)](https://pypi.org/project/fujin-cli)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/fujin-cli.svg)](https://pypi.org/project/fujin-cli)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/falcopackages/fujin/blob/main/LICENSE.txt)
-[![Status](https://img.shields.io/pypi/status/fujin-cli.svg)](https://pypi.org/project/fujin-cli)
------
-
 > [!IMPORTANT]
 > This package currently contains minimal features and is a work-in-progress
 
 <!-- content:start -->
 
-`fujin` is a simple deployment tool that helps you get your project up and running on a VPS in a few minutes. It manages your app processes using `systemd` and runs your apps behind [caddy](https://caddyserver.com/). For Python projects, 
-it expects your app to be a packaged Python application ideally with a CLI entry point defined. For other languages, you need to provide a self-contained single executable file with all necessary dependencies.
-The main job of `fujin` is to bootstrap your server (installing caddy, etc.), copy the files onto the server with a structure that supports rollback, and automatically generate configs for systemd and caddy that you can manually edit if needed.
+`fujin` is a simple deployment tool that helps you get your project up and running on a VPS in minutes. It manages your app processes using [systemd](https://systemd.io) and runs your apps behind [caddy](https://caddyserver.com).
 
-Check out the [documentation📚](https://fujin.oluwatobi.dev/en/latest/) for installation, features, and usage guides.
+[![Publish Package](https://github.com/falcopackages/fujin/actions/workflows/publish.yml/badge.svg)](https://github.com/falcopackages/fujin/actions/workflows/publish.yml)
+[![PyPI - Version](https://img.shields.io/pypi/v/fujin-cli.svg)](https://pypi.org/project/fujin-cli)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/fujin-cli.svg)](https://pypi.org/project/fujin-cli)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/falcopackages/fujin/blob/main/LICENSE.txt)
+[![Status](https://img.shields.io/pypi/status/fujin-cli.svg)](https://pypi.org/project/fujin-cli)
+
+## Features
+
+- 🚀 One-command server bootstrap
+- 🔄 Deployment rollbacks
+- 🔐 Zero config SSL certificates
+- 🔁 Swappable proxy (default is [caddy](https://caddyserver.com) with [nginx](https://nginx.org/en/) available as an option, can be disabled for pure backend services)
+- 🛠️ Injects secrets into environment variables with support for [Bitwarden](https://bitwarden.com/), [1Password](https://1password.com) and [Lastpass](https://www.lastpass.com/) (WIP)
+- 📝 Automatically generates [systemd](https://systemd.io/) and [caddy](https://caddyserver.com) configurations that can be further customized to suit application needs
+- 👨‍💻 Easily run your application commands and read logs remotely from your shell
+- 🐍 Designed for packaged Python applications or any language that can produce a self-contained binary
+
+For more details, check out the [documentation📚](https://fujin.oluwatobi.dev/en/latest/).
 
 ## Why?
 
