@@ -1,7 +1,7 @@
 # fujin
 
 > [!IMPORTANT]
-> This package currently contains minimal features and is a work-in-progress
+> This tool is currently contains minimal features and is a work-in-progress
 
 <!-- content:start -->
 
@@ -16,13 +16,13 @@
 ## Features
 
 - 🚀 One-command server bootstrap
-- 🔄 Deployment rollbacks
-- 🔐 Zero config SSL certificates
-- 🔁 Swappable proxy (default is [caddy](https://caddyserver.com) with [nginx](https://nginx.org/en/) available as an option, can be disabled for pure backend services)
-- 🛠️ Injects secrets into environment variables with support for [Bitwarden](https://bitwarden.com/), [1Password](https://1password.com) and [Lastpass](https://www.lastpass.com/) (WIP)
-- 📝 Automatically generates [systemd](https://systemd.io/) and [caddy](https://caddyserver.com) configurations that can be further customized to suit application needs
-- 👨‍💻 Easily run your application commands and read logs remotely from your shell
-- 🐍 Designed for packaged Python applications or any language that can produce a self-contained binary
+- 🔄 Rollback broken deployments
+- 🔐 Zero configuration SSL certificates
+- 🔁 Swappable proxy ([caddy](https://caddyserver.com), [nginx](https://nginx.org/en/) and `dummy` to disable proxy)
+- 🛠️ Secrets injection from password managers ([Bitwarden](https://bitwarden.com/), [1Password](https://1password.com), [Lastpass](https://www.lastpass.com/))
+- 📝 Easily customizable `systemd` and `proxy` configurations
+- 👨‍💻 Remote application management and log streaming
+- 🐍 Supports packaged python apps and self-contained binaries
 
 For more details, check out the [documentation📚](https://fujin.oluwatobi.dev/en/latest/).
 
