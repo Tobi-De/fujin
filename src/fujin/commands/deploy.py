@@ -20,6 +20,7 @@ class Deploy(BaseCommand):
         with self.connection() as conn:
             process_manager = self.create_process_manager(conn)
             conn.run(f"mkdir -p {self.app_dir}")
+            conn.run(f"mkdir -p {self.versioned_assets_dir}")
             with conn.cd(self.app_dir):
                 self.create_hook_manager(conn).pre_deploy()
                 self.transfer_files(conn)
@@ -48,16 +49,23 @@ class Deploy(BaseCommand):
     def versioned_assets_dir(self) -> str:
         return f"{self.app_dir}/v{self.config.version}"
 
-    def transfer_files(self, conn: Connection):
+    def transfer_files(self, conn: Connection, skip_requirements: bool = False):
         if not self.config.host.envfile.exists():
             raise cappa.Exit(f"{self.config.host.envfile} not found", code=1)
         conn.put(str(self.config.host.envfile), f"{self.app_dir}/.env")
-        conn.run(f"mkdir -p {self.versioned_assets_dir}")
         distfile_path = self.config.get_distfile_path()
         conn.put(
             str(distfile_path),
             f"{self.versioned_assets_dir}/{distfile_path.name}",
         )
+        if not skip_requirements and self.config.requirements:
+            requirements = Path(self.config.requirements)
+            if not requirements.exists():
+                raise cappa.Exit(f"{self.config.requirements} not found", code=1)
+            conn.put(
+                Path(self.config.requirements).resolve(),
+                f"{self.versioned_assets_dir}/requirements.txt",
+            )
 
     def install_project(
         self, conn: Connection, version: str | None = None, *, skip_setup: bool = False
@@ -71,14 +79,6 @@ class Deploy(BaseCommand):
     def _install_python_package(
         self, conn: Connection, version: str, skip_setup: bool = False
     ):
-        if not skip_setup and self.config.requirements:
-            requirements = Path(self.config.requirements)
-            if not requirements.exists():
-                raise cappa.Exit(f"{self.config.requirements} not found", code=1)
-            conn.put(
-                Path(self.config.requirements).resolve(),
-                f"{self.versioned_assets_dir}/requirements.txt",
-            )
         appenv = f"""
 set -a  # Automatically export all variables
 source .env

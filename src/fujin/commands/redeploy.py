@@ -20,8 +20,9 @@ class Redeploy(BaseCommand):
         with self.app_environment() as conn:
             hook_manager = self.create_hook_manager(conn)
             hook_manager.pre_deploy()
-            deploy.transfer_files(conn)
+            conn.run(f"mkdir -p {deploy.versioned_assets_dir}")
             requirements_copied = self._copy_requirements_if_needed(conn)
+            deploy.transfer_files(conn, skip_requirements=requirements_copied)
             deploy.install_project(conn, skip_setup=requirements_copied)
             deploy.release(conn)
             self.create_process_manager(conn).restart_services()
