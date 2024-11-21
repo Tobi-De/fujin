@@ -8,7 +8,7 @@ import msgspec
 from fujin.config import Config
 from fujin.connection import Connection
 
-CERTBOT_EMAIL = os.getenv("CERTBOT_EMAIL")
+
 
 
 class WebProxy(msgspec.Struct):
@@ -18,6 +18,7 @@ class WebProxy(msgspec.Struct):
     upstream: str
     statics: dict[str, str]
     local_config_dir: Path
+    certbot_email : str | None = None
 
     @property
     def config_file(self) -> Path:
@@ -32,6 +33,7 @@ class WebProxy(msgspec.Struct):
             app_name=config.app_name,
             local_config_dir=config.local_config_dir,
             statics=config.webserver.statics,
+            certbot_email=config.webserver.certbot_email,
         )
 
     def run_pty(self, *args, **kwargs):
@@ -63,13 +65,13 @@ class WebProxy(msgspec.Struct):
         self.run_pty(
             f"sudo ln -sf /etc/nginx/sites-available/{self.app_name}.conf /etc/nginx/sites-enabled/{self.app_name}.conf",
         )
-        if CERTBOT_EMAIL:
+        if self.certbot_email:
             cert_path = f"/etc/letsencrypt/live/{self.domain_name}/fullchain.pem"
             cert_exists = self.run_pty(f"sudo test -f {cert_path}", warn=True).ok
 
             if not cert_exists:
                 self.run_pty(
-                    f"sudo certbot --nginx -d {self.domain_name} --non-interactive --agree-tos --email {CERTBOT_EMAIL} --redirect"
+                    f"sudo certbot --nginx -d {self.domain_name} --non-interactive --agree-tos --email {self.certbot_email} --redirect"
                 )
                 self.config_file.parent.mkdir(exist_ok=True)
                 self.conn.get(

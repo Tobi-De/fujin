@@ -61,6 +61,10 @@ The address where your web application listens for requests. Supports any value 
 - HTTP address (e.g., ``localhost:8000``)
 - Unix socket (e.g., ``unix//run/project.sock``)
 
+certbot_email
+~~~~~~~~~~~~~
+Required when Nginx is used as a proxy, to obtain SSL certificates.
+
 statics
 ~~~~~~~
 
@@ -281,6 +285,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
 class Webserver(msgspec.Struct):
     upstream: str
     type: str = "fujin.proxies.caddy"
+    certbot_email: str | None = None
     statics: dict[str, str] = msgspec.field(default_factory=dict)
 
 
