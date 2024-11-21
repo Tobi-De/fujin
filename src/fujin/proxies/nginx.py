@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import msgspec
 
 from fujin.config import Config
 from fujin.connection import Connection
-
-
 
 
 class WebProxy(msgspec.Struct):
@@ -18,7 +15,7 @@ class WebProxy(msgspec.Struct):
     upstream: str
     statics: dict[str, str]
     local_config_dir: Path
-    certbot_email : str | None = None
+    certbot_email: str | None = None
 
     @property
     def config_file(self) -> Path:
