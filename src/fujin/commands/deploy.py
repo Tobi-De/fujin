@@ -7,6 +7,7 @@ import cappa
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
+from fujin.secrets import resolve_secrets
 from fujin.connection import Connection
 
 
@@ -15,6 +16,7 @@ from fujin.connection import Connection
 )
 class Deploy(BaseCommand):
     def __call__(self):
+        parsed_env = self.parse_envfile()
         self.build_app()
 
         with self.connection() as conn:
@@ -23,7 +25,7 @@ class Deploy(BaseCommand):
             conn.run(f"mkdir -p {self.versioned_assets_dir}")
             with conn.cd(self.app_dir):
                 self.create_hook_manager(conn).pre_deploy()
-                self.transfer_files(conn)
+                self.transfer_files(conn, env=parsed_env)
                 self.install_project(conn)
             with self.app_environment() as app_conn:
                 self.release(app_conn)
@@ -49,10 +51,18 @@ class Deploy(BaseCommand):
     def versioned_assets_dir(self) -> str:
         return f"{self.app_dir}/v{self.config.version}"
 
-    def transfer_files(self, conn: Connection, skip_requirements: bool = False):
+    def parse_envfile(self) -> str:
         if not self.config.host.envfile.exists():
             raise cappa.Exit(f"{self.config.host.envfile} not found", code=1)
-        conn.put(str(self.config.host.envfile), f"{self.app_dir}/.env")
+        if self.config.secret_config:
+            self.stdout.output("[blue]Reading secrets....[/blue]")
+            return resolve_secrets(self.config.host.envfile, self.config.secret_config)
+        return self.config.host.envfile.read_text()
+
+    def transfer_files(
+        self, conn: Connection, env: str, skip_requirements: bool = False
+    ):
+        conn.run(f"echo '{env}' > {self.app_dir}/.env")
         distfile_path = self.config.get_distfile_path()
         conn.put(
             str(distfile_path),

@@ -1,3 +1,7 @@
+from gevent import monkey
+
+monkey.patch_all()
+
 import shlex
 import sys
 from pathlib import Path
@@ -16,6 +20,7 @@ from fujin.commands.redeploy import Redeploy
 from fujin.commands.rollback import Rollback
 from fujin.commands.server import Server
 from fujin.commands.up import Up
+from fujin.commands.printenv import Printenv
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -38,6 +43,7 @@ class Fujin:
         | Down
         | Rollback
         | Prune
+        | Printenv
     ]
 
 

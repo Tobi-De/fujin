@@ -15,10 +15,10 @@ Commands
    docs
    down
    init
+   printenv
    prune
    proxy
    redeploy
    rollback
-   secrets
    server
    up

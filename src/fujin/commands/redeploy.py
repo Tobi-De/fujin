@@ -15,6 +15,7 @@ from fujin.connection import Connection
 class Redeploy(BaseCommand):
     def __call__(self):
         deploy = Deploy()
+        parsed_env = deploy.parse_envfile()
         deploy.build_app()
 
         with self.app_environment() as conn:
@@ -22,7 +23,9 @@ class Redeploy(BaseCommand):
             hook_manager.pre_deploy()
             conn.run(f"mkdir -p {deploy.versioned_assets_dir}")
             requirements_copied = self._copy_requirements_if_needed(conn)
-            deploy.transfer_files(conn, skip_requirements=requirements_copied)
+            deploy.transfer_files(
+                conn, env=parsed_env, skip_requirements=requirements_copied
+            )
             deploy.install_project(conn, skip_setup=requirements_copied)
             deploy.release(conn)
             self.create_process_manager(conn).restart_services()

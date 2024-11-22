@@ -19,7 +19,7 @@
 - 🔄 Rollback broken deployments
 - 🔐 Zero configuration SSL certificates
 - 🔁 Swappable proxy ([caddy](https://caddyserver.com), [nginx](https://nginx.org/en/) and `dummy` to disable proxy)
-- 🛠️ Secrets injection from password managers ([Bitwarden](https://bitwarden.com/), [1Password](https://1password.com), [Lastpass](https://www.lastpass.com/))
+- 🛠️ Secrets injection from password managers ([Bitwarden](https://bitwarden.com/), [1Password](https://1password.com), etc.)
 - 📝 Easily customizable `systemd` and `proxy` configurations
 - 👨‍💻 Remote application management and log streaming
 - 🐍 Supports packaged python apps and self-contained binaries
