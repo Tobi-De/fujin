@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 
 import cappa
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Confirm
+from rich.prompt import Prompt
 
 from fujin.commands import BaseCommand
 from fujin.commands.deploy import Deploy

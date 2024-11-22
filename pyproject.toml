@@ -116,12 +116,12 @@ lint.select = [
   "B",  # flake8-bugbear
   "E",  # Pycodestyle
   "F",  # Pyflakes
-  "I",  # isort
   "UP", # pyupgrade
 ]
 lint.ignore = [
   "E501",
   "E741",
+  "I",    # isort
 ] # temporary
 # Tests can use magic values, assertions, and relative imports
 lint.per-file-ignores."tests/**/*" = [

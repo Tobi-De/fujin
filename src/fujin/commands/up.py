@@ -1,8 +1,8 @@
 import cappa
-from fujin.commands import BaseCommand
 
 from .deploy import Deploy
 from .server import Server
+from fujin.commands import BaseCommand
 
 
 @cappa.command(help="Run everything required to deploy an application to a fresh host.")

@@ -6,7 +6,8 @@ from functools import cached_property
 import cappa
 
 from fujin.config import Config
-from fujin.connection import host_connection, Connection
+from fujin.connection import Connection
+from fujin.connection import host_connection
 from fujin.errors import ImproperlyConfiguredError
 from fujin.hooks import HookManager
 from fujin.process_managers import ProcessManager

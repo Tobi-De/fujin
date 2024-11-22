@@ -5,8 +5,8 @@ from pathlib import Path
 
 import cappa
 
-from fujin.commands import BaseCommand
 from .deploy import Deploy
+from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 from fujin.connection import Connection
 

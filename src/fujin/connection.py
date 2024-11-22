@@ -8,11 +8,9 @@ import cappa
 from fabric import Connection
 from invoke import Responder
 from invoke.exceptions import UnexpectedExit
-from paramiko.ssh_exception import (
-    AuthenticationException,
-    NoValidConnectionsError,
-    SSHException,
-)
+from paramiko.ssh_exception import AuthenticationException
+from paramiko.ssh_exception import NoValidConnectionsError
+from paramiko.ssh_exception import SSHException
 
 if TYPE_CHECKING:
     from fujin.config import HostConfig

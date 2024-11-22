@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-import gevent
-from dotenv import dotenv_values
 from typing import Callable
 
-from fujin.config import SecretConfig, SecretAdapter
+import gevent
+from dotenv import dotenv_values
+
 from .bitwarden import bitwarden
 from .onepassword import one_password
+from fujin.config import SecretAdapter
+from fujin.config import SecretConfig
 
 
 secret_reader = Callable[[str], str]

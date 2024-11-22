@@ -7,8 +7,8 @@ import cappa
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
-from fujin.secrets import resolve_secrets
 from fujin.connection import Connection
+from fujin.secrets import resolve_secrets
 
 
 @cappa.command(

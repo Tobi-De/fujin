@@ -1,12 +1,13 @@
 from __future__ import annotations
+
+import subprocess
+from contextlib import contextmanager
+from typing import Generator
+from typing import TYPE_CHECKING
+
 import cappa
 
-
 from fujin.config import SecretConfig
-import subprocess
-
-from contextlib import contextmanager
-from typing import Generator, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from . import secret_reader

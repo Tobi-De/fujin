@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 
-from fujin.connection import Connection
 from rich import print as rich_print
+
+from fujin.connection import Connection
 
 try:
     from enum import StrEnum

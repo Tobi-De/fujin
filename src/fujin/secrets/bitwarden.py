@@ -1,12 +1,14 @@
 from __future__ import annotations
-import cappa
+
 import os
-
-
-from fujin.config import SecretConfig
 import subprocess
 from contextlib import contextmanager
-from typing import Generator, TYPE_CHECKING
+from typing import Generator
+from typing import TYPE_CHECKING
+
+import cappa
+
+from fujin.config import SecretConfig
 
 if TYPE_CHECKING:
     from . import secret_reader
@@ -25,7 +27,16 @@ def bitwarden(secret_config: SecretConfig) -> Generator[secret_reader, None, Non
 
     def read_secret(name: str) -> str:
         result = subprocess.run(
-            ["bw", "get", "password", name, "--raw", "--session", session, "--nointeraction"],
+            [
+                "bw",
+                "get",
+                "password",
+                name,
+                "--raw",
+                "--session",
+                session,
+                "--nointeraction",
+            ],
             capture_output=True,
             text=True,
         )

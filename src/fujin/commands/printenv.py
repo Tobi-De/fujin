@@ -10,7 +10,9 @@ from fujin.secrets import resolve_secrets
 class Printenv(BaseCommand):
     def __call__(self):
         if self.config.secret_config:
-            result = resolve_secrets(self.config.host.envfile, self.config.secret_config)
+            result = resolve_secrets(
+                self.config.host.envfile, self.config.secret_config
+            )
         else:
             result = self.config.host.envfile.read_text()
         self.stdout.output(result)
