@@ -4,12 +4,11 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.7.0] - 2024-11-22
 
 ### 🚀 Features
 
-- Inject secrets via 1password
-- Inject secrets via bitwarden
+- Inject secrets via bitwarden and 1password (#29)
 - Add certbot_email configuration for nginx
 
 ### 🚜 Refactor
