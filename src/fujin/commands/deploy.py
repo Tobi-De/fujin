@@ -100,6 +100,7 @@ export PATH=".venv/bin:$PATH"
         conn.run(f"echo '{appenv.strip()}' > {self.app_dir}/.appenv")
         versioned_assets_dir = f"{self.app_dir}/v{version}"
         if not skip_setup:
+            conn.run("rm -rf .venv")
             conn.run("uv venv")
             if self.config.requirements:
                 conn.run(f"uv pip install -r {versioned_assets_dir}/requirements.txt")
