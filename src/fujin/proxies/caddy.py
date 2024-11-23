@@ -166,7 +166,8 @@ class WebProxy(msgspec.Struct):
         new_routes = [r for r in existing_routes if r.get("group") != self.app_name]
         current_config["routes"] = new_routes
         self.conn.run(
-            f"curl localhost:2019/config/apps/http/servers/srv0 -H 'Content-Type: application/json' -d '{json.dumps(current_config)}'"
+            f"curl localhost:2019/config/apps/http/servers/srv0 -H 'Content-Type: application/json' -d '{json.dumps(current_config)}'",
+            hide="out",
         )
 
     def start(self) -> None:

@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Drop configurable proxy manager
 
+### ⚡ Performance
+
+- Run systemd commands concurrently using gevent
+
 ## [0.9.0] - 2024-11-23
 
 ### 🚀 Features
