@@ -10,8 +10,8 @@ from fujin.connection import Connection
 from fujin.connection import host_connection
 from fujin.errors import ImproperlyConfiguredError
 from fujin.hooks import HookManager
-from fujin.process_managers import ProcessManager
 from fujin.proxies import WebProxy
+from fujin.systemd import ProcessManager
 
 
 @dataclass
@@ -66,15 +66,5 @@ class BaseCommand:
     def create_web_proxy(self, conn: Connection) -> WebProxy:
         return self.web_proxy_class.create(conn=conn, config=self.config)
 
-    @cached_property
-    def process_manager_class(self) -> type[ProcessManager]:
-        module = importlib.import_module(self.config.process_manager)
-        try:
-            return getattr(module, "ProcessManager")
-        except KeyError as e:
-            raise ImproperlyConfiguredError(
-                f"Missing ProcessManager class in {self.config.process_manager}"
-            ) from e
-
     def create_process_manager(self, conn: Connection) -> ProcessManager:
-        return self.process_manager_class.create(conn=conn, config=self.config)
+        return ProcessManager.create(conn=conn, config=self.config)

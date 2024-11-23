@@ -235,7 +235,6 @@ class Config(msgspec.Struct, kw_only=True):
     aliases: dict[str, str] = msgspec.field(default_factory=dict)
     host: HostConfig
     processes: dict[str, str] = msgspec.field(default_factory=dict)
-    process_manager: str = "fujin.process_managers.systemd"
     webserver: Webserver
     requirements: str | None = None
     hooks: HooksDict = msgspec.field(default_factory=dict)
