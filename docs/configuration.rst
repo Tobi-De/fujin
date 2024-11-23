@@ -13,20 +13,24 @@ This is a minimal working example.
 
     .. tab-item:: python package
 
-        .. jupyter-execute::
-            :hide-code:
+        .. exec_code::
+            :language_output: toml
 
+            # --- hide: start ---
             from fujin.commands.init import simple_config
             from tomli_w import dumps
 
             print(dumps(simple_config("bookstore")))
+            #hide:toggle
 
     .. tab-item:: binary mode
 
-        .. jupyter-execute::
-            :hide-code:
+        .. exec_code::
+            :language_output: toml
 
+            # --- hide: start ---
             from fujin.commands.init import binary_config
             from tomli_w import dumps
 
             print(dumps(binary_config("bookstore")))
+            #hide:toggle

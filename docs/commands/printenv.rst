@@ -1,4 +1,4 @@
-secrets
+printenv
 =======
 
 .. cappa:: fujin.commands.printenv.Printenv

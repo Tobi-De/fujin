@@ -61,13 +61,13 @@ dev = [
   "litestar>=2.12.1",
 ]
 docs = [
-  "jupyter-sphinx>=0.5.3",
   "myst-parser",
   "shibuya",
   "sphinx-autobuild",
   "sphinx-autodoc2>=0.5",
   "sphinx-copybutton",
   "sphinx-design",
+  "sphinx-exec-code>=0.14",
   "sphinx-togglebutton>=0.3.2",
 ]
 

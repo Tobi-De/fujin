@@ -5,7 +5,7 @@ from fujin.secrets import resolve_secrets
 
 
 @cappa.command(
-    help="Print the content of the envfile with extracted secrets (for debugging)"
+    help="Display the contents of the envfile with resolved secrets (for debugging purposes)"
 )
 class Printenv(BaseCommand):
     def __call__(self):

@@ -20,7 +20,7 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx_design",
     "sphinx_copybutton",
-    "jupyter_sphinx",
+    "sphinx_exec_code",
     "sphinx_togglebutton",
 ]
 
