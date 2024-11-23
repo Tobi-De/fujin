@@ -4,11 +4,15 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.9.1] - 2024-11-23
 
 ### 🚜 Refactor
 
 - Drop configurable proxy manager
+
+### 📚 Documentation
+
+- Add links to template systemd service files
 
 ### ⚡ Performance
 
