@@ -20,7 +20,7 @@ This is a minimal working example.
             from fujin.commands.init import simple_config
             from tomli_w import dumps
 
-            print(dumps(simple_config("bookstore")))
+            print(dumps(simple_config("bookstore"),  multiline_strings=True))
             #hide:toggle
 
     .. tab-item:: binary mode
@@ -32,5 +32,5 @@ This is a minimal working example.
             from fujin.commands.init import binary_config
             from tomli_w import dumps
 
-            print(dumps(binary_config("bookstore")))
+            print(dumps(binary_config("bookstore"),  multiline_strings=True))
             #hide:toggle

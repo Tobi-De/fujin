@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
+from contextlib import closing
+from io import StringIO
 from typing import Callable
 
 import gevent
 from dotenv import dotenv_values
 
-from .bitwarden import bitwarden
-from .onepassword import one_password
 from fujin.config import SecretAdapter
 from fujin.config import SecretConfig
-
+from .bitwarden import bitwarden
+from .onepassword import one_password
 
 secret_reader = Callable[[str], str]
 secret_adapter_context = Callable[[SecretConfig], secret_reader]
@@ -21,8 +21,9 @@ adapter_to_context: dict[SecretAdapter, secret_adapter_context] = {
 }
 
 
-def resolve_secrets(envfile: Path, secret_config: SecretConfig) -> str:
-    env_dict = dotenv_values(envfile)
+def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
+    with closing(StringIO(env_content)) as buffer:
+        env_dict = dotenv_values(stream=buffer)
     secrets = {key: value for key, value in env_dict.items() if value.startswith("$")}
     adapter_context = adapter_to_context[secret_config.adapter]
     parsed_secrets = {}

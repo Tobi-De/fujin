@@ -52,15 +52,15 @@ class Deploy(BaseCommand):
         return f"{self.app_dir}/v{self.config.version}"
 
     def parse_envfile(self) -> str:
-        if not self.config.host.envfile.exists():
-            raise cappa.Exit(f"{self.config.host.envfile} not found", code=1)
         if self.config.secret_config:
             self.stdout.output("[blue]Reading secrets....[/blue]")
-            return resolve_secrets(self.config.host.envfile, self.config.secret_config)
-        return self.config.host.envfile.read_text()
+            return resolve_secrets(
+                self.config.host.env_content, self.config.secret_config
+            )
+        return self.config.host.env_content
 
     def transfer_files(
-            self, conn: Connection, env: str, skip_requirements: bool = False
+        self, conn: Connection, env: str, skip_requirements: bool = False
     ):
         conn.run(f"echo '{env}' > {self.app_dir}/.env")
         distfile_path = self.config.get_distfile_path()
@@ -78,7 +78,7 @@ class Deploy(BaseCommand):
             )
 
     def install_project(
-            self, conn: Connection, version: str | None = None, *, skip_setup: bool = False
+        self, conn: Connection, version: str | None = None, *, skip_setup: bool = False
     ):
         version = version or self.config.version
         if self.config.installation_mode == InstallationMode.PY_PACKAGE:
@@ -87,7 +87,7 @@ class Deploy(BaseCommand):
             self._install_binary(conn, version)
 
     def _install_python_package(
-            self, conn: Connection, version: str, skip_setup: bool = False
+        self, conn: Connection, version: str, skip_setup: bool = False
     ):
         appenv = f"""
 set -a  # Automatically export all variables

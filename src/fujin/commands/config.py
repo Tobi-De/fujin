@@ -37,9 +37,17 @@ class ConfigCMD(BaseCommand):
             )
         )
 
+        host_config = {
+            f: getattr(self.config.host, f) for f in self.config.host.__struct_fields__
+        }
+        host_config.pop("_key_filename")
+        host_config.pop("_env_file")
+        host_config.pop("env_content")
+        if self.config.host.key_filename:
+            host_config["key_filename"] = self.config.host.key_filename
+        host_config["env_content"] = self.config.host.env_content
         host_config_text = "\n".join(
-            f"[dim]{key}:[/dim] {value}"
-            for key, value in self.config.host.to_dict().items()
+            f"[dim]{key}:[/dim] {value}" for key, value in host_config.items()
         )
         console.print(
             Panel(

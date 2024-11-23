@@ -31,7 +31,7 @@ class Init(BaseCommand):
         }
         app_name = Path().resolve().stem.replace("-", "_").replace(" ", "_").lower()
         config = profile_to_func[self.profile](app_name)
-        fujin_toml.write_text(tomli_w.dumps(config))
+        fujin_toml.write_text(tomli_w.dumps(config, multiline_strings=True))
         self.stdout.output(
             "[green]Sample configuration file generated successfully![/green]"
         )
@@ -57,7 +57,7 @@ def simple_config(app_name) -> dict:
         "host": {
             "user": "root",
             "domain_name": f"{app_name}.com",
-            "envfile": ".env.prod",
+            "env_content": f"DEBUG=False\nALLOWED_HOSTS={app_name}.com\n",
         },
     }
     if not Path(".python-version").exists():

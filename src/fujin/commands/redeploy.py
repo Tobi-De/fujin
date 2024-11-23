@@ -34,8 +34,8 @@ class Redeploy(BaseCommand):
 
     def _copy_requirements_if_needed(self, conn: Connection) -> bool:
         if (
-                not self.config.requirements
-                or self.config.installation_mode == InstallationMode.BINARY
+            not self.config.requirements
+            or self.config.installation_mode == InstallationMode.BINARY
         ):
             return False
         local_requirements = hashlib.md5(
