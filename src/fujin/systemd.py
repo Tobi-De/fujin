@@ -4,6 +4,8 @@ import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 
+import gevent
+
 from fujin.config import Config
 from fujin.connection import Connection
 
@@ -54,11 +56,23 @@ class ProcessManager:
                 hide="out",
             )
 
+        threads = []
         for name in self.processes:
             if name == "web" and self.is_using_unix_socket:
-                self.run_pty(f"sudo systemctl enable --now {self.app_name}.socket")
+                threads.append(
+                    gevent.spawn(
+                        self.run_pty,
+                        f"sudo systemctl enable --now {self.app_name}.socket",
+                    )
+                )
             else:
-                self.run_pty(f"sudo systemctl enable {self.get_service_name(name)}")
+                threads.append(
+                    gevent.spawn(
+                        self.run_pty,
+                        f"sudo systemctl enable {self.get_service_name(name)}",
+                    )
+                )
+        gevent.joinall(threads)
 
     def get_configuration_files(
         self, ignore_local: bool = False
@@ -105,46 +119,67 @@ class ProcessManager:
 
     def uninstall_services(self) -> None:
         self.stop_services()
-        for name in self.service_names:
-            self.run_pty(f"sudo systemctl disable {name}", warn=True)
-            self.run_pty(f"sudo rm /etc/systemd/system/{name}", warn=True)
+        threads = [
+            gevent.spawn(self.run_pty, f"sudo systemctl disable {name}", warn=True)
+            for name in self.service_names
+        ]
+        gevent.joinall(threads)
+        files_to_delete = [f"/etc/systemd/system/{name}" for name in self.service_names]
+        self.run_pty(f"sudo rm {' '.join(files_to_delete)}", warn=True)
 
     def start_services(self, *names) -> None:
         names = names or self.service_names
-        for name in names:
-            if name in self.service_names:
-                self.run_pty(f"sudo systemctl start {name}")
+        threads = [
+            gevent.spawn(self.run_pty, f"sudo systemctl start {name}")
+            for name in names
+            if name in self.service_names
+        ]
+        gevent.joinall(threads)
 
     def restart_services(self, *names) -> None:
         names = names or self.service_names
-        for name in names:
-            if name in self.service_names:
-                self.run_pty(f"sudo systemctl restart {name}")
+        threads = [
+            gevent.spawn(self.run_pty, f"sudo systemctl restart {name}")
+            for name in names
+            if name in self.service_names
+        ]
+        gevent.joinall(threads)
 
     def stop_services(self, *names) -> None:
         names = names or self.service_names
-        for name in names:
-            if name in self.service_names:
-                self.run_pty(f"sudo systemctl stop {name}")
+        threads = [
+            gevent.spawn(self.run_pty, f"sudo systemctl stop {name}")
+            for name in names
+            if name in self.service_names
+        ]
+        gevent.joinall(threads)
 
     def is_enabled(self, *names) -> dict[str, bool]:
         names = names or self.service_names
-        return {
-            name: self.run_pty(
-                f"sudo systemctl is-enabled {name}", warn=True, hide=True
-            ).stdout.strip()
-            == "enabled"
+        threads = {
+            name: gevent.spawn(
+                self.run_pty, f"sudo systemctl is-enabled {name}", warn=True, hide=True
+            )
             for name in names
+        }
+        gevent.joinall(threads.values())
+        return {
+            name: thread.value.stdout.strip() == "enabled"
+            for name, thread in threads.items()
         }
 
     def is_active(self, *names) -> dict[str, bool]:
         names = names or self.service_names
-        return {
-            name: self.run_pty(
-                f"sudo systemctl is-active {name}", warn=True, hide=True
-            ).stdout.strip()
-            == "active"
+        threads = {
+            name: gevent.spawn(
+                self.run_pty, f"sudo systemctl is-active {name}", warn=True, hide=True
+            )
             for name in names
+        }
+        gevent.joinall(threads.values())
+        return {
+            name: thread.value.stdout.strip() == "active"
+            for name, thread in threads.items()
         }
 
     def service_logs(self, name: str, follow: bool = False):
