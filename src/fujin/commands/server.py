@@ -23,8 +23,6 @@ class Server(BaseCommand):
     @cappa.command(help="Setup uv, web proxy, and install necessary dependencies")
     def bootstrap(self):
         with self.connection() as conn:
-            hook_manager = self.create_hook_manager(conn)
-            hook_manager.pre_bootstrap()
             conn.run("sudo apt update && sudo apt upgrade -y", pty=True)
             conn.run("sudo apt install -y sqlite3 curl rsync", pty=True)
             result = conn.run("command -v uv", warn=True)
@@ -33,7 +31,6 @@ class Server(BaseCommand):
                 conn.run("uv tool update-shell")
             conn.run("uv tool install fastfetch-bin-edge")
             self.create_web_proxy(conn).install()
-            hook_manager.post_bootstrap()
             self.stdout.output(
                 "[green]Server bootstrap completed successfully![/green]"
             )

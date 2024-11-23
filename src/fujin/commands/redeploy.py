@@ -5,22 +5,21 @@ from pathlib import Path
 
 import cappa
 
-from .deploy import Deploy
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 from fujin.connection import Connection
+from .deploy import Deploy
 
 
 @cappa.command(help="Redeploy the application to apply code and environment changes")
 class Redeploy(BaseCommand):
     def __call__(self):
         deploy = Deploy()
+        self.hook_manager.pre_build()
         parsed_env = deploy.parse_envfile()
         deploy.build_app()
-
+        self.hook_manager.pre_deploy()
         with self.app_environment() as conn:
-            hook_manager = self.create_hook_manager(conn)
-            hook_manager.pre_deploy()
             conn.run(f"mkdir -p {deploy.versioned_assets_dir}")
             requirements_copied = self._copy_requirements_if_needed(conn)
             deploy.transfer_files(
@@ -30,13 +29,13 @@ class Redeploy(BaseCommand):
             deploy.release(conn)
             self.create_process_manager(conn).restart_services()
             deploy.update_version_history(conn)
-            hook_manager.post_deploy()
-            self.stdout.output("[green]Redeployment completed successfully![/green]")
+        self.hook_manager.post_deploy()
+        self.stdout.output("[green]Redeployment completed successfully![/green]")
 
     def _copy_requirements_if_needed(self, conn: Connection) -> bool:
         if (
-            not self.config.requirements
-            or self.config.installation_mode == InstallationMode.BINARY
+                not self.config.requirements
+                or self.config.installation_mode == InstallationMode.BINARY
         ):
             return False
         local_requirements = hashlib.md5(

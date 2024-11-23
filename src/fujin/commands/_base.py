@@ -33,6 +33,14 @@ class BaseCommand:
     def app_dir(self) -> str:
         return self.config.host.get_app_dir(app_name=self.config.app_name)
 
+    @cached_property
+    def hook_manager(self) -> HookManager:
+        return HookManager(
+            hooks=self.config.hooks,
+            app_name=self.config.app_name,
+            local_config_dir=self.config.local_config_dir,
+        )
+
     @contextmanager
     def connection(self):
         with host_connection(host=self.config.host) as conn:
@@ -70,8 +78,3 @@ class BaseCommand:
 
     def create_process_manager(self, conn: Connection) -> ProcessManager:
         return self.process_manager_class.create(conn=conn, config=self.config)
-
-    def create_hook_manager(self, conn: Connection) -> HookManager:
-        return HookManager(
-            conn=conn, hooks=self.config.hooks, app_name=self.config.app_name
-        )

@@ -33,8 +33,6 @@ class Down(BaseCommand):
         if not confirm:
             return
         with self.connection() as conn:
-            hook_manager = self.create_hook_manager(conn)
-            hook_manager.pre_teardown()
             process_manager = self.create_process_manager(conn)
             conn.run(f"rm -rf {self.app_dir}")
             self.create_web_proxy(conn).teardown()
@@ -42,7 +40,6 @@ class Down(BaseCommand):
             process_manager.reload_configuration()
             if self.full:
                 self.create_web_proxy(conn).uninstall()
-            hook_manager.post_teardown()
             self.stdout.output(
                 "[green]Project teardown completed successfully![/green]"
             )

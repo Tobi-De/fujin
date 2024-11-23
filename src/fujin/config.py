@@ -176,6 +176,9 @@ Example:
     dbconsole = "app exec -i dbshell" # open an interactive django database shell
     shell = "server exec --appenv -i bash" # SSH into the project directory with environment variables loaded
 
+hooks
+-----
+Run custom scripts at specific points with hooks. Check out the `secrets </hooks.html>`_ page for more information.
 
 """
 

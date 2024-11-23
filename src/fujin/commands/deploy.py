@@ -16,15 +16,15 @@ from fujin.secrets import resolve_secrets
 )
 class Deploy(BaseCommand):
     def __call__(self):
+        self.hook_manager.pre_build()
         parsed_env = self.parse_envfile()
         self.build_app()
-
+        self.hook_manager.pre_deploy()
         with self.connection() as conn:
             process_manager = self.create_process_manager(conn)
             conn.run(f"mkdir -p {self.app_dir}")
             conn.run(f"mkdir -p {self.versioned_assets_dir}")
             with conn.cd(self.app_dir):
-                self.create_hook_manager(conn).pre_deploy()
                 self.transfer_files(conn, env=parsed_env)
                 self.install_project(conn)
             with self.app_environment() as app_conn:
@@ -35,7 +35,7 @@ class Deploy(BaseCommand):
                 self.create_web_proxy(app_conn).setup()
                 self.update_version_history(app_conn)
                 self.prune_assets(app_conn)
-            self.create_hook_manager(conn).post_deploy()
+        self.hook_manager.post_deploy()
         self.stdout.output("[green]Project deployment completed successfully![/green]")
         self.stdout.output(
             f"[blue]Access the deployed project at: https://{self.config.host.domain_name}[/blue]"
@@ -60,7 +60,7 @@ class Deploy(BaseCommand):
         return self.config.host.envfile.read_text()
 
     def transfer_files(
-        self, conn: Connection, env: str, skip_requirements: bool = False
+            self, conn: Connection, env: str, skip_requirements: bool = False
     ):
         conn.run(f"echo '{env}' > {self.app_dir}/.env")
         distfile_path = self.config.get_distfile_path()
@@ -78,7 +78,7 @@ class Deploy(BaseCommand):
             )
 
     def install_project(
-        self, conn: Connection, version: str | None = None, *, skip_setup: bool = False
+            self, conn: Connection, version: str | None = None, *, skip_setup: bool = False
     ):
         version = version or self.config.version
         if self.config.installation_mode == InstallationMode.PY_PACKAGE:
@@ -87,7 +87,7 @@ class Deploy(BaseCommand):
             self._install_binary(conn, version)
 
     def _install_python_package(
-        self, conn: Connection, version: str, skip_setup: bool = False
+            self, conn: Connection, version: str, skip_setup: bool = False
     ):
         appenv = f"""
 set -a  # Automatically export all variables
