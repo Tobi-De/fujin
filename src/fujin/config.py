@@ -116,6 +116,11 @@ Example:
 .. note::
 
     Commands are relative to your ``app_dir``. When generating systemd service files, the full path is automatically constructed.
+    Here are the templates for the service files:
+
+    - `web.service <https://github.com/falcopackages/fujin/blob/main/src/fujin/templates/web.service>`_
+    - `web.socket <https://github.com/falcopackages/fujin/blob/main/src/fujin/templates/web.socket>`_
+    - `simple.service <https://github.com/falcopackages/fujin/blob/main/src/fujin/templates/simple.service>`_ (for all additional processes)
 
 Host Configuration
 -------------------
