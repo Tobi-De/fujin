@@ -7,7 +7,7 @@ requires = [
 
 [project]
 name = "fujin-cli"
-version = "0.7.1"
+version = "0.8.0"
 description = "Get your project up and running in a few minutes on your own vps."
 readme = "README.md"
 keywords = [
@@ -154,7 +154,7 @@ lint.isort.required-imports = [
 lint.pyupgrade.keep-runtime-typing = true
 
 [tool.bumpversion]
-current_version = "0.7.1"
+current_version = "0.8.0"
 parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
 serialize = [
   "{major}.{minor}.{patch}",
