@@ -1,8 +1,9 @@
 Tutorial
 ========
 
+In this tutorial, you will deploy a Django project or a PocketBase binary (in binary mode) to a Linux server running Ubuntu using the ``fujin`` CLI.
+
 First, make sure you follow the `installation </installation.html>`_ instructions and have the ``fujin`` command available globally in your shell.
-``fujin`` allows you to interact with your remote server and your deployed apps from your local shell.
 
 Prerequisites
 -------------
@@ -298,31 +299,33 @@ Now that your project is ready, run the commands below to deploy for the first t
     fujin up
 
 The first time, the process can take a few minutes. At the end of it, you should have a link to your deployed app.
-A few notable commands:
 
-.. code-block:: shell
-    :caption: Deploy an app on a host where fujin has already been set up
+.. admonition:: A few notable commands
+    :class: note dropdown
 
-    fujin deploy
+    .. code-block:: shell
+        :caption: Deploy an app on a host where ``fujin`` has already been set up
 
-You also use the ``deploy`` command when you have changed the fujin config or exported configs:
+        fujin deploy
 
-.. code-block:: shell
-    :caption: Export the systemd config being used so that you can edit them
+    You also use the ``deploy`` command when you have changed the ``fujin`` config or exported configs:
 
-    fujin app export-config
+    .. code-block:: shell
+        :caption: Export the systemd config being used so that you can edit them
 
-.. code-block:: shell
-    :caption: Export the webserver config, in this case, caddy
+        fujin app export-config
 
-    fujin proxy export-config
+    .. code-block:: shell
+        :caption: Export the webserver config, in this case, caddy
 
-and the command you'll probably be running the most:
+        fujin proxy export-config
 
-.. code-block:: shell
-    :caption: When you've only made code and envfile related changes
+    and the command you'll probably be running the most:
 
-    fujin redeploy
+    .. code-block:: shell
+        :caption: When you've only made code and envfile related changes
+
+        fujin redeploy
 
 FAQ
 ---
