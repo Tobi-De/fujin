@@ -20,4 +20,4 @@ Here is an example of how to install the binary on x86 macOS:
 
 .. note::
 
-    If you install ``fujin`` via the GitHub release, you can keep it up to date with ``fujin self update``.
+    If you install ``fujin`` using the binary file, you can keep it up to date with ``fujin self update``.

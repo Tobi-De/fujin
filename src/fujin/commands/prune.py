@@ -8,7 +8,7 @@ from fujin.commands import BaseCommand
 
 
 @cappa.command(
-    help="Prune old version artifacts, keeping only the specified number of recent versions"
+    help="Prune old artifacts, keeping only the specified number of recent versions"
 )
 @dataclass
 class Prune(BaseCommand):
