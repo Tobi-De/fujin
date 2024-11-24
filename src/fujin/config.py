@@ -55,6 +55,7 @@ The secret management service to use. Available options:
 
 - ``bitwarden``
 - ``1password``
+- ``doppler``
 
 password_env
 ~~~~~~~~~~~~
@@ -221,6 +222,7 @@ class InstallationMode(StrEnum):
 class SecretAdapter(StrEnum):
     BITWARDEN = "bitwarden"
     ONE_PASSWORD = "1password"
+    DOPPLER = "doppler"
 
 
 class SecretConfig(msgspec.Struct):

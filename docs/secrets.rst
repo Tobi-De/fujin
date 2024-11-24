@@ -47,4 +47,26 @@ Update your ``fujin.toml`` file with the following configuration:
 
     DEBUG=False  
     AWS_ACCESS_KEY_ID=$op://personal/aws-access-key-id/password  
-    AWS_SECRET_ACCESS_KEY=$op://personal/aws-secret-access-key/password  
+    AWS_SECRET_ACCESS_KEY=$op://personal/aws-secret-access-key/password
+
+Doppler
+-------
+
+Download and install the `Doppler CLI <https://docs.doppler.com/docs/cli>`_, and sign in to your account.
+Move to your project root directory and run ``doppler setup`` to configure your project.
+
+Update your ``fujin.toml`` file with the following configuration:
+
+.. code-block:: toml
+
+    [secrets]
+    adapter = "doppler"
+
+.. code-block:: text
+    :caption: Example of an environment file with doppler secrets
+
+    DEBUG=False
+    AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+
+

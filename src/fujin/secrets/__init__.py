@@ -10,6 +10,7 @@ from dotenv import dotenv_values
 from fujin.config import SecretAdapter
 from fujin.config import SecretConfig
 from .bitwarden import bitwarden
+from .dopppler import doppler
 from .onepassword import one_password
 
 secret_reader = Callable[[str], str]
@@ -18,6 +19,7 @@ secret_adapter_context = Callable[[SecretConfig], ContextManager[secret_reader]]
 adapter_to_context: dict[SecretAdapter, secret_adapter_context] = {
     SecretAdapter.BITWARDEN: bitwarden,
     SecretAdapter.ONE_PASSWORD: one_password,
+    SecretAdapter.DOPPLER: doppler,
 }
 
 
