@@ -57,7 +57,7 @@ def simple_config(app_name) -> dict:
         "host": {
             "user": "root",
             "domain_name": f"{app_name}.com",
-            "env_content": f"DEBUG=False\nALLOWED_HOSTS={app_name}.com\n",
+            "envfile": ".env.prod",
         },
     }
     if not Path(".python-version").exists():
