@@ -49,9 +49,10 @@ Let's start by installing and initializing a simple Django project.
 The ``uv init --package`` command makes your project mostly ready to be used with ``fujin``. It initializes a `packaged application <https://docs.astral.sh/uv/concepts/projects/#packaged-applications>`_ using uv,
 meaning the app can be packaged and distributed (e.g: via PyPI) and defines an entry point, which are the two requirements of ``fujin``.
 
-This is the content you'll get in the ``pyproject.toml`` file, with the relevant parts highlighted.
+This is the content you'll get in the **pyproject.toml** file, with the relevant parts highlighted.
 
 .. code-block:: toml
+    :caption: fujin.toml
     :linenos:
     :emphasize-lines: 15-16,18-20
 
@@ -76,38 +77,39 @@ This is the content you'll get in the ``pyproject.toml`` file, with the relevant
     requires = ["hatchling"]
     build-backend = "hatchling.build"
 
-The ``build-system`` section is what allows us to build our project into a wheel file (Python package format), and the ``project.scripts`` defines a CLI entry point for our app.
+The *build-system* section is what allows us to build our project into a wheel file (Python package format), and the *project.scripts* defines a CLI entry point for our app.
 This means that if our app is installed (either with ``pip install`` or ``uv tool install``, for example), there will be a ``bookstore`` command available globally on our system to run the project.
 
 .. note::
 
-    If you are installing it in a virtual environment, then there will be a file ``.venv/bin/bookstore`` that will run this CLI entry point. This is what ``fujin`` expects internally.
-    When it deploys your Python project, it sets up and installs a virtual environment in the app directory in a ``.venv`` folder and expects this entry point to be able to run
+    If you are installing it in a virtual environment, then there will be a file **.venv/bin/bookstore** that will run this CLI entry point. This is what ``fujin`` expects internally.
+    When it deploys your Python project, it sets up and installs a virtual environment in the app directory in a **.venv** folder and expects this entry point to be able to run
     commands with the ``fujin app exec <command>`` command.
 
-Currently, our entry point will run the main function in the ``src/bookstore/__init__.py`` file. Let's change that.
+Currently, our entry point will run the main function in the **src/bookstore/__init__.py** file. Let's change that.
 
 .. code-block:: shell
 
     rm -r src
     mv manage.py bookstore/__main__.py
 
-We first remove the ``src`` folder, as we won't use that since our Django project will reside in the top-level ``bookstore`` folder. I also recommend keeping all
+We first remove the **src** folder, as we won't use that since our Django project will reside in the top-level **bookstore** folder. I also recommend keeping all
 your Django code in that folder, including new apps, as this makes things easier for packaging purposes.
-Then we move the ``manage.py`` file to the ``bookstore`` folder and rename it to ``__main__.py``. This enables us to do this:
+Then we move the **manage.py** file to the **bookstore** folder and rename it to **__main__.py**. This enables us to do this:
 
 .. code-block:: shell
 
     uv run bookstore migrate # equivalent to python manage.py migrate if we kept the manage.py file
 
-Now to finish, update the ``scripts`` section in your ``pyproject.toml`` file.
+Now to finish, update the *scripts* section in your **pyproject.toml** file.
 
 .. code-block:: toml
+    :caption: fujin.toml
 
     [project.scripts]
     bookstore = "bookstore.__main__:main"
 
-Now the CLI that will be installed with your project will do the job of the ``manage.py`` file. To test this out, run the following commands:
+Now the CLI that will be installed with your project will do the job of the **manage.py** file. To test this out, run the following commands:
 
 .. code-block:: shell
 
@@ -135,6 +137,7 @@ Now that our project is ready, run ``fujin init`` at the root of it.
 Here's what you'll get:
 
 .. code-block:: toml
+    :caption: fujin.toml
 
     app = "bookstore"
     build_command = "uv build && uv pip compile pyproject.toml -o requirements.txt"
@@ -161,6 +164,7 @@ Here's what you'll get:
 Update the host section; it should look something like this, but with your server IP:
 
 .. code-block:: toml
+    :caption: fujin.toml
 
     [host]
     domain_name = "SERVER_IP.sslip.io"
@@ -171,10 +175,11 @@ Update the host section; it should look something like this, but with your serve
     
     Make sure to replace ``SERVER_IP`` with the actual IP address of your server.
 
-Create a ``.env.prod`` file at the root of your project; it can be an empty file for now. The only requirement is that the file should exist.
-Update your ``bookstore/settings.py`` with the changes below:
+Create a **.env.prod** file at the root of your project; it can be an empty file for now. The only requirement is that the file should exist.
+Update your **bookstore/settings.py** with the changes below:
 
 .. code-block:: python
+    :caption: settings.py
 
     # SECURITY WARNING: don't run with debug turned on in production!
     DEBUG = False
@@ -183,9 +188,10 @@ Update your ``bookstore/settings.py`` with the changes below:
 
 With the current setup, we should already be able to deploy our app with the ``fujin up`` command, but static files won't work. Let's make some changes.
 
-Update ``bookstore/settings.py`` with the changes below:
+Update **bookstore/settings.py** with the changes below:
 
 .. code-block:: python
+    :caption: settings.py
     :linenos:
     :lineno-start: 118
     :emphasize-lines: 119
@@ -195,7 +201,7 @@ Update ``bookstore/settings.py`` with the changes below:
 
 The last line means that when the ``collectstatic`` command is run, the files will be placed in a **staticfiles** directory in the current directory.
 
-Now let's update the ``fujin.toml`` file to run ``collectstatic`` before the app is started and move these files to the folder where our web server
+Now let's update the **fujin.toml** file to run ``collectstatic`` before the app is started and move these files to the folder where our web server
 can read them:
 
 .. code-block:: toml
@@ -233,10 +239,11 @@ For this tutorial, we will use `pocketbase <https://github.com/pocketbase/pocket
     curl -LO https://github.com/pocketbase/pocketbase/releases/download/v0.22.26/pocketbase_0.22.26_linux_amd64.zip
     fujin init --profile binary
 
-With the instructions above, we will download a version of Pocketbase to run on Linux from their GitHub release and initialize a new fujin configuration in ``binary`` mode.
-Now update the ``fujin.toml`` file with the changes below:
+With the instructions above, we will download a version of Pocketbase to run on Linux from their GitHub release and initialize a new fujin configuration in *binary* mode.
+Now update the **fujin.toml** file with the changes below:
 
 .. code-block:: toml
+    :caption: fujin.toml
     :linenos:
     :emphasize-lines: 2-5,9,13,19-21
 
@@ -264,25 +271,26 @@ Now update the ``fujin.toml`` file with the changes below:
 
 .. caution::
     
-    Make sure to replace ``SERVER_IP`` with the actual IP address of your server.
+    Make sure to replace *SERVER_IP* with the actual IP address of your server.
 
 Create User
 -----------
 
-Currently, we have the user set to **root** in our ``fujin.toml`` file and ``fujin`` might work with the root user, but I've noticed some issues with it, so I highly recommend creating a custom user.
+Currently, we have the user set to **root** in our **fujin.toml** file and ``fujin`` might work with the root user, but I've noticed some issues with it, so I highly recommend creating a custom user.
 For that, you'll need the root user with SSH access set up on the server.
-Then you'll run the command ``fujin server create-user`` with the username you want to use. You can, for example, use **fujin** as the username.
-For example:
+Then you'll run the command ``fujin server create-user`` with the username you want to use. You can, for example, use *fujin* as the username.
 
 .. code-block:: shell
+    :caption: create-user example
 
     fujin server create-user fujin
 
 This will create a new **fujin** user on your server, add it to the ``sudo`` group with the option to run all commands without having to type a password, and will
 copy the authorized key from the **root** to your new user so that the SSH setup you made for the root user still works with this new one.
-Now update the ``fujin.toml`` file with the new user:
+Now update the **fujin.toml** file with the new user:
 
 .. code-block:: toml
+    :caption: fujin.toml
 
     [host]
     domain_name = "SERVER_IP.sslip.io"
@@ -336,5 +344,5 @@ What about my database?
 I'm currently using SQLite for my side projects, so this isn't an issue for me at the moment. That's why ``fujin`` does not currently assist with databases. 
 However, you can still SSH into your server and manually install PostgreSQL or any other database or services you need.
 
-I plan to add support for managing additional tools like Redis or databases by declaring containers via the ``fujin.toml`` file. These containers will be managed with ``podman``, 
+I plan to add support for managing additional tools like Redis or databases by declaring containers via the **fujin.toml** file. These containers will be managed with ``podman``,
 To follow the development of this feature, subscribe to this `issue <https://github.com/falcopackages/fujin/issues/17>`_.
