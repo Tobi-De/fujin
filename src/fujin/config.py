@@ -143,17 +143,17 @@ The login user for running remote tasks. Should have passwordless sudo access fo
 
     You can create a user with these requirements using the ``fujin server create-user`` command.
 
-env_file
-~~~~~~~~
+envfile
+~~~~~~~
 Path to the production environment file that will be copied to the host.
 
-env_content
-~~~~~~~~~~~
+env
+~~~
 A string containing the production environment variables, ideal for scenarios where most variables are retrieved from secrets and you prefer not to use a separate file.
 
 .. important::
 
-    *env_file* and *env_content* are mutually exclusive—you can define only one.
+    *envfile* and *env* are mutually exclusive—you can define only one.
 
 apps_dir
 ~~~~~~~~
@@ -287,7 +287,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
     domain_name: str
     user: str
     _env_file: str = msgspec.field(name="envfile", default="")
-    env_content: str = ""
+    env_content: str = msgspec.field(name="env", default="")
     apps_dir: str = ".local/share/fujin"
     password_env: str | None = None
     ssh_port: int = 22
@@ -296,7 +296,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
     def __post_init__(self):
         if self._env_file and self.env_content:
             raise ImproperlyConfiguredError(
-                "Cannot set both 'env_content' and 'env_file' properties."
+                "Cannot set both 'env' and 'envfile' properties."
             )
         if not self.env_content:
             envfile = Path(self._env_file)
