@@ -35,7 +35,9 @@ def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
     parsed_secrets = {}
     with adapter_context(secret_config) as reader:
         for key, secret in secrets.items():
-            parsed_secrets[key] = gevent.spawn(reader, secret[1:]) # remove the leading $
+            parsed_secrets[key] = gevent.spawn(
+                reader, secret[1:]
+            )  # remove the leading $
         gevent.joinall(parsed_secrets.values())
     env_dict.update({key: thread.value for key, thread in parsed_secrets.items()})
     return "\n".join(f'{key}="{value}"' for key, value in env_dict.items())
