@@ -287,8 +287,8 @@ class HostConfig(msgspec.Struct, kw_only=True):
     ip: str | None = None
     domain_name: str
     user: str
-    _env_file: str = msgspec.field(name="envfile", default="")
-    env_content: str = msgspec.field(name="env", default="")
+    _env_file: str | None = msgspec.field(name="envfile", default=None)
+    env_content: str | None = msgspec.field(name="env", default=None)
     apps_dir: str = ".local/share/fujin"
     password_env: str | None = None
     ssh_port: int = 22
@@ -299,12 +299,12 @@ class HostConfig(msgspec.Struct, kw_only=True):
             raise ImproperlyConfiguredError(
                 "Cannot set both 'env' and 'envfile' properties."
             )
-        if not self.env_content:
+        if self._env_file:
             envfile = Path(self._env_file)
             if not envfile.exists():
                 raise ImproperlyConfiguredError(f"{self._env_file} not found")
             self.env_content = envfile.read_text()
-        self.env_content = self.env_content.strip()
+        self.env_content = self.env_content.strip() if self.env_content else ""
         self.apps_dir = f"/home/{self.user}/{self.apps_dir}"
         self.ip = self.ip or self.domain_name
 
