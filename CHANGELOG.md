@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### 🚀 Features
+
+- Add process name to systemd service
+- Add fujin version info
+- Set system as the default secrets adapter
+- Add system secret reader
+
+### 🐛 Bug Fixes
+
+- Env content parse logic
+
+### 🚜 Refactor
+
+- Rename env_content to env
+
+### 📚 Documentation
+
+- Apply a more consitent writing style
+
+### ⚙️ Miscellaneous Tasks
+
+- Specify source package to avoid failing build backend
+
 ## [0.10.0] - 2024-11-24
 
 ### 🚀 Features
