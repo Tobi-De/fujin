@@ -1,6 +1,24 @@
 Secrets  
 =======  
 
+System
+------
+
+The system adapter uses environment variables directly from your system. This is the simplest adapter and requires no additional setup.
+Update your fujin.toml file with the following configuration:
+
+[secrets]
+adapter = "system"
+
+.. code-block:: text
+    :caption: Example of an environment file with system environment variables
+
+    DEBUG=False
+    AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+
+The system adapter will look for environment variables with the same name as the value after the $ sign.
+
 Bitwarden  
 ---------  
 

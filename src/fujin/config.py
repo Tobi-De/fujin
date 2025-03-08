@@ -224,6 +224,7 @@ class SecretAdapter(StrEnum):
     BITWARDEN = "bitwarden"
     ONE_PASSWORD = "1password"
     DOPPLER = "doppler"
+    SYSTEM = "system"
 
 
 class SecretConfig(msgspec.Struct):

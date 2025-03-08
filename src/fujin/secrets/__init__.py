@@ -12,11 +12,13 @@ from fujin.config import SecretConfig
 from .bitwarden import bitwarden
 from .dopppler import doppler
 from .onepassword import one_password
+from .system import system
 
 secret_reader = Callable[[str], str]
 secret_adapter_context = Callable[[SecretConfig], ContextManager[secret_reader]]
 
 adapter_to_context: dict[SecretAdapter, secret_adapter_context] = {
+    SecretAdapter.SYSTEM: system,
     SecretAdapter.BITWARDEN: bitwarden,
     SecretAdapter.ONE_PASSWORD: one_password,
     SecretAdapter.DOPPLER: doppler,
@@ -33,7 +35,7 @@ def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
     parsed_secrets = {}
     with adapter_context(secret_config) as reader:
         for key, secret in secrets.items():
-            parsed_secrets[key] = gevent.spawn(reader, secret[1:])
+            parsed_secrets[key] = gevent.spawn(reader, secret[1:]) # remove the leading $
         gevent.joinall(parsed_secrets.values())
     env_dict.update({key: thread.value for key, thread in parsed_secrets.items()})
     return "\n".join(f'{key}="{value}"' for key, value in env_dict.items())
