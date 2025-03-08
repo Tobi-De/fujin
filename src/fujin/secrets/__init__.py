@@ -26,6 +26,8 @@ adapter_to_context: dict[SecretAdapter, secret_adapter_context] = {
 
 
 def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
+    if not env_content:  # this is really for empty string
+        return ""
     with closing(StringIO(env_content)) as buffer:
         env_dict = dotenv_values(stream=buffer)
     secrets = {key: value for key, value in env_dict.items() if value.startswith("$")}

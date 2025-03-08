@@ -248,7 +248,10 @@ class Config(msgspec.Struct, kw_only=True):
     requirements: str | None = None
     hooks: HooksDict = msgspec.field(default_factory=dict)
     local_config_dir: Path = Path(".fujin")
-    secret_config: SecretConfig | None = msgspec.field(name="secrets", default=None)
+    secret_config: SecretConfig | None = msgspec.field(
+        name="secrets",
+        default_factory=lambda: SecretConfig(adapter=SecretAdapter.SYSTEM),
+    )
 
     def __post_init__(self):
         if self.installation_mode == InstallationMode.PY_PACKAGE:
