@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import cappa
+import fujin
 
 from fujin.commands.app import App
 from fujin.commands.config import ConfigCMD
@@ -50,9 +51,9 @@ class Fujin:
 def main():
     alias_cmd = _parse_aliases()
     if alias_cmd:
-        cappa.invoke(Fujin, argv=alias_cmd)
+        cappa.invoke(Fujin, argv=alias_cmd, version=fujin.__version__)
     else:
-        cappa.invoke(Fujin)
+        cappa.invoke(Fujin, version=fujin.__version__)
 
 
 def _parse_aliases() -> list[str] | None:

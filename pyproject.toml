@@ -176,6 +176,11 @@ filename = "pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 
+[[tool.bumpversion.files]]
+filename = "src/fujin/__init__.py"
+replace = '__version__="{new_version}"'
+search = '__version__="{current_version}"'
+
 [tool.mypy]
 check_untyped_defs = true
 exclude = [
