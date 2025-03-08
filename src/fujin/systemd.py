@@ -102,7 +102,7 @@ class ProcessManager:
             body = (
                 local_config.read_text()
                 if local_config.exists() and not ignore_local
-                else template.format(**context, command=command)
+                else template.format(**context, command=command, process_name=name)
             )
             files.append((name, body))
         # if using unix then we are sure a web process was defined and the proxy is not dummy

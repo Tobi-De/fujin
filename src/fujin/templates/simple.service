@@ -1,6 +1,6 @@
 # All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
 [Unit]
-Description={app_name} Worker
+Description={app_name} {process_name}
 
 [Service]
 User={user}
