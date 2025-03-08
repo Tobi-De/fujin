@@ -71,6 +71,9 @@ docs = [
   "sphinx-togglebutton>=0.3.2",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = [ "src/fujin" ]
+
 [tool.ruff]
 # Assume Python {{ python_version }}
 target-version = "py312"
