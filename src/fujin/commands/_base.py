@@ -2,6 +2,7 @@ import importlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
+from typing import Generator
 
 import cappa
 
@@ -47,7 +48,7 @@ class BaseCommand:
             yield conn
 
     @contextmanager
-    def app_environment(self) -> Connection:
+    def app_environment(self) -> Generator[Connection, None, None]:
         with self.connection() as conn:
             with conn.cd(self.app_dir):
                 with conn.prefix("source .appenv"):

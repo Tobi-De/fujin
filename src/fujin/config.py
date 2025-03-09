@@ -149,7 +149,9 @@ Path to the production environment file that will be copied to the host.
 
 env
 ~~~
-A string containing the production environment variables, ideal for scenarios where most variables are retrieved from secrets and you prefer not to use a separate file.
+A string containing the production environment variables. In combination with the secrets manager, this is most useful when
+you want to automate deployment through a CI/CD platform like GitLab CI or GitHub Actions. For an example of how to do this,
+check out the `integrations guide </integrations.html>`_
 
 .. important::
 

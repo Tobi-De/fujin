@@ -10,6 +10,7 @@ try:
 except ImportError:
     from enum import Enum
 
+
     class StrEnum(str, Enum):
         pass
 
@@ -36,9 +37,9 @@ class HookManager:
         if not hooks_folder.exists():
             return
         self.hooks = {
-            h.value: f"./{hooks_folder / h.value}"  # noqa
+            h: f"./{hooks_folder / h.value}"
             for h in Hook
-            if (hooks_folder / h.value).exists()  # noqa
+            if (hooks_folder / h.value).exists()
         }
 
     def _run_hook(self, type_: Hook) -> None:

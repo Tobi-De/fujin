@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Generator
 
 import cappa
 from fabric import Connection
@@ -32,7 +32,7 @@ def _get_watchers(host: HostConfig) -> list[Responder]:
 
 
 @contextmanager
-def host_connection(host: HostConfig) -> Connection:
+def host_connection(host: HostConfig) -> Generator[Connection, None, None]:
     connect_kwargs = None
     if host.key_filename:
         connect_kwargs = {"key_filename": str(host.key_filename)}
