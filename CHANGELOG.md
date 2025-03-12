@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2025-03-12
+
+### 🐛 Bug Fixes
+
+- Force .venv removal on deploy
+
+### 📚 Documentation
+
+- Document integration with ci ci platforms
+
 ## [0.12.0] - 2025-03-08
 
 ### 🚀 Features
