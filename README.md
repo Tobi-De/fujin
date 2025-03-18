@@ -1,7 +1,7 @@
 # fujin
 
 > [!IMPORTANT]
-> This tool is currently contains minimal features and is a work-in-progress
+> This tool currently contains minimal features and is a work-in-progress
 
 <!-- content:start -->
 
