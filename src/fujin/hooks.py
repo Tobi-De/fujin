@@ -10,7 +10,6 @@ try:
 except ImportError:
     from enum import Enum
 
-
     class StrEnum(str, Enum):
         pass
 

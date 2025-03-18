@@ -52,12 +52,12 @@ jobs:
           #  cross: true
           #  release_suffix: i686-linux
           # Windows
-          - target: x86_64-pc-windows-msvc
-            os: windows-2022
-            release_suffix: x86_64-windows
-          - target: i686-pc-windows-msvc
-            os: windows-2022
-            release_suffix: i686-windows
+#          - target: x86_64-pc-windows-msvc
+#            os: windows-2022
+#            release_suffix: x86_64-windows
+#          - target: i686-pc-windows-msvc
+#            os: windows-2022
+#            release_suffix: i686-windows
           # macOS
           - target: aarch64-apple-darwin
             os: macos-12
