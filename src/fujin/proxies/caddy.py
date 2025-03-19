@@ -11,7 +11,7 @@ from fujin.connection import Connection
 
 DEFAULT_VERSION = "2.8.4"
 GH_TAR_FILENAME = "caddy_{version}_linux_amd64.tar.gz"
-GH_DOWNL0AD_URL = (
+GH_DOWNLOAD_URL = (
     "https://github.com/caddyserver/caddy/releases/download/v{version}/"
     + GH_TAR_FILENAME
 )
@@ -53,7 +53,7 @@ class WebProxy(msgspec.Struct):
         if result.ok:
             return
         version = get_latest_gh_tag()
-        download_url = GH_DOWNL0AD_URL.format(version=version)
+        download_url = GH_DOWNLOAD_URL.format(version=version)
         filename = GH_TAR_FILENAME.format(version=version)
         with self.conn.cd("/tmp"):
             self.conn.run(f"curl -O -L {download_url}")
@@ -75,7 +75,7 @@ class WebProxy(msgspec.Struct):
         self.run_pty("sudo systemctl daemon-reload")
         self.run_pty("sudo systemctl enable --now caddy-api")
         self.conn.run(
-            """curl --silent http://localhost:2019/config/ -d '{"apps":{"http": {"servers": {"srv0":{"listen":[":443"]}}}}}' -H 'Content-Type: application/json'"""
+            """curl --silent http://localhost:2019/config/ -d '{"apps":{"http": {"servers": {"fujin":{"listen":[":443"]}}}}}' -H 'Content-Type: application/json'"""
         )
 
     def uninstall(self):
@@ -88,7 +88,7 @@ class WebProxy(msgspec.Struct):
     def setup(self):
         current_config = json.loads(
             self.conn.run(
-                "curl http://localhost:2019/config/apps/http/servers/srv0", hide=True
+                "curl http://localhost:2019/config/apps/http/servers/fujin", hide=True
             ).stdout.strip()
         )
         existing_routes: list[dict] = current_config.get("routes", [])
@@ -101,7 +101,7 @@ class WebProxy(msgspec.Struct):
         new_routes.append(routes)
         current_config["routes"] = new_routes
         self.conn.run(
-            f"curl localhost:2019/config/apps/http/servers/srv0 -H 'Content-Type: application/json' -d '{json.dumps(current_config)}'"
+            f"curl localhost:2019/config/apps/http/servers/fujin -H 'Content-Type: application/json' -d '{json.dumps(current_config)}'"
         )
 
     def _get_routes(self) -> dict:
@@ -159,14 +159,14 @@ class WebProxy(msgspec.Struct):
     def teardown(self):
         current_config = json.loads(
             self.conn.run(
-                "curl http://localhost:2019/config/apps/http/servers/srv0"
+                "curl http://localhost:2019/config/apps/http/servers/fujin"
             ).stdout.strip()
         )
         existing_routes: list[dict] = current_config.get("routes", [])
         new_routes = [r for r in existing_routes if r.get("group") != self.app_name]
         current_config["routes"] = new_routes
         self.conn.run(
-            f"curl localhost:2019/config/apps/http/servers/srv0 -H 'Content-Type: application/json' -d '{json.dumps(current_config)}'",
+            f"curl localhost:2019/config/apps/http/servers/fujin -H 'Content-Type: application/json' -d '{json.dumps(current_config)}'",
             hide="out",
         )
 
