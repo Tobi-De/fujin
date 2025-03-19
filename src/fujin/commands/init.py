@@ -91,6 +91,19 @@ def falco_config(app_name: str) -> dict:
                 "print_settings": "app exec print_settings --format=pprint",
                 "shell": "server exec --appenv -i bash",
             },
+            "host": {
+                "user": "root",
+                "domain_name": f"{app_name}.com",
+                "env": f"""DEBUG=False
+MEDIA_ROOT='~/.local/share/fujin/{app_name}/media'
+ALLOWED_HOSTS={app_name}.com
+SECRET_KEY=$SECRET_KEY
+DJANGO_SUPERUSER_EMAIL=$DJANGO_SUPERUSER_EMAIL
+DJANGO_SUPERUSER_PASSWORD=$DJANGO_SUPERUSER_PASSWORD
+DJANGO_SUPERUSER_USERNAME=$DJANGO_SUPERUSER_USERNAME
+DATABASE_URL=$DATABASE_URL
+""",
+            },
         }
     )
     return config
