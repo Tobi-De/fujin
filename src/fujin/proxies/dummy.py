@@ -10,7 +10,7 @@ class WebProxy:
     config_file: Path
 
     @classmethod
-    def create(cls, _: Config, __: Connection) -> WebProxy:
+    def create(cls, *args, **kwargs) -> WebProxy:
         return cls()
 
     def install(self):
