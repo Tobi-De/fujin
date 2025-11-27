@@ -6,6 +6,7 @@ from typing import Annotated
 
 import cappa
 
+from fujin import caddy
 from fujin.commands import BaseCommand
 
 
@@ -30,7 +31,14 @@ class Server(BaseCommand):
                 conn.run("curl -LsSf https://astral.sh/uv/install.sh | sh")
                 conn.run("uv tool update-shell")
             conn.run("uv tool install fastfetch-bin-edge")
-            self.create_web_proxy(conn).install()
+            if self.config.webserver.enabled:
+                installed = caddy.install(conn)
+                if not installed:
+                    self.stdout.output("[yellow]Caddy is already installed.[/yellow]")
+                    self.stdout.output(
+                        "Please ensure your Caddyfile includes the following line to load Fujin configurations:"
+                    )
+                    self.stdout.output("[bold]import conf.d/*.caddy[/bold]")
             self.stdout.output(
                 "[green]Server bootstrap completed successfully![/green]"
             )

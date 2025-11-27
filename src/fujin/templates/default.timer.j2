@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer for {{ process_name }}
+
+[Timer]
+OnCalendar={{ process.timer }}
+Unit={{ process_name }}.service
+
+[Install]
+WantedBy=timers.target

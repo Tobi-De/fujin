@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Annotated
 
 import cappa
+from rich.table import Table
+
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
@@ -12,7 +14,7 @@ from fujin.config import InstallationMode
 class App(BaseCommand):
     @cappa.command(help="Display information about the application")
     def info(self):
-        with self.app_environment() as conn:
+        with self.connection() as conn:
             remote_version = (
                 conn.run("head -n 1 .versions", warn=True, hide=True).stdout.strip()
                 or "N/A"
@@ -22,32 +24,79 @@ class App(BaseCommand):
             ).stdout.strip()
             infos = {
                 "app_name": self.config.app_name,
-                "app_dir": self.app_dir,
+                "app_dir": self.config.app_dir,
                 "app_bin": self.config.app_bin,
                 "local_version": self.config.version,
                 "remote_version": remote_version,
-                "rollback_targets": ", ".join(rollback_targets.split("\n"))
-                if rollback_targets
-                else "N/A",
+                "rollback_targets": (
+                    ", ".join(rollback_targets.split("\n"))
+                    if rollback_targets
+                    else "N/A"
+                ),
             }
             if self.config.installation_mode == InstallationMode.PY_PACKAGE:
                 infos["python_version"] = self.config.python_version
-            pm = self.create_process_manager(conn)
-            services: dict[str, bool] = pm.is_active()
+
+            if self.config.webserver.enabled:
+                infos["running_at"] = f"https://{self.config.host.domain_name}"
+
+            names = self.config.active_systemd_units
+            if names:
+                result = conn.run(
+                    f"sudo systemctl is-active {' '.join(names)}",
+                    warn=True,
+                    hide=True,
+                )
+                statuses = result.stdout.strip().split("\n")
+                services_status = dict(zip(names, statuses))
+            else:
+                services_status = {}
+
+            services = {}
+            for process_name in self.config.processes:
+                active_systemd_units = self.config.get_active_unit_names(process_name)
+                running_count = sum(
+                    1
+                    for name in active_systemd_units
+                    if services_status.get(name) == "active"
+                )
+                total_count = len(active_systemd_units)
+
+                if total_count == 1:
+                    services[process_name] = services_status.get(
+                        active_systemd_units[0], "unknown"
+                    )
+                else:
+                    services[process_name] = f"{running_count}/{total_count}"
+
+            socket_name = f"{self.config.app_name}.socket"
+            if socket_name in services_status:
+                services["socket"] = services_status[socket_name]
 
         infos_text = "\n".join(f"{key}: {value}" for key, value in infos.items())
-        from rich.table import Table
 
         table = Table(title="", header_style="bold cyan")
-        table.add_column("Service", style="")
-        table.add_column("Running?")
-        for service, is_active in services.items():
-            table.add_row(
-                service,
-                "[bold green]Yes[/bold green]"
-                if is_active
-                else "[bold red]No[/bold red]",
-            )
+        table.add_column("Process", style="")
+        table.add_column("Status")
+        for service, status in services.items():
+            if status == "active":
+                status_str = f"[bold green]{status}[/bold green]"
+            elif status == "failed":
+                status_str = f"[bold red]{status}[/bold red]"
+            elif status in ("inactive", "unknown"):
+                status_str = f"[dim]{status}[/dim]"
+            elif "/" in status:
+                running, total = map(int, status.split("/"))
+                if running == total:
+                    status_str = f"[bold green]{status}[/bold green]"
+                elif running == 0:
+                    status_str = f"[bold red]{status}[/bold red]"
+                else:
+                    status_str = f"[bold yellow]{status}[/bold yellow]"
+            else:
+                status_str = status
+
+            table.add_row(service, status_str)
 
         self.stdout.output(infos_text)
         self.stdout.output(table)
@@ -75,10 +124,7 @@ class App(BaseCommand):
             str | None, cappa.Arg(help="Service name, no value means all")
         ] = None,
     ):
-        with self.app_environment() as conn:
-            self.create_process_manager(conn).start_services(name)
-        msg = f"{name} Service" if name else "All Services"
-        self.stdout.output(f"[green]{msg} started successfully![/green]")
+        self._run_service_command("start", name)
 
     @cappa.command(
         help="Restart the specified service or all services if no name is provided"
@@ -89,10 +135,7 @@ class App(BaseCommand):
             str | None, cappa.Arg(help="Service name, no value means all")
         ] = None,
     ):
-        with self.app_environment() as conn:
-            self.create_process_manager(conn).restart_services(name)
-        msg = f"{name} Service" if name else "All Services"
-        self.stdout.output(f"[green]{msg} restarted successfully![/green]")
+        self._run_service_command("restart", name)
 
     @cappa.command(
         help="Stop the specified service or all services if no name is provided"
@@ -103,38 +146,60 @@ class App(BaseCommand):
             str | None, cappa.Arg(help="Service name, no value means all")
         ] = None,
     ):
-        with self.app_environment() as conn:
-            self.create_process_manager(conn).stop_services(name)
-        msg = f"{name} Service" if name else "All Services"
-        self.stdout.output(f"[green]{msg} stopped successfully![/green]")
+        self._run_service_command("stop", name)
+
+    def _run_service_command(self, command: str, name: str | None):
+        with self.connection() as conn:
+            names = self._resolve_active_systemd_units(name)
+            if not names:
+                self.stdout.output("[yellow]No services found[/yellow]")
+                return
+
+            self.stdout.output(
+                f"Running [cyan]{command}[/cyan] on: [cyan]{', '.join(names)}[/cyan]"
+            )
+            conn.run(f"sudo systemctl {command} {' '.join(names)}", pty=True)
+
+        msg = f"{name} service" if name else "All Services"
+        past_tense = {
+            "start": "started",
+            "restart": "restarted",
+            "stop": "stopped",
+        }.get(command, command)
+        self.stdout.output(f"[green]{msg} {past_tense} successfully![/green]")
 
     @cappa.command(help="Show logs for the specified service")
     def logs(
-        self, name: Annotated[str, cappa.Arg(help="Service name")], follow: bool = False
-    ):
-        # TODO: flash out this more
-        with self.app_environment() as conn:
-            self.create_process_manager(conn).service_logs(name=name, follow=follow)
-
-    @cappa.command(
-        name="export-config",
-        help="Export the service configuration files locally to the .fujin directory",
-    )
-    def export_config(
         self,
-        overwrite: Annotated[
-            bool, cappa.Arg(help="overwrite any existing config file")
-        ] = False,
+        name: Annotated[str | None, cappa.Arg(help="Service name")] = None,
+        follow: Annotated[bool, cappa.Arg(short="-f")] = False,
+        lines: Annotated[int, cappa.Arg(short="-n", long="--lines")] = 50,
     ):
         with self.connection() as conn:
-            for filename, content in self.create_process_manager(
-                conn
-            ).get_configuration_files(ignore_local=True):
-                local_config = self.config.local_config_dir / filename
-                if local_config.exists() and not overwrite:
-                    self.stdout.output(
-                        f"[blue]Skipping {filename}, file already exists. Use --overwrite to replace it.[/blue]"
-                    )
-                    continue
-                local_config.write_text(content)
-                self.stdout.output(f"[green]{filename} exported successfully![/green]")
+            names = self._resolve_active_systemd_units(name)
+            if names:
+                units = " ".join(f"-u {n}" for n in names)
+                conn.run(
+                    f"sudo journalctl {units} -n {lines} {'-f' if follow else ''}",
+                    warn=True,
+                    pty=True,
+                )
+            else:
+                self.stdout.output("[yellow]No services found[/yellow]")
+
+    def _resolve_active_systemd_units(self, name: str | None) -> list[str]:
+        if not name:
+            return self.config.active_systemd_units
+
+        if name in self.config.processes:
+            return self.config.get_active_unit_names(name)
+
+        if name == "socket":
+            has_socket = any(config.socket for config in self.config.processes.values())
+            if has_socket:
+                return [f"{self.config.app_name}.socket"]
+
+        if name == "timer":
+            return [n for n in self.config.active_systemd_units if n.endswith(".timer")]
+
+        return [name]

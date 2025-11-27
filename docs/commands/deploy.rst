@@ -22,7 +22,7 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
 
 5. **Application Release**: If a ``release_command`` is specified in the configuration, it is executed at this stage. 
 
-6. **Configure and Start Services**: Configuration files for both ``systemd`` and the ``proxy`` (e.g., Caddy, by default) are generated or copied if previously exported. These configuration files are moved to their appropriate directories. A configuration reload is performed, and all relevant services are restarted.  
+6. **Configure and Start Services**: Configuration files for both ``systemd`` and the ``caddy`` are generated from templates. These configuration files are moved to their appropriate directories. A configuration reload is performed, and all relevant services are restarted.  
 
 7. **Update Version History**: The deployed version is recorded in the ``.versions`` file on the remote server.
 

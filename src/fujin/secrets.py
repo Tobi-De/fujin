@@ -9,7 +9,7 @@ from typing import Callable, ContextManager
 from typing import Generator
 
 import cappa
-import gevent
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import dotenv_values
 
 from fujin.config import SecretAdapter
@@ -35,19 +35,25 @@ def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
         return env_content
     adapter_context = adapter_to_context[secret_config.adapter]
     parsed_secrets = {}
-    with adapter_context(secret_config) as reader:
-        for key, secret in secrets.items():
-            parsed_secrets[key] = gevent.spawn(
-                reader, secret[1:]  # remove the leading $
-            )
-        gevent.joinall(parsed_secrets.values())
-    env_dict.update({key: thread.value for key, thread in parsed_secrets.items()})
+    with adapter_context(secret_config) as reader, ThreadPoolExecutor() as executor:
+        future_to_key = {
+            executor.submit(reader, secret[1:]): key for key, secret in secrets.items()
+        }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                parsed_secrets[key] = future.result()
+            except Exception as e:
+                raise cappa.Exit(f"Failed to retrieve secret for {key}: {e}") from e
+
+    env_dict.update(parsed_secrets)
     return "\n".join(f'{key}="{value}"' for key, value in env_dict.items())
 
 
 # =============================================================================================
 # BITWARDEN
 # =============================================================================================
+
 
 @contextmanager
 def bitwarden(secret_config: SecretConfig) -> Generator[secret_reader, None, None]:
@@ -112,6 +118,7 @@ def _signin(password_env) -> str:
 # SYSTEM
 # =============================================================================================
 
+
 @contextmanager
 def system(_: SecretConfig) -> Generator[secret_reader, None, None]:
     try:
@@ -142,6 +149,7 @@ def one_password(_: SecretConfig) -> Generator[secret_reader, None, None]:
 # =============================================================================================
 # DOPPLER
 # =============================================================================================
+
 
 @contextmanager
 def doppler(_: SecretConfig) -> Generator[secret_reader, None, None]:

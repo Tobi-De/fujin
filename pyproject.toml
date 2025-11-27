@@ -1,13 +1,11 @@
 [build-system]
 build-backend = "hatchling.build"
 
-requires = [
-  "hatchling",
-]
+requires = ["hatchling"]
 
 [project]
 name = "fujin-cli"
-version = "0.12.2"
+version = "0.13.0a2"
 description = "Get your project up and running in a few minutes on your own vps."
 readme = "README.md"
 keywords = [
@@ -19,9 +17,7 @@ keywords = [
   "python",
   "systemd",
 ]
-authors = [
-  { name = "Tobi DEGNON", email = "tobidegnon@proton.me" },
-]
+authors = [{ name = "Tobi DEGNON", email = "tobidegnon@proton.me" }]
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -33,6 +29,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
@@ -40,7 +37,7 @@ classifiers = [
 dependencies = [
   "cappa>=0.24",
   "fabric>=3.2.2",
-  "gevent[recommended]>=24.11.1",
+  "jinja2>=3.1.3",
   "msgspec[toml]>=0.18.6",
   "python-dotenv>=1.0.1",
   "rich>=13.9.2",
@@ -53,13 +50,7 @@ urls.Source = "https://github.com/falcopackages/fujin"
 scripts.fujin = "fujin.__main__:main"
 
 [dependency-groups]
-dev = [
-  "bump-my-version>=0.27",
-  "django>=5.1.2",
-  "fastapi>=0.115.3",
-  "git-cliff>=2.6.1",
-  "litestar>=2.12.1",
-]
+dev = ["django>=5.1.2", "pytest>=9.0.1", "inline-snapshot>=0.13.0"]
 docs = [
   "myst-parser",
   "shibuya",
@@ -72,7 +63,10 @@ docs = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = [ "src/fujin" ]
+packages = ["src/fujin"]
+
+[tool.uv.workspace]
+members = ["examples/django/bookstore"]
 
 [tool.ruff]
 # Assume Python {{ python_version }}
@@ -81,9 +75,7 @@ target-version = "py312"
 # Same as Black.
 line-length = 88
 indent-width = 4
-extend-include = [
-  "*.pyi?",
-]
+extend-include = ["*.pyi?"]
 # Exclude a variety of commonly ignored directories.
 exclude = [
   ".bzr",
@@ -122,41 +114,22 @@ lint.ignore = [
   "I",    # isort
 ] # temporary
 # Tests can use magic values, assertions, and relative imports
-lint.per-file-ignores."tests/**/*" = [
-  "PLR2004",
-  "S101",
-  "TID252",
-]
+lint.per-file-ignores."tests/**/*" = ["PLR2004", "S101", "TID252"]
 # Allow autofix for all enabled rules (when `--fix`) is provided.
-lint.fixable = [
-  "A",
-  "B",
-  "C",
-  "D",
-  "E",
-  "F",
-  "I",
-]
-lint.unfixable = [
-]
+lint.fixable = ["A", "B", "C", "D", "E", "F", "I"]
+lint.unfixable = []
 # Allow unused variables when underscore-prefixed.
 lint.dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 lint.isort.force-single-line = true
-lint.isort.known-first-party = [
-  "fujin",
-]
-lint.isort.required-imports = [
-  "from __future__ import annotations",
-]
+lint.isort.known-first-party = ["fujin"]
+lint.isort.required-imports = ["from __future__ import annotations"]
 # Preserve types, even if a file imports `from __future__ import annotations`.
 lint.pyupgrade.keep-runtime-typing = true
 
 [tool.bumpversion]
-current_version = "0.12.2"
+current_version = "0.13.0a2"
 parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
-serialize = [
-  "{major}.{minor}.{patch}",
-]
+serialize = ["{major}.{minor}.{patch}"]
 search = "{current_version}"
 replace = "{new_version}"
 regex = false
@@ -183,17 +156,8 @@ search = '__version__ = "{current_version}"'
 
 [tool.mypy]
 check_untyped_defs = true
-exclude = [
-  "docs",
-  "tests",
-  "migrations",
-  "venv",
-  ".venv",
-  "examples",
-]
-files = [
-  "fujin",
-]
+exclude = ["docs", "tests", "migrations", "venv", ".venv", "examples"]
+files = ["fujin"]
 no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_configs = true
@@ -201,15 +165,7 @@ warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
 ignore_errors = true
-module = [
-  "tests.*",
-  "docs.*",
-]
-
-[tool.uv.workspace]
-members = [
-  "examples/django/bookstore",
-]
+module = ["tests.*", "docs.*"]
 
 [tool.git-cliff.changelog]
 header = """
@@ -262,3 +218,9 @@ protect_breaking_commits = false
 filter_commits = false
 topo_order = false
 sort_commits = "newest"
+
+[tool.pytest.ini_options]
+markers = ["use_recorder: mark test to use the mock recorder"]
+
+[tool.inline-snapshot]
+format-command = "ruff format --stdin-filename {filename}"

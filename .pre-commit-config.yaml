@@ -29,7 +29,7 @@ repos:
 
 
   - repo: https://github.com/tox-dev/pyproject-fmt
-    rev: "v2.5.0"
+    rev: v2.11.1
     hooks:
       - id: pyproject-fmt
         args: [ "pyproject.toml" ]

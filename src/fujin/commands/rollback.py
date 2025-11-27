@@ -12,7 +12,7 @@ from fujin.commands.deploy import Deploy
 @dataclass
 class Rollback(BaseCommand):
     def __call__(self):
-        with self.app_environment() as conn:
+        with self.connection() as conn:
             result = conn.run(
                 "sed -n '2,$p' .versions", warn=True, hide=True
             ).stdout.strip()
@@ -41,8 +41,8 @@ class Rollback(BaseCommand):
             if not confirm:
                 return
             deploy = Deploy()
-            deploy.install_project(conn, version)
-            self.create_process_manager(conn).restart_services()
+            deploy.install_project(conn, version=version, rolling_back=True)
+            deploy.restart_services(conn)
             conn.run(f"rm -r {' '.join(f'v{v}' for v in versions_to_clean)}", warn=True)
             conn.run(f"sed -i '1,/{version}/{{/{version}/!d}}' .versions", warn=True)
             self.stdout.output(

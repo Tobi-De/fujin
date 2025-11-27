@@ -7,10 +7,9 @@ installation_mode = "binary"
 
 [webserver]
 upstream = "localhost:8090"
-type = "fujin.proxies.caddy"
 
 [processes]
-web = "pocketbase serve --http 0.0.0.0:8090"
+web = { command = "pocketbase serve --http 0.0.0.0:8090" }
 
 [aliases]
 shell = "server exec --appenv -i bash"

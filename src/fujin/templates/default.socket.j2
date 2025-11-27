@@ -1,0 +1,11 @@
+[Unit]
+Description={{ app_name }} socket
+
+[Socket]
+ListenStream=/run/{{ app_name }}.sock
+SocketUser=www-data
+SocketGroup=www-data
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

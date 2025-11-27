@@ -1,19 +1,21 @@
 # All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
 [Unit]
-Description={app_name} {process_name}
-Requires={app_name}.socket
+Description={{ process_name }}
+{% if process.socket %}
+Requires={{ app_name }}.socket
+{% endif %}
 After=network.target
 
 [Service]
 #Type=notify
 #NotifyAccess=main
-User={user}
-Group={user}
-RuntimeDirectory={app_name}
-WorkingDirectory={app_dir}
-ExecStart={app_dir}/{command}
-EnvironmentFile={app_dir}/.env
+User={{ user }}
+Group={{ user }}
+RuntimeDirectory={{ app_name }}
+WorkingDirectory={{ app_dir }}
+ExecStart={{ app_dir }}/{{ command }}
+EnvironmentFile={{ app_dir }}/.env
 ExecReload=/bin/kill -s HUP $MAINPID
 KillMode=mixed
 TimeoutStopSec=5

@@ -17,8 +17,6 @@ Commands
    init
    printenv
    prune
-   proxy
-   redeploy
    rollback
    server
    up

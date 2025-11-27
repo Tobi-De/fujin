@@ -24,7 +24,7 @@ class Prune(BaseCommand):
     def __call__(self):
         if self.keep < 1:
             raise cappa.Exit("The minimum value for the --keep option is 1", code=1)
-        with self.connection() as conn, conn.cd(self.app_dir):
+        with self.connection() as conn, conn.cd(self.config.app_dir):
             result = conn.run(
                 f"sed -n '{self.keep + 1},$p' .versions", hide=True
             ).stdout.strip()
@@ -33,10 +33,11 @@ class Prune(BaseCommand):
                 self.stdout.output("[blue]No versions to prune[/blue]")
                 return
             if not Confirm.ask(
-                f"[red]The following versions will be permanently deleted: {', '.join(result_list)}. This action is irreversible. Are you sure you want to proceed?[/red]"
+                f"""[red]The following versions will be permanently deleted: {", ".join(result_list)}. 
+                This action is irreversible. Are you sure you want to proceed?[/red]"""
             ):
                 return
-            to_prune = [f"{self.app_dir}/v{v}" for v in result_list]
+            to_prune = [f"{self.config.app_dir}/v{v}" for v in result_list]
             conn.run(f"rm -r {' '.join(to_prune)}", warn=True)
             conn.run(f"sed -i '{self.keep + 1},$d' .versions", warn=True)
             self.stdout.output("[green]Pruning completed successfully[/green]")
