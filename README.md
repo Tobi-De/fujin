@@ -17,10 +17,9 @@
 
 - 🚀 One-command server bootstrap
 - 🔄 Rollback broken deployments
-- 🔐 Zero configuration SSL certificates
-- 🔁 Swappable proxy ([caddy](https://caddyserver.com), [nginx](https://nginx.org/en/) and `dummy` to disable proxy)
+- 🔐 Zero configuration SSL certificates via [Caddy](https://caddyserver.com)
 - 🛠️ Secrets injection from password managers ([Bitwarden](https://bitwarden.com/), [1Password](https://1password.com), etc.)
-- 📝 Easily customizable `systemd` and `proxy` configurations
+- 📝 **Ejectable Defaults**: Full control over `systemd` and `caddy` templates
 - 👨‍💻 Remote application management and log streaming
 - 🐍 Supports packaged python apps and self-contained binaries
 
@@ -31,7 +30,7 @@ For more details, check out the [documentation📚](https://fujin.oluwatobi.dev/
 I wanted [kamal](https://kamal-deploy.org/) but without Docker, and I thought the idea was fun. At its core, this project automates versions of this [tutorial](https://www.digitalocean.com/community/tutorials/how-to-set-up-django-with-postgres-nginx-and-gunicorn-on-ubuntu). If you've been a Django beginner 
 trying to get your app in production, you probably went through this.
 
-I'm using `caddy` here by default instead of `nginx` because it's configurable via an API and it's is a no-brainer for SSL certificates. `Systemd` is the default on most Linux distributions and does a good enough job.
+I'm using `caddy` here instead of `nginx` because it's configurable via an API and it's is a no-brainer for SSL certificates. `Systemd` is the default on most Linux distributions and does a good enough job.
 
 Fujin was initially planned to be a Python-only project, but the core concepts can be applied to any language that can produce a single distributable file (e.g., Go, Rust).
 
