@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2025-11-28
+
+### 🐛 Bug Fixes
+
+- Hanging interactive shell on 3.14
+
 ## [0.13.1] - 2025-11-28
 
 ### 🐛 Bug Fixes
@@ -29,16 +35,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [0.12.1] - 2025-03-12
 
-### 🐛 Bug Fixes
-
-- Force .venv removal on deploy
-
-### 📚 Documentation
-
-- Document integration with ci ci platforms
-
-## [0.12.0] - 2025-03-08
-
 ### 🚀 Features
 
 - Add process name to systemd service
@@ -48,6 +44,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🐛 Bug Fixes
 
+- Force .venv removal on deploy
 - Env content parse logic
 
 ### 🚜 Refactor
@@ -56,6 +53,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 📚 Documentation
 
+- Document integration with ci ci platforms
 - Apply a more consistent writing style
 
 ### ⚙️ Miscellaneous Tasks
