@@ -3,9 +3,6 @@ from __future__ import annotations
 import json
 import urllib.request
 
-import cappa
-from rich import print
-
 from fujin.config import Config
 from fujin.connection import Connection
 

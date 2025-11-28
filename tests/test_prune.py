@@ -3,7 +3,7 @@ from fujin.commands.prune import Prune
 from inline_snapshot import snapshot
 
 
-def test_prune_flow(mock_connection, get_commands):
+def test_prune(mock_connection, get_commands):
     mock_connection.run.return_value.stdout = "0.0.8\n0.0.7"
 
     with patch("rich.prompt.Confirm.ask", return_value=True):

@@ -1,7 +1,3 @@
-from gevent import monkey
-
-monkey.patch_all()
-
 import shlex
 import sys
 from pathlib import Path
