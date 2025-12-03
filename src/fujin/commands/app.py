@@ -102,7 +102,9 @@ class App(BaseCommand):
         self.stdout.output(infos_text)
         self.stdout.output(table)
 
-    @cappa.command(help="Run an arbitrary command via the application binary")
+    @cappa.command(
+        help="Run an arbitrary command via the application binary, only for non-interactive commands"
+    )
     def exec(
         self,
         command: str,
@@ -110,20 +112,26 @@ class App(BaseCommand):
         with self.app_environment() as conn:
             conn.run(f"{self.config.app_bin} {command}", pty=True)
 
-    @cappa.command(help="Start a shell session in the application environment")
-    def shell(self):
+    @cappa.command(
+        help="Start a shell session or run an interactive command in the application environment"
+    )
+    def shell(
+        self,
+        command: Annotated[
+            str, cappa.Arg(help="The command to run. Defaults to the user's shell.")
+        ] = "$SHELL",
+    ):
         host = self.config.host
         ssh_target = f"{host.user}@{host.ip or host.domain_name}"
-
-        cmd = ["ssh", "-t"]
+        ssh_cmd = ["ssh", "-t"]
         if host.ssh_port:
-            cmd.extend(["-p", str(host.ssh_port)])
+            ssh_cmd.extend(["-p", str(host.ssh_port)])
         if host.key_filename:
-            cmd.extend(["-i", str(host.key_filename)])
+            ssh_cmd.extend(["-i", str(host.key_filename)])
 
-        remote_cmd = f"cd {self.config.app_dir} && source .appenv && $SHELL"
-        cmd.extend([ssh_target, remote_cmd])
-        subprocess.run(cmd)
+        full_remote_cmd = f"cd {self.config.app_dir} && source .appenv && {command}"
+        ssh_cmd.extend([ssh_target, full_remote_cmd])
+        subprocess.run(ssh_cmd)
 
     @cappa.command(
         help="Start the specified service or all services if no name is provided"

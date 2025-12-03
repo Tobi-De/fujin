@@ -47,22 +47,10 @@ class Server(BaseCommand):
             )
 
     @cappa.command(
-        help="Execute an arbitrary command on the server, optionally in interactive mode"
+        help="Execute an arbitrary command on the server, only for non-interactive commands"
     )
-    def exec(
-        self,
-        command: str,
-        appenv: Annotated[
-            bool,
-            cappa.Arg(
-                default=False,
-                long="--appenv",
-                help="Change to app directory and enable app environment",
-            ),
-        ],
-    ):
-        context = self.app_environment() if appenv else self.connection()
-        with context as conn:
+    def exec(self, command: str):
+        with self.connection() as conn:
             conn.run(command, pty=True)
 
     @cappa.command(

@@ -51,6 +51,8 @@ def main():
     verbose = "-v" in sys.argv or "--verbose" in sys.argv
     level = logging.DEBUG if verbose else logging.WARN
     logging.basicConfig(level=level, format="%(message)s")
+    if verbose:
+        logging.getLogger("markdown_it").setLevel(logging.WARNING)
 
     alias_cmd = _parse_aliases()
     if alias_cmd:

@@ -97,6 +97,7 @@ class SSH2Connection:
 
         watchers = []
         if self.host.password:
+            logger.debug("Setting up sudo password watchers")
             watchers.append(
                 (re.compile(r"\[sudo\] password:"), f"{self.host.password}\n")
             )
@@ -126,6 +127,7 @@ class SSH2Connection:
 
                     for pattern, response in watchers:
                         if pattern.search(text):
+                            logger.debug("Pattern matched, sending response")
                             channel.write(response)
 
                 # Read stderr
