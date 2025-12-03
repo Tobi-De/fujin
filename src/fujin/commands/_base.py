@@ -6,8 +6,8 @@ from typing import Generator
 import cappa
 
 from fujin.config import Config
-from fujin.libssh_connection import SSH2Connection
-from fujin.libssh_connection import connection as host_connection
+from fujin.connection import SSH2Connection
+from fujin.connection import connection as host_connection
 
 
 @dataclass

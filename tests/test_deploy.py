@@ -29,7 +29,7 @@ export PATH="/home/testuser/.local/share/fujin/myapp:$PATH"' > /home/testuser/.l
             "rm /home/testuser/.local/share/fujin/myapp/myapp",
             "ln -s /home/testuser/.local/share/fujin/myapp/v0.1.0/testapp-0.1.0.whl /home/testuser/.local/share/fujin/myapp/myapp",
             "head -n 1 .versions",
-            "sed -i '1i 0.1.0' .versions",
+            "echo '0.1.0' > .versions",
             """\
 echo '# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
@@ -105,12 +105,10 @@ def test_deploy_python_rebuild_venv(
 
     # Mock remote state: No previous version, so hash check fails/skipped
     def run_side_effect(cmd, **kwargs):
-        mock_res = MagicMock()
-        mock_res.ok = True
-        mock_res.stdout = ""
+        stdout = ""
         if "head -n 1 .versions" in cmd:
-            mock_res.stdout = ""
-        return mock_res
+            stdout = ""
+        return stdout, True
 
     mock_connection.run.side_effect = run_side_effect
 
@@ -214,14 +212,12 @@ def test_deploy_python_reuse_venv(mock_config, mock_connection, tmp_path, get_co
 
     # Mock remote state: Previous version exists, hashes match
     def run_side_effect(cmd, **kwargs):
-        mock_res = MagicMock()
-        mock_res.ok = True
-        mock_res.stdout = ""
+        stdout = ""
         if "head -n 1 .versions" in cmd:
-            mock_res.stdout = "0.0.1"
+            stdout = "0.0.1"
         if "md5sum" in cmd:
-            mock_res.stdout = f"{local_hash}  requirements.txt"
-        return mock_res
+            stdout = f"{local_hash}  requirements.txt"
+        return stdout, True
 
     mock_connection.run.side_effect = run_side_effect
 
@@ -313,12 +309,10 @@ echo 'example.com {
 def test_deploy_version_update(mock_config, mock_connection, get_commands):
     # Mock remote state: .versions file exists
     def run_side_effect(cmd, **kwargs):
-        mock_res = MagicMock()
-        mock_res.ok = True
-        mock_res.stdout = ""
+        stdout = ""
         if "head -n 1 .versions" in cmd:
-            mock_res.stdout = "0.0.1"  # Different from current version
-        return mock_res
+            stdout = "0.0.1"  # Different from current version
+        return stdout, True
 
     mock_connection.run.side_effect = run_side_effect
 
@@ -412,13 +406,11 @@ def test_deploy_pruning(mock_config, mock_connection, get_commands):
 
     # Mock remote state: return list of versions to prune
     def run_side_effect(cmd, **kwargs):
-        mock_res = MagicMock()
-        mock_res.ok = True
-        mock_res.stdout = ""
+        stdout = ""
         if "sed -n" in cmd:
             # Simulate 3 versions existing, keeping 2, so 1 to prune
-            mock_res.stdout = "0.0.1"
-        return mock_res
+            stdout = "0.0.1"
+        return stdout, True
 
     mock_connection.run.side_effect = run_side_effect
 

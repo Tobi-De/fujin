@@ -4,7 +4,7 @@ import json
 import urllib.request
 
 from fujin.config import Config
-from fujin.libssh_connection import SSH2Connection as Connection
+from fujin.connection import SSH2Connection as Connection
 
 DEFAULT_VERSION = "2.10.2"
 GH_TAR_FILENAME = "caddy_{version}_linux_amd64.tar.gz"

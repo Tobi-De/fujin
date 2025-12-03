@@ -39,6 +39,9 @@ def mock_connection():
         conn.cd.return_value.__enter__.return_value = conn
         conn.prefix.return_value.__enter__.return_value = conn
 
+        # Setup run to return a tuple (stdout, ok)
+        conn.run.return_value = ("", True)
+
         yield conn
 
 

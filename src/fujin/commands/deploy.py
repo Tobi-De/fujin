@@ -9,7 +9,7 @@ import cappa
 from fujin import caddy
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
-from fujin.libssh_connection import SSH2Connection as Connection
+from fujin.connection import SSH2Connection as Connection
 from fujin.secrets import resolve_secrets
 
 

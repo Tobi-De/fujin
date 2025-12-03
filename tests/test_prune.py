@@ -4,7 +4,7 @@ from inline_snapshot import snapshot
 
 
 def test_prune(mock_connection, get_commands):
-    mock_connection.run.return_value.stdout = "0.0.8\n0.0.7"
+    mock_connection.run.return_value = ("0.0.8\n0.0.7", True)
 
     with patch("rich.prompt.Confirm.ask", return_value=True):
         prune = Prune(keep=2)

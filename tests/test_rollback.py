@@ -5,14 +5,12 @@ from inline_snapshot import snapshot
 
 def test_rollback(mock_connection, get_commands):
     def run_side_effect(command, **kwargs):
-        mock = MagicMock()
+        stdout = ""
         if "sed -n '2,$p' .versions" in command:
-            mock.stdout = "0.0.9\n0.0.8"
+            stdout = "0.0.9\n0.0.8"
         elif "head -n 1 .versions" in command:
-            mock.stdout = "0.1.0"
-        else:
-            mock.stdout = ""
-        return mock
+            stdout = "0.1.0"
+        return stdout, True
 
     mock_connection.run.side_effect = run_side_effect
 
