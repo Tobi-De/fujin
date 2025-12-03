@@ -8,7 +8,6 @@ import cappa
 
 from fujin import caddy
 from fujin.commands import BaseCommand
-from fujin.libssh_connection import host_connection
 
 
 @cappa.command(help="Manage server operations")
@@ -16,20 +15,20 @@ class Server(BaseCommand):
     @cappa.command(help="Display information about the host system")
     def info(self):
         with self.connection() as conn:
-            result = conn.run(f"command -v fastfetch", warn=True, hide=True)
-            if result.ok:
+            _, result_ok = conn.run(f"command -v fastfetch", warn=True, hide=True)
+            if result_ok:
                 conn.run("fastfetch", pty=True)
             else:
-                self.stdout.output(conn.run("cat /etc/os-release", hide=True).stdout)
+                self.stdout.output(conn.run("cat /etc/os-release", hide=True)[0])
 
     @cappa.command(help="Setup uv, web proxy, and install necessary dependencies")
     def bootstrap(self):
-        with host_connection(self.config.host) as conn:
+        with self.connection() as conn:
             self.stdout.output("[blue]Bootstrapping server...[/blue]")
             conn.run("sudo apt update && sudo apt upgrade -y", pty=True)
             conn.run("sudo apt install -y sqlite3 curl rsync", pty=True)
-            result = conn.run("command -v uv", warn=True)
-            if not result.ok:
+            _, result_ok = conn.run("command -v uv", warn=True)
+            if not result_ok:
                 self.output.output("[blue]Installing uv tool...[/blue]")
                 conn.run("curl -LsSf https://astral.sh/uv/install.sh | sh")
                 conn.run("uv tool update-shell")
@@ -68,7 +67,7 @@ class Server(BaseCommand):
             if interactive:
                 conn.run(command, pty=interactive, warn=True)
             else:
-                self.stdout.output(conn.run(command, hide=True).stdout)
+                self.stdout.output(conn.run(command, hide=True)[0])
 
     @cappa.command(
         name="create-user", help="Create a new user with sudo and ssh access"

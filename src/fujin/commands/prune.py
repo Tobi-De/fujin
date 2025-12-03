@@ -25,9 +25,8 @@ class Prune(BaseCommand):
         if self.keep < 1:
             raise cappa.Exit("The minimum value for the --keep option is 1", code=1)
         with self.connection() as conn, conn.cd(self.config.app_dir):
-            result = conn.run(
-                f"sed -n '{self.keep + 1},$p' .versions", hide=True
-            ).stdout.strip()
+            result, _ = conn.run(f"sed -n '{self.keep + 1},$p' .versions", hide=True)
+            result = result.strip()
             result_list = result.split("\n")
             if result == "":
                 self.stdout.output("[blue]No versions to prune[/blue]")

@@ -6,6 +6,7 @@ import sys
 import re
 import logging
 import cappa
+import time
 from contextlib import contextmanager
 from typing import Generator
 from fujin.config import HostConfig
@@ -14,22 +15,20 @@ from ssh2.session import Session
 logger = logging.getLogger(__name__)
 
 
-from dataclasses import dataclass
-
-
-@dataclass
-class CommandResult:
-    stdout: str
-    stderr: str
-    return_code: int
-    ok: bool
-
-
 class SSH2Connection:
     def __init__(self, session: Session, host: HostConfig):
         self.session = session
         self.host = host
         self.cwd = ""
+        self._prefix = None
+
+    @contextmanager
+    def prefix(self, command: str):
+        self._prefix = command
+        try:
+            yield
+        finally:
+            self._prefix = None
 
     @contextmanager
     def cd(self, path: str):
@@ -40,7 +39,6 @@ class SSH2Connection:
             self.cwd = f"{self.cwd}/{path}"
         else:
             self.cwd = path
-
         try:
             yield
         finally:
@@ -53,19 +51,14 @@ class SSH2Connection:
         warn: bool = False,
         pty: bool = False,
         hide: bool = False,
-    ) -> int:
+    ) -> tuple[str, bool]:
         """
         Executes a command on the remote host.
-        Mimics fabric.Connection.run behavior partially.
         """
         channel = self.session.open_session()
-
         if pty:
             channel.pty()
-
-        # Ensure env is a dict
         env = env or {}
-
         # Add default paths to ensure uv is found
         extra_paths = [
             f"/home/{self.host.user}/.cargo/bin",
@@ -91,9 +84,15 @@ class SSH2Connection:
         # Handle cwd
         cwd_prefix = ""
         if self.cwd:
+            logger.info(f"Changing directory to {self.cwd}")
             cwd_prefix = f"cd {self.cwd} && "
 
-        full_command = f"{cwd_prefix}{env_prefix}{command}"
+        # Handle prefix
+        prefix_str = ""
+        if self._prefix:
+            prefix_str = f"{self._prefix} && "
+
+        full_command = f"{cwd_prefix}{prefix_str}{env_prefix}{command}"
         logger.debug(f"Running command: {full_command}")
 
         watchers = []
@@ -109,42 +108,39 @@ class SSH2Connection:
             )
 
         channel.execute(full_command)
-
-        # Set non-blocking to allow polling both streams
-        self.session.set_blocking(False)
-
         stdout_buffer = []
         stderr_buffer = []
 
-        import time
+        try:
+            # this makes channel reads non-blocking
+            self.session.set_blocking(False)
+            while not channel.eof():
+                # Read stdout
+                size, data = channel.read()
+                if size > 0:
+                    text = data.decode("utf-8", errors="replace")
+                    if not hide or (isinstance(hide, str) and hide == "err"):
+                        sys.stdout.write(text)
+                        sys.stdout.flush()
+                    stdout_buffer.append(text)
 
-        while not channel.eof():
-            # Read stdout
-            size, data = channel.read()
-            if size > 0:
-                text = data.decode("utf-8", errors="replace")
-                if not hide:
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-                stdout_buffer.append(text)
+                    for pattern, response in watchers:
+                        if pattern.search(text):
+                            channel.write(response)
 
-                for pattern, response in watchers:
-                    if pattern.search(text):
-                        channel.write(response)
+                # Read stderr
+                size, data = channel.read_stderr()
+                if size > 0:
+                    text = data.decode("utf-8", errors="replace")
+                    if not hide or (isinstance(hide, str) and hide == "out"):
+                        sys.stderr.write(text)
+                        sys.stderr.flush()
+                    stderr_buffer.append(text)
 
-            # Read stderr
-            size, data = channel.read_stderr()
-            if size > 0:
-                text = data.decode("utf-8", errors="replace")
-                if not hide:
-                    sys.stderr.write(text)
-                    sys.stderr.flush()
-                stderr_buffer.append(text)
-
-            # Sleep briefly to avoid 100% CPU usage
-            time.sleep(0.01)
-
-        self.session.set_blocking(True)
+                # Sleep briefly to avoid 100% CPU usage
+                time.sleep(0.01)
+        finally:
+            self.session.set_blocking(True)
 
         channel.wait_eof()
         channel.close()
@@ -152,21 +148,18 @@ class SSH2Connection:
 
         exit_status = channel.get_exit_status()
         if exit_status != 0 and not warn:
+            logger.error(
+                "Command %s failed with exit code %d", full_command, exit_status
+            )
             raise cappa.Exit(
                 f"Command failed with exit code {exit_status}", code=exit_status
             )
 
-        return CommandResult(
-            stdout="".join(stdout_buffer),
-            stderr="".join(stderr_buffer),
-            return_code=exit_status,
-            ok=exit_status == 0,
-        )
+        return "".join(stdout_buffer), exit_status == 0
 
     def put(self, local: str, remote: str):
         """
         Uploads a local file to the remote host.
-        Mimics fabric.Connection.put behavior partially.
         """
         fileinfo = os.stat(local)
 
@@ -186,61 +179,26 @@ class SSH2Connection:
             for data in local_fh:
                 chan.write(data)
 
-    def shell(self):
-        """
-        Starts an interactive shell session.
-        """
-        import select
-        import termios
-        import tty
-
-        channel = self.session.open_session()
-        channel.pty()
-        channel.shell()
-
-        # Save original tty settings
-        old_tty = termios.tcgetattr(sys.stdin)
-        try:
-            # Set raw mode for proper interaction
-            tty.setraw(sys.stdin.fileno())
-            self.session.set_blocking(False)
-
-            while not channel.eof():
-                # Read from channel
-                size, data = channel.read()
-                if size > 0:
-                    sys.stdout.write(data.decode("utf-8", errors="replace"))
-                    sys.stdout.flush()
-
-                # Read from stdin
-                r, _, _ = select.select([sys.stdin], [], [], 0.01)
-                if sys.stdin in r:
-                    x = sys.stdin.read(1)
-                    if len(x) == 0:
-                        break
-                    channel.write(x)
-        finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
-            channel.close()
-            channel.wait_closed()
-
 
 @contextmanager
-def host_connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
+def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        logger.info(f"Connecting to {host.ip}:{host.ssh_port}...")
         sock.connect((host.ip or host.domain_name, host.ssh_port))
     except socket.error as e:
         raise Exception(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
 
     session = Session()
     try:
+        logger.info("Starting SSH session...")
         session.handshake(sock)
     except Exception as e:
         sock.close()
         raise Exception("SSH Handshake failed") from e
 
     # Authentication
+    logger.info("Authenticating...")
     try:
         # maybe add support for passphrase later
         if host.key_filename:
@@ -252,11 +210,11 @@ def host_connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
 
     except Exception as e:
         sock.close()
-        raise Exception(f"Authentication failed for {host.user}") from e
+        raise cappa.Exit(f"Authentication failed for {host.user}") from e
 
     conn = SSH2Connection(session, host)
     try:
         yield conn
     finally:
-        # session.disconnect() # ssh2-python session doesn't have disconnect, closing socket is enough
+        session.disconnect()
         sock.close()

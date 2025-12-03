@@ -13,9 +13,10 @@ from fujin.commands.deploy import Deploy
 class Rollback(BaseCommand):
     def __call__(self):
         with self.connection() as conn:
-            result = conn.run(
+            result, _ = conn.run(
                 "sed -n '2,$p' .versions", warn=True, hide=True
-            ).stdout.strip()
+            )
+            result = result.strip()
             if not result:
                 self.stdout.output("[blue]No rollback targets available")
                 return
@@ -29,9 +30,10 @@ class Rollback(BaseCommand):
             except KeyboardInterrupt as e:
                 raise cappa.Exit("Rollback aborted by user.", code=0) from e
 
-            current_app_version = conn.run(
+            current_app_version, _ = conn.run(
                 "head -n 1 .versions", warn=True, hide=True
-            ).stdout.strip()
+            )
+            current_app_version = current_app_version.strip()
             versions_to_clean = [current_app_version] + versions[
                 : versions.index(version)
             ]

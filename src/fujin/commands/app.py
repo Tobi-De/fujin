@@ -8,21 +8,20 @@ from rich.table import Table
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
-from fujin.libssh_connection import host_connection
 
 
 @cappa.command(help="Run application-related tasks")
 class App(BaseCommand):
     @cappa.command(help="Display information about the application")
     def info(self):
-        with host_connection(self.config.host) as conn:
+        with self.connection() as conn:
             remote_version = (
-                conn.run("head -n 1 .versions", warn=True, hide=True).stdout.strip()
+                conn.run("head -n 1 .versions", warn=True, hide=True)[0].strip()
                 or "N/A"
             )
             rollback_targets = conn.run(
                 "sed -n '2,$p' .versions", warn=True, hide=True
-            ).stdout.strip()
+            )[0].strip()
             infos = {
                 "app_name": self.config.app_name,
                 "app_dir": self.config.app_dir,
@@ -43,12 +42,12 @@ class App(BaseCommand):
 
             names = self.config.active_systemd_units
             if names:
-                result = conn.run(
+                result_stdout, _ = conn.run(
                     f"sudo systemctl is-active {' '.join(names)}",
                     warn=True,
                     hide=True,
                 )
-                statuses = result.stdout.strip().split("\n")
+                statuses = result_stdout.strip().split("\n")
                 services_status = dict(zip(names, statuses))
             else:
                 services_status = {}
@@ -113,7 +112,7 @@ class App(BaseCommand):
                 conn.run(f"{self.config.app_bin} {command}", pty=interactive, warn=True)
             else:
                 self.stdout.output(
-                    conn.run(f"{self.config.app_bin} {command}", hide=True).stdout
+                    conn.run(f"{self.config.app_bin} {command}", hide=True)[0]
                 )
 
     @cappa.command(

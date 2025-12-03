@@ -6,8 +6,8 @@ from typing import Generator
 import cappa
 
 from fujin.config import Config
-from fujin.connection import Connection
-from fujin.connection import host_connection
+from fujin.libssh_connection import SSH2Connection
+from fujin.libssh_connection import connection as host_connection
 
 
 @dataclass
@@ -31,7 +31,7 @@ class BaseCommand:
             yield conn
 
     @contextmanager
-    def app_environment(self) -> Generator[Connection, None, None]:
+    def app_environment(self) -> Generator[SSH2Connection, None, None]:
         with self.connection() as conn:
             with conn.cd(self.config.app_dir):
                 with conn.prefix("source .appenv"):

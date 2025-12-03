@@ -9,9 +9,8 @@ import cappa
 from fujin import caddy
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
-from fujin.connection import Connection
+from fujin.libssh_connection import SSH2Connection as Connection
 from fujin.secrets import resolve_secrets
-from fujin.libssh_connection import host_connection
 
 
 @cappa.command(
@@ -38,7 +37,7 @@ class Deploy(BaseCommand):
         if self.config.requirements and not Path(self.config.requirements).exists():
             raise cappa.Exit(f"{self.config.requirements} not found", code=1)
 
-        with host_connection(self.config.host) as conn:
+        with self.connection() as conn:
             self.stdout.output("[blue]Installing project on remote host...[/blue]")
             conn.run(f"mkdir -p {self.config.app_dir}")
             # copy env file
@@ -62,10 +61,11 @@ class Deploy(BaseCommand):
             # prune old versions
             with conn.cd(self.config.app_dir):
                 if self.config.versions_to_keep:
-                    result = conn.run(
+                    result, _ = conn.run(
                         f"sed -n '{self.config.versions_to_keep + 1},$p' .versions",
                         hide=True,
-                    ).stdout.strip()
+                    )
+                    result = result.strip()
                     if result:
                         result_list = result.split("\n")
                         to_prune = [f"{self.config.app_dir}/v{v}" for v in result_list]
@@ -102,14 +102,14 @@ class Deploy(BaseCommand):
         valid_units = [*self.config.active_systemd_units, *(list(new_units.keys()))]
 
         # Cleanup Stale Instances (e.g: replicas downgrade)
-        ls_units = conn.run(
+        ls_units_stdout, ls_units_ok = conn.run(
             f"systemctl list-units --full --all --plain --no-legend '{self.config.app_name}*'",
             warn=True,
             hide=True,
         )
         stale_units = []
-        if ls_units.ok:
-            for line in ls_units.stdout.splitlines():
+        if ls_units_ok:
+            for line in ls_units_stdout.splitlines():
                 unit = line.split()[0]
                 if unit not in valid_units:
                     stale_units.append(unit)
@@ -128,11 +128,11 @@ class Deploy(BaseCommand):
         ]
 
         for directory in search_dirs:
-            result = conn.run(
+            result_stdout, result_ok = conn.run(
                 f"ls {directory}/{self.config.app_name}*", warn=True, hide=True
             )
-            if result.ok:
-                for path in result.stdout.split():
+            if result_ok:
+                for path in result_stdout.split():
                     filename = Path(path).name
                     if filename not in valid_units:
                         stale_paths.append(path)
@@ -186,9 +186,10 @@ class Deploy(BaseCommand):
                 conn.run(f"bash -c 'source .appenv && {self.config.release_command}'")
 
             # update version history
-            result = conn.run(
+            result, _ = conn.run(
                 "head -n 1 .versions", warn=True, hide=True
-            ).stdout.strip()
+            )
+            result = result.strip()
             if result == version:
                 return
             if result == "":
@@ -220,9 +221,10 @@ export PATH=".venv/bin:$PATH"
             curr_release_reqs = f"{release_dir}/requirements.txt"
 
             # Get the version currently running on the host to find previous requirements
-            prev_version = conn.run(
+            prev_version, _ = conn.run(
                 "head -n 1 .versions", warn=True, hide=True
-            ).stdout.strip()
+            )
+            prev_version = prev_version.strip()
             prev_release_reqs = (
                 f"{self.config.get_release_dir(prev_version)}/requirements.txt"
             )
@@ -231,9 +233,9 @@ export PATH=".venv/bin:$PATH"
             remote_hash = ""
 
             if prev_version:
-                res = conn.run(f"md5sum {prev_release_reqs}", warn=True, hide=True)
-                if res.ok:
-                    remote_hash = res.stdout.strip().split()[0]
+                res_stdout, res_ok = conn.run(f"md5sum {prev_release_reqs}", warn=True, hide=True)
+                if res_ok:
+                    remote_hash = res_stdout.strip().split()[0]
 
             if local_hash == remote_hash:
                 rebuild_venv = False

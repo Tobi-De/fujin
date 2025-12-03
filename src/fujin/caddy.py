@@ -4,7 +4,7 @@ import json
 import urllib.request
 
 from fujin.config import Config
-from fujin.connection import Connection
+from fujin.libssh_connection import SSH2Connection as Connection
 
 DEFAULT_VERSION = "2.10.2"
 GH_TAR_FILENAME = "caddy_{version}_linux_amd64.tar.gz"
@@ -16,8 +16,8 @@ GH_RELEASE_LATEST_URL = "https://api.github.com/repos/caddyserver/caddy/releases
 
 
 def install(conn: Connection) -> bool:
-    result = conn.run(f"command -v caddy", warn=True, hide=True)
-    if result.ok:
+    _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
+    if result_ok:
         return False
     version = get_latest_gh_tag()
     download_url = GH_DOWNL0AD_URL.format(version=version)
@@ -70,14 +70,14 @@ def setup(conn: Connection, config: Config):
     rendered_content = config.render_caddyfile()
 
     remote_path = config.caddy_config_path
-    res = conn.run(
+    _, res_ok = conn.run(
         f"echo '{rendered_content}' | sudo tee {remote_path}",
         hide="out",
         pty=True,
         warn=True,
     )
     conn.run("sudo systemctl reload caddy", pty=True, warn=True)
-    return res.ok
+    return res_ok
 
 
 def teardown(conn: Connection, config: Config):
