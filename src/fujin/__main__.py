@@ -1,6 +1,8 @@
 import shlex
 import sys
+import logging
 from pathlib import Path
+from typing import Annotated
 
 import cappa
 import fujin
@@ -38,9 +40,18 @@ class Fujin:
         | Prune
         | Printenv
     ]
+    verbose: Annotated[
+        bool,
+        cappa.Arg(short=None, long="--verbose", help="Enable verbose logging"),
+    ] = False
 
 
 def main():
+    # Configure logging early based on argv
+    verbose = "-v" in sys.argv or "--verbose" in sys.argv
+    level = logging.DEBUG if verbose else logging.WARN
+    logging.basicConfig(level=level, format="%(message)s")
+
     alias_cmd = _parse_aliases()
     if alias_cmd:
         cappa.invoke(Fujin, argv=alias_cmd, version=fujin.__version__)

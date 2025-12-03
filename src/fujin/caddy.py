@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.request
 
 from fujin.config import Config
 from fujin.connection import SSH2Connection as Connection
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_VERSION = "2.10.2"
 GH_TAR_FILENAME = "caddy_{version}_linux_amd64.tar.gz"
@@ -16,10 +19,13 @@ GH_RELEASE_LATEST_URL = "https://api.github.com/repos/caddyserver/caddy/releases
 
 
 def install(conn: Connection) -> bool:
+    logger.debug("Checking if Caddy is already installed")
     _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
     if result_ok:
+        logger.debug("Caddy is already installed")
         return False
     version = get_latest_gh_tag()
+    logger.info(f"Installing Caddy version {version}")
     download_url = GH_DOWNL0AD_URL.format(version=version)
     filename = GH_TAR_FILENAME.format(version=version)
     with conn.cd("/tmp"):
@@ -58,6 +64,7 @@ def install(conn: Connection) -> bool:
 
 
 def uninstall(conn: Connection):
+    logger.info("Uninstalling Caddy")
     conn.run("sudo systemctl stop caddy", pty=True)
     conn.run("sudo systemctl disable caddy", pty=True)
     conn.run("sudo rm /usr/bin/caddy", pty=True)
@@ -67,6 +74,7 @@ def uninstall(conn: Connection):
 
 
 def setup(conn: Connection, config: Config):
+    logger.debug("Setting up Caddy configuration")
     rendered_content = config.render_caddyfile()
 
     remote_path = config.caddy_config_path
@@ -81,19 +89,27 @@ def setup(conn: Connection, config: Config):
 
 
 def teardown(conn: Connection, config: Config):
+    logger.debug("Tearing down Caddy configuration")
     remote_path = config.caddy_config_path
     conn.run(f"sudo rm {remote_path}", warn=True, pty=True)
     conn.run("sudo systemctl reload caddy", pty=True)
 
 
 def get_latest_gh_tag() -> str:
+    logger.debug("Fetching latest Caddy version from GitHub")
     with urllib.request.urlopen(GH_RELEASE_LATEST_URL) as response:
         if response.status != 200:
+            logger.warning(
+                f"Failed to fetch latest Caddy version, using default: {DEFAULT_VERSION}"
+            )
             return DEFAULT_VERSION
         try:
             data = json.loads(response.read().decode())
             return data["tag_name"][1:]
         except (KeyError, json.JSONDecodeError):
+            logger.warning(
+                f"Failed to parse GitHub response, using default: {DEFAULT_VERSION}"
+            )
             return DEFAULT_VERSION
 
 

@@ -148,9 +148,6 @@ class SSH2Connection:
 
         exit_status = channel.get_exit_status()
         if exit_status != 0 and not warn:
-            logger.error(
-                "Command %s failed with exit code %d", full_command, exit_status
-            )
             raise cappa.Exit(
                 f"Command failed with exit code {exit_status}", code=exit_status
             )

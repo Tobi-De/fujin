@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import subprocess
 from pathlib import Path
 
@@ -12,12 +13,15 @@ from fujin.config import InstallationMode
 from fujin.connection import SSH2Connection as Connection
 from fujin.secrets import resolve_secrets
 
+logger = logging.getLogger(__name__)
+
 
 @cappa.command(
     help="Deploy the project by building, transferring files, installing, and configuring services"
 )
 class Deploy(BaseCommand):
     def __call__(self):
+        logger.info("Starting deployment process")
         # parse and resolve secrets in .env file
         if self.config.secret_config:
             self.stdout.output("[blue]Resolving secrets from configuration...[/blue]")
@@ -29,6 +33,9 @@ class Deploy(BaseCommand):
 
         # run build command
         try:
+            logger.debug(
+                f"Building application with command: {self.config.build_command}"
+            )
             self.stdout.output("[blue]Building application...[/blue]")
             subprocess.run(self.config.build_command, check=True, shell=True)
         except subprocess.CalledProcessError as e:
@@ -61,6 +68,7 @@ class Deploy(BaseCommand):
             # prune old versions
             with conn.cd(self.config.app_dir):
                 if self.config.versions_to_keep:
+                    logger.debug("Checking for old versions to prune")
                     result, _ = conn.run(
                         f"sed -n '{self.config.versions_to_keep + 1},$p' .versions",
                         hide=True,
@@ -70,6 +78,9 @@ class Deploy(BaseCommand):
                         result_list = result.split("\n")
                         to_prune = [f"{self.config.app_dir}/v{v}" for v in result_list]
                         if to_prune:
+                            logger.debug(
+                                f"Pruning old versions: {', '.join(result_list)}"
+                            )
                             self.stdout.output(
                                 "[blue]Pruning old release versions...[/blue]"
                             )
@@ -158,6 +169,7 @@ class Deploy(BaseCommand):
         rolling_back: bool = False,
     ):
         version = version or self.config.version
+        logger.debug(f"Installing project version {version}")
 
         # transfer binary or package file
         release_dir = self.config.get_release_dir(version)
@@ -166,6 +178,7 @@ class Deploy(BaseCommand):
         distfile_path = self.config.get_distfile_path(version)
         remote_package_path = f"{release_dir}/{distfile_path.name}"
         if not rolling_back:
+            logger.debug(f"Transferring {distfile_path} to {remote_package_path}")
             conn.put(str(distfile_path), remote_package_path)
 
         # install project
@@ -181,14 +194,15 @@ class Deploy(BaseCommand):
 
             # run release command
             if self.config.release_command:
+                logger.debug(
+                    f"Executing release command: {self.config.release_command}"
+                )
                 self.stdout.output("[blue]Executing release command...[/blue]")
                 # We use bash explicitly to ensure 'source' works and environment is preserved
                 conn.run(f"bash -c 'source .appenv && {self.config.release_command}'")
 
             # update version history
-            result, _ = conn.run(
-                "head -n 1 .versions", warn=True, hide=True
-            )
+            result, _ = conn.run("head -n 1 .versions", warn=True, hide=True)
             result = result.strip()
             if result == version:
                 return
@@ -204,6 +218,7 @@ class Deploy(BaseCommand):
         remote_package_path: str,
         release_dir: str,
     ):
+        logger.debug("Installing python package")
         appenv = f"""
 set -a  # Automatically export all variables
 source .env
@@ -221,9 +236,7 @@ export PATH=".venv/bin:$PATH"
             curr_release_reqs = f"{release_dir}/requirements.txt"
 
             # Get the version currently running on the host to find previous requirements
-            prev_version, _ = conn.run(
-                "head -n 1 .versions", warn=True, hide=True
-            )
+            prev_version, _ = conn.run("head -n 1 .versions", warn=True, hide=True)
             prev_version = prev_version.strip()
             prev_release_reqs = (
                 f"{self.config.get_release_dir(prev_version)}/requirements.txt"
@@ -233,7 +246,9 @@ export PATH=".venv/bin:$PATH"
             remote_hash = ""
 
             if prev_version:
-                res_stdout, res_ok = conn.run(f"md5sum {prev_release_reqs}", warn=True, hide=True)
+                res_stdout, res_ok = conn.run(
+                    f"md5sum {prev_release_reqs}", warn=True, hide=True
+                )
                 if res_ok:
                     remote_hash = res_stdout.strip().split()[0]
 
@@ -262,6 +277,7 @@ export PATH=".venv/bin:$PATH"
         conn.run(f"uv pip install {remote_package_path}")
 
     def _install_binary(self, conn: Connection, remote_package_path: str):
+        logger.debug("Installing binary")
         appenv = f"""
 set -a  # Automatically export all variables
 source .env
