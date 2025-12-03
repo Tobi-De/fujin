@@ -52,7 +52,6 @@ class Server(BaseCommand):
     def exec(
         self,
         command: str,
-        interactive: Annotated[bool, cappa.Arg(default=False, short="-i")],
         appenv: Annotated[
             bool,
             cappa.Arg(
@@ -64,10 +63,7 @@ class Server(BaseCommand):
     ):
         context = self.app_environment() if appenv else self.connection()
         with context as conn:
-            if interactive:
-                conn.run(command, pty=interactive, warn=True)
-            else:
-                self.stdout.output(conn.run(command, hide=True)[0])
+            conn.run(command, pty=True)
 
     @cappa.command(
         name="create-user", help="Create a new user with sudo and ssh access"
@@ -75,7 +71,9 @@ class Server(BaseCommand):
     def create_user(
         self,
         name: str,
-        with_password: Annotated[bool, cappa.Arg(long="--with-password")] = False,
+        with_password: Annotated[
+            bool, cappa.Arg(long="--with-password")
+        ] = False,  # no short arg to force explicitness
     ):
         with self.connection() as conn:
             run_pty = partial(conn.run, pty=True)

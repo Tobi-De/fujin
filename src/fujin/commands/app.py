@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from typing import Annotated
 
 import cappa
@@ -105,15 +106,24 @@ class App(BaseCommand):
     def exec(
         self,
         command: str,
-        interactive: Annotated[bool, cappa.Arg(default=False, short="-i")],
     ):
         with self.app_environment() as conn:
-            if interactive:
-                conn.run(f"{self.config.app_bin} {command}", pty=interactive, warn=True)
-            else:
-                self.stdout.output(
-                    conn.run(f"{self.config.app_bin} {command}", hide=True)[0]
-                )
+            conn.run(f"{self.config.app_bin} {command}", pty=True)
+
+    @cappa.command(help="Start a shell session in the application environment")
+    def shell(self):
+        host = self.config.host
+        ssh_target = f"{host.user}@{host.ip or host.domain_name}"
+
+        cmd = ["ssh", "-t"]
+        if host.ssh_port:
+            cmd.extend(["-p", str(host.ssh_port)])
+        if host.key_filename:
+            cmd.extend(["-i", str(host.key_filename)])
+
+        remote_cmd = f"cd {self.config.app_dir} && source .appenv && $SHELL"
+        cmd.extend([ssh_target, remote_cmd])
+        subprocess.run(cmd)
 
     @cappa.command(
         help="Start the specified service or all services if no name is provided"
