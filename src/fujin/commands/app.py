@@ -8,13 +8,14 @@ from rich.table import Table
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
+from fujin.libssh_connection import host_connection
 
 
 @cappa.command(help="Run application-related tasks")
 class App(BaseCommand):
     @cappa.command(help="Display information about the application")
     def info(self):
-        with self.connection() as conn:
+        with host_connection(self.config.host) as conn:
             remote_version = (
                 conn.run("head -n 1 .versions", warn=True, hide=True).stdout.strip()
                 or "N/A"

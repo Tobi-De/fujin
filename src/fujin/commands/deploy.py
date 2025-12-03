@@ -11,6 +11,7 @@ from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 from fujin.connection import Connection
 from fujin.secrets import resolve_secrets
+from fujin.libssh_connection import host_connection
 
 
 @cappa.command(
@@ -37,7 +38,7 @@ class Deploy(BaseCommand):
         if self.config.requirements and not Path(self.config.requirements).exists():
             raise cappa.Exit(f"{self.config.requirements} not found", code=1)
 
-        with self.connection() as conn:
+        with host_connection(self.config.host) as conn:
             self.stdout.output("[blue]Installing project on remote host...[/blue]")
             conn.run(f"mkdir -p {self.config.app_dir}")
             # copy env file
@@ -181,7 +182,8 @@ class Deploy(BaseCommand):
             # run release command
             if self.config.release_command:
                 self.stdout.output("[blue]Executing release command...[/blue]")
-                conn.run(f"source .appenv && {self.config.release_command}")
+                # We use bash explicitly to ensure 'source' works and environment is preserved
+                conn.run(f"bash -c 'source .appenv && {self.config.release_command}'")
 
             # update version history
             result = conn.run(

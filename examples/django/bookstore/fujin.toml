@@ -28,7 +28,7 @@ worker = { command = ".venv/bin/bookstore db_worker", replicas = 2 }
 # ssh_port = 2222
 
 [host]
-domain_name = "test.oluwatobi.dev"
+domain_name = "13.204.64.39"
 envfile = ".env.prod"
 user = "ubuntu"
 key_filename = "/var/home/tobi/bluefin.pem"

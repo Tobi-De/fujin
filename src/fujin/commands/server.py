@@ -8,6 +8,7 @@ import cappa
 
 from fujin import caddy
 from fujin.commands import BaseCommand
+from fujin.libssh_connection import host_connection
 
 
 @cappa.command(help="Manage server operations")
@@ -23,15 +24,18 @@ class Server(BaseCommand):
 
     @cappa.command(help="Setup uv, web proxy, and install necessary dependencies")
     def bootstrap(self):
-        with self.connection() as conn:
+        with host_connection(self.config.host) as conn:
+            self.stdout.output("[blue]Bootstrapping server...[/blue]")
             conn.run("sudo apt update && sudo apt upgrade -y", pty=True)
             conn.run("sudo apt install -y sqlite3 curl rsync", pty=True)
             result = conn.run("command -v uv", warn=True)
             if not result.ok:
+                self.output.output("[blue]Installing uv tool...[/blue]")
                 conn.run("curl -LsSf https://astral.sh/uv/install.sh | sh")
                 conn.run("uv tool update-shell")
             conn.run("uv tool install fastfetch-bin-edge")
             if self.config.webserver.enabled:
+                self.stdout.output("[blue]Setting up Caddy web server...[/blue]")
                 installed = caddy.install(conn)
                 if not installed:
                     self.stdout.output("[yellow]Caddy is already installed.[/yellow]")

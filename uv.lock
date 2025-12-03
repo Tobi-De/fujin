@@ -522,7 +522,7 @@ name = "exceptiongroup"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0b/9f/a65090624ecf468cdca03533906e7c69ed7588582240cfe7cc9e770b50eb/exceptiongroup-1.3.0.tar.gz", hash = "sha256:b241f5885f560bc56a59ee63ca4c6a8bfa46ae4ad651af316d4e81817bb9fd88", size = 29749, upload-time = "2025-05-10T17:42:51.123Z" }
 wheels = [
@@ -555,7 +555,7 @@ wheels = [
 
 [[package]]
 name = "fujin-cli"
-version = "0.13.0"
+version = "0.13.2"
 source = { editable = "." }
 dependencies = [
     { name = "cappa" },
@@ -564,6 +564,7 @@ dependencies = [
     { name = "msgspec", extra = ["toml"] },
     { name = "python-dotenv" },
     { name = "rich" },
+    { name = "ssh2-python" },
 ]
 
 [package.dev-dependencies]
@@ -592,6 +593,7 @@ requires-dist = [
     { name = "msgspec", extras = ["toml"], specifier = ">=0.18.6" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "rich", specifier = ">=13.9.2" },
+    { name = "ssh2-python", specifier = ">=1.2.0.post1" },
 ]
 
 [package.metadata.requires-dev]
@@ -1373,6 +1375,35 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e5/40/edede8dd6977b0d3da179a342c198ed100dd2aba4be081861ee5911e4da4/sqlparse-0.5.3.tar.gz", hash = "sha256:09f67787f56a0b16ecdbde1bfc7f5d9c3371ca683cfeaa8e6ff60b4807ec9272", size = 84999, upload-time = "2024-12-10T12:05:30.728Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a9/5c/bfd6bd0bf979426d405cc6e71eceb8701b148b16c21d2dc3c261efc61c7b/sqlparse-0.5.3-py3-none-any.whl", hash = "sha256:cf2196ed3418f3ba5de6af7e82c694a9fbdbfecccdfc72e281548517081f16ca", size = 44415, upload-time = "2024-12-10T12:05:27.824Z" },
+]
+
+[[package]]
+name = "ssh2-python"
+version = "1.2.0.post1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/ab/8105fdee39bee50e505c9c97e117353e19ab18c250307ec29a7dee46e46c/ssh2_python-1.2.0.post1.tar.gz", hash = "sha256:f981465ace35f96e0935b36091b61d17689d9e0e4f29b33a50882b92c45ddcbd", size = 2242329, upload-time = "2025-10-12T13:21:17.877Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/59/20a8c6598ca4b6c15a160d0ad661b0d1ef2a9841ad73295c61db1dc33d00/ssh2_python-1.2.0.post1-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:f7f79e5a2c804ebe65eb7daaeb5d9b127539037c09f2ec145e46dad0f2121acb", size = 5159582, upload-time = "2025-10-12T13:21:38.984Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/0b/19e751188595b4a89c2dd6040e395a78b75661df5ac731b0afe8a0a001cd/ssh2_python-1.2.0.post1-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:92f2021944cee2c14e1763a2da96049bcca9e5a3fabe5103020e49afbca9b928", size = 4797428, upload-time = "2025-10-12T13:21:05.164Z" },
+    { url = "https://files.pythonhosted.org/packages/07/35/7b923f2992855e22e56c90dbbc551ebd4b4fbc5353c08d8c3e62f150392e/ssh2_python-1.2.0.post1-cp310-cp310-win_amd64.whl", hash = "sha256:5866691c41aad29c4d46d86ed530f4d21bbaff63e66fefdf62189ba74777652e", size = 4232888, upload-time = "2025-10-12T13:19:03.713Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/f4/a99e7d72e06edf30988161d6780562dcc93c8a70ff3c393e9697fdf83ed7/ssh2_python-1.2.0.post1-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:15d8e0c78e0a7fc154e930ef23fa0250c24a0946507484f8064662f3d20fa1db", size = 2124170, upload-time = "2025-10-12T13:14:16.519Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/42/28aa5f91ba897ecaae75657ef564dc6b1abf9b273cdee6efd55a13e30e95/ssh2_python-1.2.0.post1-cp311-cp311-macosx_13_0_arm64.whl", hash = "sha256:8b47215a05ec20ab7591143d7ccd6c75e1a0543ca88533a3c23fe6734f56c133", size = 2139739, upload-time = "2025-10-12T13:15:48.019Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/e6/8736f6e54d8f4929d5bcd128403a9b324c203b5f0dc848e43966455e822b/ssh2_python-1.2.0.post1-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:bf2b086e31360d94032888ee541fcaeceae8512a12549395b0d29185ea965b18", size = 5239684, upload-time = "2025-10-12T13:21:40.284Z" },
+    { url = "https://files.pythonhosted.org/packages/98/d4/e219702781cfab575e4d8a1b61f762ba6b5f451e137d812b79c9f8a064be/ssh2_python-1.2.0.post1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:fe103dabbaa166357251626bf83cb91be30a430506d8607db88c0ac8c4a3974e", size = 4878637, upload-time = "2025-10-12T13:21:06.449Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/8f/63f1a1d27060de6161632ac8270563dfdf4570cb91a1dfa017244597e10a/ssh2_python-1.2.0.post1-cp311-cp311-win_amd64.whl", hash = "sha256:9d37b9a0e020da7c3a571a6c7ebb5813c93289e5f6fa67c8683faa161f7c44c2", size = 4234188, upload-time = "2025-10-12T13:19:05.189Z" },
+    { url = "https://files.pythonhosted.org/packages/65/b6/8e359e3552ff99294eb032c32e4df93befbda7e559464cb21ebd410e4ffb/ssh2_python-1.2.0.post1-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:0d8b24562ca03ef3b34e33c7e1983dba5400b5104c710c1152e4fa38e2a07284", size = 2739402, upload-time = "2025-10-12T13:12:20.847Z" },
+    { url = "https://files.pythonhosted.org/packages/53/cb/63d2eaed35f18c2e0ac38cb976fa9d5a09851cd90f50b4fc2fa4f9743774/ssh2_python-1.2.0.post1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:5bd9b71bbb5c774d6a636dc06e6a31b4a2054daa7990ce59287ec21d31ae1cb4", size = 5426089, upload-time = "2025-10-12T13:21:41.532Z" },
+    { url = "https://files.pythonhosted.org/packages/41/56/cb4d6c28f7729b526c65736294222d9795fe69e8983e9573fc1171c54956/ssh2_python-1.2.0.post1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:9fcedb17e4ecc722b39a404fb50897b219e7cd72c1806750b1f8e7e34a6c0a95", size = 5061859, upload-time = "2025-10-12T13:21:08.02Z" },
+    { url = "https://files.pythonhosted.org/packages/09/9a/867101dd3bef55c7152db60694c4f8bd953bec0072014212fbc2dab160c3/ssh2_python-1.2.0.post1-cp312-cp312-win_amd64.whl", hash = "sha256:46b5c36ae21c9ce84bff63e01f906f035939fb7fabdd4d67a50e7f6ee7d6c5dc", size = 4233777, upload-time = "2025-10-12T13:19:06.422Z" },
+    { url = "https://files.pythonhosted.org/packages/75/a0/aa9f1e6e42d3e3ceb2d8de3ac85535966efba08f45c0f88bff71013a4ba6/ssh2_python-1.2.0.post1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9026146fbeba2439263d29131850e4c02b8845ae5f81c7f0c21421bba92b3a1a", size = 5360692, upload-time = "2025-10-12T13:21:42.868Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/ff/5055064dab6b273c2fd3ae969050423f223828006a9611eeaf588977e204/ssh2_python-1.2.0.post1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:de3456b4940e5822bb65a526d7881af552f0a0de7dc69714526e294623c549b7", size = 4984822, upload-time = "2025-10-12T13:21:09.685Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/87/19a49ea7e81bab56f726da04d17bb9d3eb7ee2e32bf7de1b77186d05b2d9/ssh2_python-1.2.0.post1-cp313-cp313-win_amd64.whl", hash = "sha256:3558f8cbb5934a8e15c1de1c89214d952007be6937029c21960956f3417ef5f5", size = 4224015, upload-time = "2025-10-12T13:19:07.629Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/a6/2f5c757d826492ffdc73c4e8b426db693cb6fee1af3c9606ad1401e392a1/ssh2_python-1.2.0.post1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:6abfd574f557767a6e9bccd717cb2906b1fe6f56dace4aa62e1cebe002048665", size = 5346267, upload-time = "2025-10-12T13:21:44.484Z" },
+    { url = "https://files.pythonhosted.org/packages/77/3b/966a19024c35749f2acb58c07623e754d031ebbe8c759b972a3417ba7d58/ssh2_python-1.2.0.post1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:42ac53dc85bc84573fae559090badb39732014f296cc213cc6cc2d9925f28685", size = 4951927, upload-time = "2025-10-12T13:21:11.216Z" },
+    { url = "https://files.pythonhosted.org/packages/75/98/55cd51f1b08b2c78abfa48f92cb53161a947d76e85bf05d66a249cd87867/ssh2_python-1.2.0.post1-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:cb7376604f64df06fcc397dd38337fe7271b807c2d3b8394459ffcccb7f38b84", size = 5725241, upload-time = "2025-10-12T13:21:46.047Z" },
+    { url = "https://files.pythonhosted.org/packages/80/e4/9436676cee8592978a646c9adcbe4412f69d1cd750bef9d4f2c795979220/ssh2_python-1.2.0.post1-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:4a2f49996543b21af7e94b4296695ef5a3da59394f07c4e1178172533a3a46ee", size = 5266355, upload-time = "2025-10-12T13:21:12.775Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/04/ecc0b69cc2adce9048cdc500b84ffc93e87185a31e726140ffed6deb6061/ssh2_python-1.2.0.post1-pp311-pypy311_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:444190e9c92e8429a3aefd7fb40190ae1f1c3c766b53c5a1bbddcf7e08d7ca6a", size = 3323498, upload-time = "2025-10-12T13:21:50.239Z" },
+    { url = "https://files.pythonhosted.org/packages/14/81/8c7cea6395b1ce03aaced3682c1170c0b0e407e5040dfdb6a5c6fa66131b/ssh2_python-1.2.0.post1-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:841a8f4117dd075e1ae50f20933097d0e0e8873451a8c52546f5e69c4b0582d6", size = 2970478, upload-time = "2025-10-12T13:21:16.546Z" },
 ]
 
 [[package]]
