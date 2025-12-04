@@ -6,21 +6,26 @@ import sys
 import re
 import logging
 import cappa
-import time
 from contextlib import contextmanager
 from typing import Generator
 from fujin.config import HostConfig
-from ssh2.session import Session
+from ssh2.session import (
+    Session,
+    LIBSSH2_SESSION_BLOCK_INBOUND,
+    LIBSSH2_SESSION_BLOCK_OUTBOUND,
+)
 from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
+from select import select
 
 logger = logging.getLogger(__name__)
 
 
 class SSH2Connection:
-    def __init__(self, session: Session, host: HostConfig):
+    def __init__(self, session: Session, host: HostConfig, sock: socket.socket):
         self.session = session
         self.host = host
         self.cwd = ""
+        self.sock = sock
 
     @contextmanager
     def cd(self, path: str):
@@ -74,16 +79,20 @@ class SSH2Connection:
         channel = self.session.open_session()
         # this allow us to show output in near real-time
         self.session.set_blocking(False)
+
         try:
             if pty:
                 channel.pty()
             channel.execute(full_command)
-            while not channel.eof():
+
+            while True:
                 # Read stdout
                 size, data = channel.read()
-                if size > 0:
+                if size == LIBSSH2_ERROR_EAGAIN:
+                    self._wait_for_socket()  # wait for readiness
+                elif size > 0:
                     text = data.decode("utf-8", errors="replace")
-                    if hide not in ("out", True):
+                    if not hide or hide == "err":
                         sys.stdout.write(text)
                         sys.stdout.flush()
                     stdout_buffer.append(text)
@@ -97,16 +106,24 @@ class SSH2Connection:
                                 channel.write(pass_response)
 
                 # Read stderr
-                size, data = channel.read_stderr()
-                if size > 0:
-                    text = data.decode("utf-8", errors="replace")
-                    if hide not in ("err", True):
-                        sys.stderr.write(text)
+                size_err, data_err = channel.read_stderr()
+                if size_err == LIBSSH2_ERROR_EAGAIN:
+                    self._wait_for_socket()
+                elif size_err > 0:
+                    text_err = data_err.decode("utf-8", errors="replace")
+                    if not hide or hide == "out":
+                        sys.stderr.write(text_err)
                         sys.stderr.flush()
-                    stderr_buffer.append(text)
+                    stderr_buffer.append(text_err)
 
-                # # Sleep briefly to avoid 100% CPU usage
-                time.sleep(0.01)
+                try:
+                    eof = channel.eof()
+                except Exception:
+                    eof = False
+
+                if eof:
+                    break
+
         finally:
             self.session.set_blocking(True)
             channel.wait_eof()
@@ -120,6 +137,18 @@ class SSH2Connection:
             )
 
         return "".join(stdout_buffer), exit_status == 0
+
+    def _wait_for_socket(self, timeout=1.0):
+        """Wait until the session socket is ready for read/write."""
+        directions = self.session.block_directions()
+
+        if directions == 0:
+            return
+
+        rlist = [self.sock] if directions & LIBSSH2_SESSION_BLOCK_INBOUND else []
+        wlist = [self.sock] if directions & LIBSSH2_SESSION_BLOCK_OUTBOUND else []
+
+        select(rlist, wlist, [], timeout)
 
     def put(self, local: str, remote: str):
         """
@@ -194,7 +223,7 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
     if not session.userauth_authenticated():
         raise cappa.Exit("Authentication failed")
 
-    conn = SSH2Connection(session, host)
+    conn = SSH2Connection(session, host, sock=sock)
     try:
         yield conn
     finally:
