@@ -4,11 +4,13 @@ from pathlib import Path
 import socket
 import sys
 import re
+import os
 import logging
 import cappa
 from contextlib import contextmanager
 from typing import Generator
 from fujin.config import HostConfig
+
 from ssh2.session import (
     Session,
     LIBSSH2_SESSION_BLOCK_INBOUND,
@@ -86,42 +88,74 @@ class SSH2Connection:
             channel.execute(full_command)
 
             while True:
-                # Read stdout
-                size, data = channel.read()
-                if size == LIBSSH2_ERROR_EAGAIN:
-                    self._wait_for_socket()  # wait for readiness
-                elif size > 0:
-                    text = data.decode("utf-8", errors="replace")
-                    if not hide or hide == "err":
-                        sys.stdout.write(text)
-                        sys.stdout.flush()
-                    stdout_buffer.append(text)
+                # Determine what libssh2 needs
+                directions = self.session.block_directions()
 
-                    if "sudo" in text and watchers:
-                        for pattern in watchers:
-                            if pattern.search(text):
-                                logger.debug(
-                                    "Password pattern matched, sending response"
-                                )
-                                channel.write(pass_response)
+                read_fds = [sys.stdin]
+                write_fds = []
 
-                # Read stderr
-                size_err, data_err = channel.read_stderr()
-                if size_err == LIBSSH2_ERROR_EAGAIN:
-                    self._wait_for_socket()
-                elif size_err > 0:
-                    text_err = data_err.decode("utf-8", errors="replace")
-                    if not hide or hide == "out":
-                        sys.stderr.write(text_err)
-                        sys.stderr.flush()
-                    stderr_buffer.append(text_err)
+                # If libssh2 wants to READ from network
+                if directions & LIBSSH2_SESSION_BLOCK_INBOUND:
+                    read_fds.append(self.sock)
 
-                try:
-                    eof = channel.eof()
-                except Exception:
-                    eof = False
+                # If libssh2 wants to WRITE to network
+                if directions & LIBSSH2_SESSION_BLOCK_OUTBOUND:
+                    write_fds.append(self.sock)
 
-                if eof:
+                # Wait until something is ready
+                r_ready, *_ = select(read_fds, write_fds, [], 1.0)
+
+                if sys.stdin in r_ready:
+                    try:
+                        data = os.read(sys.stdin.fileno(), 1024)
+                        if data:
+                            # User typed something → send to SSH channel
+                            rc = channel.write(data)
+                            while rc == LIBSSH2_ERROR_EAGAIN:
+                                select([], [self.sock], [], 1.0)
+                                rc = channel.write(data)
+                    except BlockingIOError:
+                        print("BlockingIOError on stdin read")
+                        pass
+
+                if self.sock in r_ready or (directions & LIBSSH2_SESSION_BLOCK_INBOUND):
+                    # Read stdout
+                    while True:
+                        size, data = channel.read()
+                        if size == LIBSSH2_ERROR_EAGAIN:
+                            break
+                        if size > 0:
+                            text = data.decode("utf-8", errors="replace")
+                            if not hide or hide == "err":
+                                sys.stdout.write(text)
+                                sys.stdout.flush()
+                            stdout_buffer.append(text)
+
+                            if "sudo" in text and watchers:
+                                for pattern in watchers:
+                                    if pattern.search(text):
+                                        logger.debug(
+                                            "Password pattern matched, sending response"
+                                        )
+                                        channel.write(pass_response)
+                        else:
+                            break
+
+                    # Read stderr
+                    while True:
+                        size, data = channel.read_stderr()
+                        if size == LIBSSH2_ERROR_EAGAIN:
+                            break
+                        if size > 0:
+                            text = data.decode("utf-8", errors="replace")
+                            if not hide or hide == "out":
+                                sys.stderr.write(text)
+                                sys.stderr.flush()
+                            stderr_buffer.append(text)
+                        else:
+                            break
+
+                if channel.eof():
                     break
 
         finally:
@@ -137,18 +171,6 @@ class SSH2Connection:
             )
 
         return "".join(stdout_buffer), exit_status == 0
-
-    def _wait_for_socket(self, timeout=1.0):
-        """Wait until the session socket is ready for read/write."""
-        directions = self.session.block_directions()
-
-        if directions == 0:
-            return
-
-        rlist = [self.sock] if directions & LIBSSH2_SESSION_BLOCK_INBOUND else []
-        wlist = [self.sock] if directions & LIBSSH2_SESSION_BLOCK_OUTBOUND else []
-
-        select(rlist, wlist, [], timeout)
 
     def put(self, local: str, remote: str):
         """
@@ -189,9 +211,11 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         logger.info(f"Connecting to {host.ip}:{host.ssh_port}...")
+        sock.settimeout(30)
         sock.connect((host.ip or host.domain_name, host.ssh_port))
+        sock.settimeout(None)
     except socket.error as e:
-        raise Exception(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
+        raise cappa.Exit(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
 
     session = Session()
     try:
@@ -199,7 +223,7 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         session.handshake(sock)
     except Exception as e:
         sock.close()
-        raise Exception("SSH Handshake failed") from e
+        raise cappa.Exit("SSH Handshake failed") from e
 
     logger.info("Authenticating...")
     try:
