@@ -29,10 +29,3 @@ class BaseCommand:
     def connection(self):
         with host_connection(host=self.config.host) as conn:
             yield conn
-
-    @contextmanager
-    def app_environment(self) -> Generator[SSH2Connection, None, None]:
-        with self.connection() as conn:
-            with conn.cd(self.config.app_dir):
-                with conn.prefix("source .appenv"):
-                    yield conn

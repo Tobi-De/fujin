@@ -109,8 +109,9 @@ class App(BaseCommand):
         self,
         command: str,
     ):
-        with self.app_environment() as conn:
-            conn.run(f"{self.config.app_bin} {command}", pty=True)
+        with self.connection() as conn:
+            with conn.cd(self.config.app_dir):
+                conn.run(f"source .appenv && {self.config.app_bin} {command}", pty=True)
 
     @cappa.command(
         help="Start a shell session or run an interactive command in the application environment"

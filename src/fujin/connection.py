@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
 import socket
-import os
 import sys
 import re
 import logging
@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from typing import Generator
 from fujin.config import HostConfig
 from ssh2.session import Session
+from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +21,6 @@ class SSH2Connection:
         self.session = session
         self.host = host
         self.cwd = ""
-        self._prefix = None
-
-    @contextmanager
-    def prefix(self, command: str):
-        self._prefix = command
-        try:
-            yield
-        finally:
-            self._prefix = None
 
     @contextmanager
     def cd(self, path: str):
@@ -47,7 +39,6 @@ class SSH2Connection:
     def run(
         self,
         command: str,
-        env: dict[str, str] | None = None,
         warn: bool = False,
         pty: bool = False,
         hide: bool = False,
@@ -55,98 +46,72 @@ class SSH2Connection:
         """
         Executes a command on the remote host.
         """
-        channel = self.session.open_session()
-        if pty:
-            channel.pty()
-        env = env or {}
-        # Add default paths to ensure uv is found
-        extra_paths = [
-            f"/home/{self.host.user}/.cargo/bin",
-            f"/home/{self.host.user}/.local/bin",
-        ]
-        path_str = ":".join(extra_paths)
 
-        if "PATH" in env:
-            env["PATH"] = f"{path_str}:{env['PATH']}"
-        else:
-            env["PATH"] = f"{path_str}:$PATH"
-
-        # Handle env vars by prepending them to the command
-        # This avoids AcceptEnv issues on the server
-        # We use double quotes to allow variable expansion (e.g. $PATH)
-        env_pairs = []
-        for k, v in env.items():
-            escaped_v = v.replace('"', '\\"')
-            env_pairs.append(f'{k}="{escaped_v}"')
-
-        env_prefix = " ".join(env_pairs) + " "
-
-        # Handle cwd
         cwd_prefix = ""
         if self.cwd:
             logger.info(f"Changing directory to {self.cwd}")
             cwd_prefix = f"cd {self.cwd} && "
 
-        # Handle prefix
-        prefix_str = ""
-        if self._prefix:
-            prefix_str = f"{self._prefix} && "
-
-        full_command = f"{cwd_prefix}{prefix_str}{env_prefix}{command}"
+        # Add default paths to ensure uv is found
+        env_prefix = (
+            f"/home/{self.host.user}/.cargo/bin:/home/{self.host.user}/.local/bin:$PATH"
+        )
+        full_command = f'export PATH="{env_prefix}" && {cwd_prefix}{command}'
         logger.debug(f"Running command: {full_command}")
 
-        watchers = []
+        watchers, pass_response = None, None
         if self.host.password:
             logger.debug("Setting up sudo password watchers")
-            watchers.append(
-                (re.compile(r"\[sudo\] password:"), f"{self.host.password}\n")
+            watchers = (
+                re.compile(r"\[sudo\] password:"),
+                re.compile(rf"\[sudo\] password for {self.host.user}:"),
             )
-            watchers.append(
-                (
-                    re.compile(rf"\[sudo\] password for {self.host.user}:"),
-                    f"{self.host.password}\n",
-                )
-            )
+            pass_response = self.host.password + "\n"
 
-        channel.execute(full_command)
         stdout_buffer = []
         stderr_buffer = []
 
+        channel = self.session.open_session()
+        # this allow us to show output in near real-time
+        self.session.set_blocking(False)
         try:
-            # this makes channel reads non-blocking
-            self.session.set_blocking(False)
+            if pty:
+                channel.pty()
+            channel.execute(full_command)
             while not channel.eof():
                 # Read stdout
                 size, data = channel.read()
                 if size > 0:
                     text = data.decode("utf-8", errors="replace")
-                    if not hide or (isinstance(hide, str) and hide == "err"):
+                    if hide not in ("out", True):
                         sys.stdout.write(text)
                         sys.stdout.flush()
                     stdout_buffer.append(text)
 
-                    for pattern, response in watchers:
-                        if pattern.search(text):
-                            logger.debug("Pattern matched, sending response")
-                            channel.write(response)
+                    if "sudo" in text and watchers:
+                        for pattern in watchers:
+                            if pattern.search(text):
+                                logger.debug(
+                                    "Password pattern matched, sending response"
+                                )
+                                channel.write(pass_response)
 
                 # Read stderr
                 size, data = channel.read_stderr()
                 if size > 0:
                     text = data.decode("utf-8", errors="replace")
-                    if not hide or (isinstance(hide, str) and hide == "out"):
+                    if hide not in ("err", True):
                         sys.stderr.write(text)
                         sys.stderr.flush()
                     stderr_buffer.append(text)
 
-                # Sleep briefly to avoid 100% CPU usage
+                # # Sleep briefly to avoid 100% CPU usage
                 time.sleep(0.01)
         finally:
             self.session.set_blocking(True)
-
-        channel.wait_eof()
-        channel.close()
-        channel.wait_closed()
+            channel.wait_eof()
+            channel.close()
+            channel.wait_closed()
 
         exit_status = channel.get_exit_status()
         if exit_status != 0 and not warn:
@@ -160,13 +125,21 @@ class SSH2Connection:
         """
         Uploads a local file to the remote host.
         """
-        fileinfo = os.stat(local)
+        local_path = Path(local)
+
+        if not local_path.exists():
+            raise FileNotFoundError(f"Local file not found: {local}")
+
+        if not local_path.is_file():
+            raise ValueError(f"Local path is not a file: {local}")
+
+        fileinfo = local_path.stat()
 
         # If remote path is relative, prepend cwd
         if not remote.startswith("/") and self.cwd:
             remote = f"{self.cwd}/{remote}"
 
-        chan = self.session.scp_send64(
+        channel = self.session.scp_send64(
             remote,
             fileinfo.st_mode & 0o777,
             fileinfo.st_size,
@@ -174,9 +147,12 @@ class SSH2Connection:
             fileinfo.st_atime,
         )
 
-        with open(local, "rb") as local_fh:
-            for data in local_fh:
-                chan.write(data)
+        try:
+            with open(local, "rb") as local_fh:
+                for data in local_fh:
+                    channel.write(data)
+        finally:
+            channel.close()
 
 
 @contextmanager
@@ -196,17 +172,16 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         sock.close()
         raise Exception("SSH Handshake failed") from e
 
-    # Authentication
     logger.info("Authenticating...")
     try:
-        # maybe add support for passphrase later
+        # TODO: maybe add support for passphrase later
         if host.key_filename:
             logger.debug(
                 "Authenticating with public key from file %s", host.key_filename
             )
             session.userauth_publickey_fromfile(host.user, str(host.key_filename), "")
         elif host.password:
-            logger.debug("Authenticating with password %s", host.password)
+            logger.debug("Authenticating with password")
             session.userauth_password(host.user, host.password)
         else:
             logger.debug("Authenticating with SSH agent...")
@@ -216,9 +191,16 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         sock.close()
         raise cappa.Exit(f"Authentication failed for {host.user}") from e
 
+    if not session.userauth_authenticated():
+        raise cappa.Exit("Authentication failed")
+
     conn = SSH2Connection(session, host)
     try:
         yield conn
     finally:
-        session.disconnect()
-        sock.close()
+        try:
+            session.disconnect()
+        except Exception as e:
+            logger.warning(f"Error disconnecting session: {e}")
+        finally:
+            sock.close()
