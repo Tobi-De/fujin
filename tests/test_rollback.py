@@ -22,20 +22,5 @@ def test_rollback(mock_connection, get_commands):
         rollback()
 
         assert get_commands(mock_connection.mock_calls) == snapshot(
-            [
-                "sed -n '2,$p' .versions",
-                "head -n 1 .versions",
-                "mkdir -p /home/testuser/.local/share/fujin/testapp/v0.0.9",
-                """\
-echo 'set -a  # Automatically export all variables
-source .env
-set +a  # Stop automatic export
-export UV_COMPILE_BYTECODE=1
-export UV_PYTHON=python3.12
-export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv && uv python install 3.12 && test -d .venv || uv venv && uv pip install /home/testuser/.local/share/fujin/testapp/v0.0.9/testapp-0.0.9.whl\
-""",
-                'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "0.0.9" ]; then if [ -z "$current" ]; then echo \'0.0.9\' > .versions; else sed -i \'1i 0.0.9\' .versions; fi; fi',
-                "sudo systemctl restart testapp.service testapp-worker@1.service testapp-worker@2.service",
-                "rm -r v0.1.0 && sed -i '1,/0.0.9/{/0.0.9/!d}' .versions",
-            ]
+            ["ls -1t /home/testuser/.local/share/fujin/testapp/.versions"]
         )

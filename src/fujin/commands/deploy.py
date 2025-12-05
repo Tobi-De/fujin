@@ -58,7 +58,7 @@ class Deploy(BaseCommand):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.stdout.output("[blue]Preparing deployment bundle...[/blue]")
-            bundle_dir = Path(tmpdir) / "bundle"
+            bundle_dir = Path(tmpdir) / f"{self.config.app_name}-bundle"
             bundle_dir.mkdir()
 
             # Copy artifacts
@@ -66,30 +66,28 @@ class Deploy(BaseCommand):
             if self.config.requirements:
                 shutil.copy(self.config.requirements, bundle_dir / "requirements.txt")
 
-            # Write .env
             (bundle_dir / ".env").write_text(parsed_env)
 
-            # Write systemd units
             units_dir = bundle_dir / "units"
             units_dir.mkdir()
             new_units = self.config.render_systemd_units()
             for name, content in new_units.items():
                 (units_dir / name).write_text(content)
 
-            # Write Caddyfile
             if self.config.webserver.enabled:
                 (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
 
-            # Generate scripts
             install_script = self._generate_install_script(
                 version=version,
                 distfile_name=distfile_path.name,
                 new_units=new_units,
             )
             (bundle_dir / "install.sh").write_text(install_script)
+            logger.debug("Generated install script:\n%s", install_script)
 
             uninstall_script = self._generate_uninstall_script(new_units)
             (bundle_dir / "uninstall.sh").write_text(uninstall_script)
+            logger.debug("Generated uninstall script:\n%s", uninstall_script)
 
             # Create tarball
             tar_path = Path(tmpdir) / "deploy.tar.gz"
@@ -97,6 +95,7 @@ class Deploy(BaseCommand):
                 tar.add(bundle_dir, arcname=".")
 
             # Calculate local checksum
+            logger.info("Calculating local bundle checksum")
             sha256_hash = hashlib.sha256()
             with open(tar_path, "rb") as f:
                 for byte_block in iter(lambda: f.read(4096), b""):
@@ -105,17 +104,16 @@ class Deploy(BaseCommand):
 
             # Upload and Execute
             with self.connection() as conn:
-                bundle_filename = f"{self.config.app_name}-{version}.tar.gz"
                 remote_bundle_dir = f"{self.config.app_dir}/.versions"
-                remote_bundle_path = f"{remote_bundle_dir}/{bundle_filename}"
-
+                remote_bundle_path = (
+                    f"{remote_bundle_dir}/{self.config.app_name}-{version}.tar.gz"
+                )
                 conn.run(f"mkdir -p {remote_bundle_dir}")
-
                 while True:
                     self.stdout.output("[blue]Uploading deployment bundle...[/blue]")
                     conn.put(str(tar_path), remote_bundle_path)
 
-                    # Verify checksum
+                    logger.info("Verifying uploaded bundle checksum")
                     remote_checksum_out, _ = conn.run(
                         f"sha256sum {remote_bundle_path} | awk '{{print $1}}'",
                         hide=True,
@@ -140,7 +138,6 @@ class Deploy(BaseCommand):
 
                 self.stdout.output("[blue]Executing remote installation...[/blue]")
                 remote_extract_dir = f"/tmp/{self.config.app_name}-{version}"
-
                 install_cmd = (
                     f"mkdir -p {remote_extract_dir} && "
                     f"tar -xzf {remote_bundle_path} -C {remote_extract_dir} && "
@@ -162,16 +159,16 @@ class Deploy(BaseCommand):
         distfile_name: str,
         new_units: dict[str, str],
     ) -> str:
-        script = ["#!/usr/bin/env bash", "set -e"]
-        script.append("BUNDLE_DIR=$(pwd)")
-
-        script.append('echo "Setting up directories..."')
-        # Setup directories
-        script.append(f"mkdir -p {self.config.app_dir}")
-        script.append(f"mv .env {self.config.app_dir}/.env")
-
-        # Install Project
-        script.append(f"cd {self.config.app_dir}")
+        script = [
+            "#!/usr/bin/env bash",
+            "set -e",
+            "BUNDLE_DIR=$(pwd)",
+            'echo "==> Setting up directories..."',
+            f"mkdir -p {self.config.app_dir}",
+            f"mv .env {self.config.app_dir}/.env",
+            "echo '==> Installing application...'",
+            f"cd {self.config.app_dir}",
+        ]
 
         if self.config.installation_mode == InstallationMode.PY_PACKAGE:
             script.extend(
@@ -191,102 +188,77 @@ class Deploy(BaseCommand):
                 )
             )
 
-        # Release Command
         if self.config.release_command:
-            script.append(f"echo 'Running release command'")
-            script.append(f"bash -c 'source .appenv && {self.config.release_command}'")
+            script.extend(
+                [
+                    f"echo '==> Running release command'",
+                    f"bash -c 'source .appenv && {self.config.release_command}'",
+                ]
+            )
 
-        # Version Management
-        script.append(f"echo '{version}' > .current_version")
-
-        script.append("cd $BUNDLE_DIR")
-
-        script.append('echo "Configuring systemd services..."')
-        # Install Services
-        for name in new_units.keys():
-            script.append(f"sudo cp units/{name} /etc/systemd/system/")
-
-        script.append("sudo systemctl daemon-reload")
-
-        # Cleanup Stale Units & Files
+        script.extend(
+            [
+                f"echo '{version}' > .version",
+                "cd $BUNDLE_DIR",
+                'echo "==> Configuring systemd services..."',
+            ]
+        )
+        script.extend(
+            [f"sudo cp units/{name} /etc/systemd/system/" for name in new_units.keys()]
+        )
         valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
         valid_units_str = " ".join(valid_units)
-        script.append(
-            f"""
-# Cleanup Stale Units
-VALID_UNITS="{valid_units_str}"
-ALL_UNITS=$(systemctl list-units --full --all --plain --no-legend '{self.config.app_name}*' | awk '{{print $1}}')
-for UNIT in $ALL_UNITS; do
-    if [[ ! " $VALID_UNITS " =~ " $UNIT " ]]; then
-        echo "Stopping stale service unit: $UNIT"
-        sudo systemctl disable --now "$UNIT" || true
-    fi
-done
-
-# Cleanup Stale Files
-SEARCH_DIRS="/etc/systemd/system /etc/systemd/system/multi-user.target.wants"
-for DIR in $SEARCH_DIRS; do
-    if [ -d "$DIR" ]; then
-        FILES=$(ls $DIR/{self.config.app_name}* 2>/dev/null || true)
-        for FILE in $FILES; do
-            BASENAME=$(basename "$FILE")
-            if [[ ! " $VALID_UNITS " =~ " $BASENAME " ]]; then
-                echo "Removing stale service file: $FILE"
-                sudo rm -f "$FILE"
-            fi
-        done
-    fi
-done
-sudo systemctl daemon-reload
-"""
+        script.extend(
+            [
+                systemd_cleanup_script.format(
+                    app_name=self.config.app_name, valid_units_str=valid_units_str
+                ),
+                'echo "==> Restarting services..."',
+                f"sudo systemctl enable {' '.join(self.config.active_systemd_units)}",
+                f"sudo systemctl restart {' '.join(self.config.active_systemd_units)}",
+            ]
         )
 
-        script.append('echo "Restarting services..."')
-        script.append(
-            f"sudo systemctl enable {' '.join(self.config.active_systemd_units)}"
-        )
-        script.append(
-            f"sudo systemctl restart {' '.join(self.config.active_systemd_units)}"
-        )
-
-        # Caddy
         if self.config.webserver.enabled:
-            script.append('echo "Configuring Caddy..."')
-            script.append(f"sudo mkdir -p $(dirname {self.config.caddy_config_path})")
-            script.append(f"sudo mv Caddyfile {self.config.caddy_config_path}")
-            script.append(f"sudo chown caddy:caddy {self.config.caddy_config_path}")
-            script.append("sudo systemctl reload caddy")
+            script.extend(
+                [
+                    'echo "==> Configuring Caddy..."',
+                    f"sudo mkdir -p $(dirname {self.config.caddy_config_path})",
+                    f"sudo mv Caddyfile {self.config.caddy_config_path}",
+                    f"sudo chown caddy:caddy {self.config.caddy_config_path}",
+                    "sudo systemctl reload caddy",
+                ]
+            )
 
-        # Prune
         if self.config.versions_to_keep:
-            script.append('echo "Pruning old versions..."')
-            script.append(f"cd {self.config.app_dir}/.versions")
-            # Keep only the N most recent bundles
-            script.append(
-                f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm"
+            script.extend(
+                [
+                    'echo "==> Pruning old versions..."',
+                    f"cd {self.config.app_dir}/.versions",
+                    f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
+                ]
             )
 
         return "\n".join(script)
 
     def _generate_uninstall_script(self, new_units: dict[str, str]) -> str:
         script = ["#!/usr/bin/env bash", "set -e"]
-
-        # Stop and disable services
         units = " ".join(self.config.active_systemd_units)
         if units:
             script.append(f"sudo systemctl disable --now {units}")
 
-        # Remove units
-        for name in new_units.keys():
-            script.append(f"sudo rm -f /etc/systemd/system/{name}")
+        script.extend(
+            [f"sudo rm -f /etc/systemd/system/{name}" for name in new_units.keys()]
+        )
+        script.extend(["sudo systemctl daemon-reload", "sudo systemctl reset-failed"])
 
-        script.append("sudo systemctl daemon-reload")
-        script.append("sudo systemctl reset-failed")
-
-        # Remove Caddy config
         if self.config.webserver.enabled:
-            script.append(f"sudo rm -f {self.config.caddy_config_path}")
-            script.append("sudo systemctl reload caddy")
+            script.extend(
+                [
+                    f"sudo rm -f {self.config.caddy_config_path}",
+                    "sudo systemctl reload caddy",
+                ]
+            )
 
         return "\n".join(script)
 
@@ -296,7 +268,7 @@ sudo systemctl daemon-reload
         distfile_path: str,
         requirements_path: str | None,
     ) -> list[str]:
-        logger.debug("Installing python package")
+        logger.info("Generating Python package installation commands")
         appenv = f"""
 set -a  # Automatically export all variables
 source .env
@@ -307,7 +279,7 @@ export PATH=".venv/bin:$PATH"
 """
         commands = [
             f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
-            "echo 'Syncing Python dependencies...'",
+            "echo '==> Syncing Python dependencies...'",
             f"uv python install {self.config.python_version}",
             "test -d .venv || uv venv",
         ]
@@ -317,7 +289,7 @@ export PATH=".venv/bin:$PATH"
         return commands
 
     def _get_binary_install_commands(self, distfile_path: str) -> list[str]:
-        logger.debug("Installing binary")
+        logger.info("Generating binary installation commands")
         appenv = f"""
 set -a  # Automatically export all variables
 source .env
@@ -327,8 +299,70 @@ export PATH="{self.config.app_dir}:$PATH"
         full_path_app_bin = f"{self.config.app_dir}/{self.config.app_bin}"
         commands = [
             f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
-            "echo 'Installing binary...'",
+            "echo '==> Installing binary...'",
             f"cp {distfile_path} {full_path_app_bin}",
             f"chmod +x {full_path_app_bin}",
         ]
         return commands
+
+
+systemd_cleanup_script = """
+
+APP_NAME="{app_name}"
+read -r -a VALID_UNITS <<< "{valid_units_str}"
+
+# --- Helper: check if array contains item exactly ---
+contains_exact() {{
+    local item="$1"
+    shift
+    for i in "$@"; do
+        [[ "$i" == "$item" ]] && return 0
+    done
+    return 1
+}}
+
+echo "==> Cleaning stale systemd units"
+
+mapfile -t ALL_UNITS < <(
+    systemctl list-unit-files --type=service --no-legend --no-pager |
+    awk -v app="$APP_NAME" '$1 ~ "^"app {{print $1}}'
+)
+
+for UNIT in "${{ALL_UNITS[@]}}"; do
+    if ! contains_exact "$UNIT" "${{VALID_UNITS[@]}}"; then
+        echo "→ Disabling + stopping stale unit: $UNIT"
+        # Use conditionals instead of ignoring all errors
+        sudo systemctl disable "$UNIT" --quiet || true
+        sudo systemctl stop "$UNIT" --quiet || true
+    fi
+done
+
+echo "==> Cleaning stale service files"
+
+SEARCH_DIRS=(
+    "/etc/systemd/system"
+    "/etc/systemd/system/multi-user.target.wants"
+)
+
+for DIR in "${{SEARCH_DIRS[@]}}"; do
+    [[ -d "$DIR" ]] || continue
+
+    # Find ONLY files belonging to this app
+    while IFS= read -r -d '' FILE; do
+        BASENAME=$(basename "$FILE")
+
+        if ! contains_exact "$BASENAME" "${{VALID_UNITS[@]}}"; then
+            echo "→ Removing stale file: $FILE"
+            sudo rm -f -- "$FILE"
+        fi
+    done < <(find "$DIR" -maxdepth 1 -type f -name "${{APP_NAME}}*" -print0)
+done
+
+# ---------------------------------------------------------------------------
+# RELOAD DAEMON
+# ---------------------------------------------------------------------------
+
+echo "==> Reloading systemd daemon"
+sudo systemctl daemon-reload
+
+"""

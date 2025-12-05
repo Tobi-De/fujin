@@ -43,7 +43,7 @@ class Rollback(BaseCommand):
                 raise cappa.Exit("Rollback aborted by user.", code=0) from e
 
             current_version, _ = conn.run(
-                f"cat {self.config.app_dir}/.current_version", warn=True, hide=True
+                f"cat {self.config.app_dir}/.version", warn=True, hide=True
             )
             current_version = current_version.strip()
 
@@ -71,10 +71,13 @@ class Rollback(BaseCommand):
                 if exists:
                     # Extract and run uninstall.sh
                     # We extract to a temp dir to be safe
-                    tmp_uninstall_dir = f"/tmp/uninstall-{current_version}"
-                    conn.run(f"mkdir -p {tmp_uninstall_dir}")
+                    tmp_uninstall_dir = (
+                        f"/tmp/uninstall-{self.config.app_name}-{current_version}"
+                    )
                     # Extract full bundle to ensure we get the script regardless of pathing
-                    conn.run(f"tar -xzf {current_bundle} -C {tmp_uninstall_dir}")
+                    conn.run(
+                        f"mkdir -p {tmp_uninstall_dir} && tar -xzf {current_bundle} -C {tmp_uninstall_dir}"
+                    )
                     if conn.run(f"test -f {tmp_uninstall_dir}/uninstall.sh", warn=True)[
                         1
                     ]:

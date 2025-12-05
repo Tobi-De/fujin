@@ -55,8 +55,8 @@ class Down(BaseCommand):
             script_body = [
                 f"APP_DIR={self.config.app_dir}",
                 f"APP_NAME={self.config.app_name}",
-                'if [ -f "$APP_DIR/.current_version" ]; then',
-                '  CURRENT_VERSION=$(cat "$APP_DIR/.current_version")',
+                'if [ -f "$APP_DIR/.version" ]; then',
+                '  CURRENT_VERSION=$(cat "$APP_DIR/.version")',
                 '  CURRENT_BUNDLE="$APP_DIR/.versions/$APP_NAME-$CURRENT_VERSION.tar.gz"',
                 '  if [ -f "$CURRENT_BUNDLE" ]; then',
                 '    TMP_DIR="/tmp/uninstall-$CURRENT_VERSION"',

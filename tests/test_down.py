@@ -21,13 +21,35 @@ def test_down_removes_files_and_stops_services(mock_connection, get_commands):
 
         assert get_commands(mock_connection.mock_calls) == snapshot(
             [
-                "rm -rf /home/testuser/.local/share/fujin/testapp",
-                "sudo rm /etc/caddy/conf.d/testapp.caddy",
-                "sudo systemctl reload caddy",
-                "sudo systemctl disable --now testapp.service testapp-worker@1.service testapp-worker@2.service",
-                "sudo rm /etc/systemd/system/testapp.service /etc/systemd/system/testapp-worker@.service",
-                "sudo systemctl daemon-reload",
-                "sudo systemctl reset-failed",
+                """\
+#!/usr/bin/env bash
+set -e
+APP_DIR=/home/testuser/.local/share/fujin/testapp
+APP_NAME=testapp
+if [ -f "$APP_DIR/.version" ]; then
+  CURRENT_VERSION=$(cat "$APP_DIR/.version")
+  CURRENT_BUNDLE="$APP_DIR/.versions/$APP_NAME-$CURRENT_VERSION.tar.gz"
+  if [ -f "$CURRENT_BUNDLE" ]; then
+    TMP_DIR="/tmp/uninstall-$CURRENT_VERSION"
+    mkdir -p "$TMP_DIR"
+    if tar -xzf "$CURRENT_BUNDLE" -C "$TMP_DIR"; then
+      if [ -f "$TMP_DIR/uninstall.sh" ]; then
+        echo "Running uninstall script for version $CURRENT_VERSION..."
+        bash "$TMP_DIR/uninstall.sh"
+      else
+        echo "Warning: uninstall.sh not found in bundle."
+        if [ -z "$FORCE" ]; then exit 1; fi
+      fi
+    else
+      echo "Warning: Failed to extract bundle."
+      if [ -z "$FORCE" ]; then exit 1; fi
+    fi
+    rm -rf "$TMP_DIR"
+  fi
+fi
+echo "Removing application directory..."
+rm -rf "$APP_DIR"\
+"""
             ]
         )
 
@@ -39,13 +61,40 @@ def test_down_full_uninstall_proxy(mock_connection, get_commands):
 
         assert get_commands(mock_connection.mock_calls) == snapshot(
             [
-                "rm -rf /home/testuser/.local/share/fujin/testapp",
-                "sudo rm /etc/caddy/conf.d/testapp.caddy",
-                "sudo systemctl reload caddy",
-                "sudo systemctl disable --now testapp.service testapp-worker@1.service testapp-worker@2.service",
-                "sudo rm /etc/systemd/system/testapp.service /etc/systemd/system/testapp-worker@.service",
-                "sudo systemctl daemon-reload",
-                "sudo systemctl reset-failed",
-                "sudo systemctl stop caddy && sudo systemctl disable caddy && sudo rm /usr/bin/caddy && sudo rm /etc/systemd/system/caddy.service && sudo userdel caddy && sudo rm -rf /etc/caddy",
+                """\
+#!/usr/bin/env bash
+set -e
+APP_DIR=/home/testuser/.local/share/fujin/testapp
+APP_NAME=testapp
+if [ -f "$APP_DIR/.version" ]; then
+  CURRENT_VERSION=$(cat "$APP_DIR/.version")
+  CURRENT_BUNDLE="$APP_DIR/.versions/$APP_NAME-$CURRENT_VERSION.tar.gz"
+  if [ -f "$CURRENT_BUNDLE" ]; then
+    TMP_DIR="/tmp/uninstall-$CURRENT_VERSION"
+    mkdir -p "$TMP_DIR"
+    if tar -xzf "$CURRENT_BUNDLE" -C "$TMP_DIR"; then
+      if [ -f "$TMP_DIR/uninstall.sh" ]; then
+        echo "Running uninstall script for version $CURRENT_VERSION..."
+        bash "$TMP_DIR/uninstall.sh"
+      else
+        echo "Warning: uninstall.sh not found in bundle."
+        if [ -z "$FORCE" ]; then exit 1; fi
+      fi
+    else
+      echo "Warning: Failed to extract bundle."
+      if [ -z "$FORCE" ]; then exit 1; fi
+    fi
+    rm -rf "$TMP_DIR"
+  fi
+fi
+echo "Removing application directory..."
+rm -rf "$APP_DIR"
+sudo systemctl stop caddy
+sudo systemctl disable caddy
+sudo rm -f /usr/bin/caddy
+sudo rm -f /etc/systemd/system/caddy.service
+sudo userdel caddy
+sudo rm -rf /etc/caddy\
+"""
             ]
         )
