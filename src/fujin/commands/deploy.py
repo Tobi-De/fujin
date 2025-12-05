@@ -104,9 +104,8 @@ class Deploy(BaseCommand):
                 pty=True,
             )
 
-        conn.run("sudo systemctl daemon-reload")
         conn.run(
-            f"sudo systemctl enable --now {' '.join(self.config.active_systemd_units)}",
+            f"sudo systemctl daemon-reload && sudo systemctl enable --now {' '.join(self.config.active_systemd_units)}",
             pty=True,
         )
 
@@ -229,55 +228,21 @@ export PATH=".venv/bin:$PATH"
 """
         conn.run(f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv")
 
-        # Decision: Do we need to rebuild the virtualenv?
-        rebuild_venv = True
         if self.config.requirements:
             local_reqs_path = Path(self.config.requirements)
             curr_release_reqs = f"{release_dir}/requirements.txt"
+            conn.put(str(local_reqs_path), curr_release_reqs)
 
-            # Get the version currently running on the host to find previous requirements
-            prev_version, _ = conn.run("head -n 1 .versions", warn=True, hide=True)
-            prev_version = prev_version.strip()
-            prev_release_reqs = (
-                f"{self.config.get_release_dir(prev_version)}/requirements.txt"
-            )
+        self.stdout.output("[blue]Syncing Python dependencies...[/blue]")
+        commands = [
+            f"uv python install {self.config.python_version}",
+            "test -d .venv || uv venv",
+        ]
+        if self.config.requirements:
+            commands.append(f"uv pip install -r {release_dir}/requirements.txt")
 
-            local_hash = hashlib.md5(local_reqs_path.read_bytes()).hexdigest()
-            remote_hash = ""
-
-            if prev_version:
-                res_stdout, res_ok = conn.run(
-                    f"md5sum {prev_release_reqs}", warn=True, hide=True
-                )
-                if res_ok:
-                    remote_hash = res_stdout.strip().split()[0]
-
-            if local_hash == remote_hash:
-                rebuild_venv = False
-                # Even if we don't rebuild, we copy the reqs file to the new folder
-                # so the new release folder is complete and self-contained.
-                if prev_release_reqs != curr_release_reqs:
-                    conn.run(f"cp {prev_release_reqs} {curr_release_reqs}")
-            else:
-                # Hashes differ or previous file didn't exist -> Upload new one
-                conn.put(str(local_reqs_path), curr_release_reqs)
-
-        # Execution
-        if rebuild_venv:
-            self.stdout.output("[blue]Installing Python dependencies...[/blue]")
-            commands = [
-                "sudo rm -rf .venv",
-                f"uv python install {self.config.python_version}",
-                "uv venv",
-            ]
-            if self.config.requirements:
-                commands.append(f"uv pip install -r {release_dir}/requirements.txt")
-            conn.run(" && ".join(commands))
-        else:
-            self.stdout.output(
-                "[blue]Requirements unchanged, skipping virtualenv rebuild...[/blue]"
-            )
-        conn.run(f"uv pip install {remote_package_path}")
+        commands.append(f"uv pip install {remote_package_path}")
+        conn.run(" && ".join(commands))
 
     def _install_binary(self, conn: Connection, remote_package_path: str):
         logger.debug("Installing binary")
