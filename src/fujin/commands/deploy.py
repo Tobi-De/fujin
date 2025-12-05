@@ -265,11 +265,14 @@ export PATH=".venv/bin:$PATH"
         # Execution
         if rebuild_venv:
             self.stdout.output("[blue]Installing Python dependencies...[/blue]")
-            conn.run("sudo rm -rf .venv")
-            conn.run(f"uv python install {self.config.python_version}")
-            conn.run("uv venv")
+            commands = [
+                "sudo rm -rf .venv",
+                f"uv python install {self.config.python_version}",
+                "uv venv",
+            ]
             if self.config.requirements:
-                conn.run(f"uv pip install -r {release_dir}/requirements.txt")
+                commands.append(f"uv pip install -r {release_dir}/requirements.txt")
+            conn.run(" && ".join(commands))
         else:
             self.stdout.output(
                 "[blue]Requirements unchanged, skipping virtualenv rebuild...[/blue]"
@@ -284,7 +287,10 @@ source .env
 set +a  # Stop automatic export
 export PATH="{self.config.app_dir}:$PATH"
 """
-        conn.run(f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv")
         full_path_app_bin = f"{self.config.app_dir}/{self.config.app_bin}"
-        conn.run(f"rm {full_path_app_bin}", warn=True)
-        conn.run(f"ln -s {remote_package_path} {full_path_app_bin}")
+        commands = [
+            f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
+            f"rm -f {full_path_app_bin}",
+            f"ln -s {remote_package_path} {full_path_app_bin}",
+        ]
+        conn.run(" && ".join(commands))
