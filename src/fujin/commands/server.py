@@ -24,10 +24,15 @@ class Server(BaseCommand):
     def bootstrap(self):
         with self.connection() as conn:
             self.stdout.output("[blue]Bootstrapping server...[/blue]")
-            conn.run(
-                "sudo apt update && sudo apt upgrade -y && sudo apt install -y sqlite3 curl rsync",
+            _, server_update_ok = conn.run(
+                "sudo apt update && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y && sudo apt install -y sqlite3 curl rsync",
                 pty=True,
+                warn=True,
             )
+            if not server_update_ok:
+                self.stdout.output(
+                    "[red]Warning: Failed to update and upgrade the server packages.[/red]"
+                )
             _, result_ok = conn.run("command -v uv", warn=True)
             if not result_ok:
                 self.output.output("[blue]Installing uv tool...[/blue]")
@@ -37,7 +42,7 @@ class Server(BaseCommand):
             conn.run("uv tool install fastfetch-bin-edge")
             if self.config.webserver.enabled:
                 self.stdout.output("[blue]Setting up Caddy web server...[/blue]")
-                
+
                 _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
                 if result_ok:
                     self.stdout.output("[yellow]Caddy is already installed.[/yellow]")
@@ -47,7 +52,9 @@ class Server(BaseCommand):
                     self.stdout.output("[bold]import conf.d/*.caddy[/bold]")
                 else:
                     version = caddy.get_latest_gh_tag()
-                    self.stdout.output(f"[blue]Installing Caddy version {version}...[/blue]")
+                    self.stdout.output(
+                        f"[blue]Installing Caddy version {version}...[/blue]"
+                    )
                     commands = caddy.get_install_commands(version)
                     conn.run(" && ".join(commands), pty=True)
 
