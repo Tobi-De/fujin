@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tarfile
+import tempfile
+import shutil
 from pathlib import Path
 
 import cappa
 
-from fujin import caddy
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
-from fujin.connection import SSH2Connection as Connection
 from fujin.secrets import resolve_secrets
 
 logger = logging.getLogger(__name__)
@@ -41,176 +42,209 @@ class Deploy(BaseCommand):
         if self.config.requirements and not Path(self.config.requirements).exists():
             raise cappa.Exit(f"{self.config.requirements} not found", code=1)
 
-        with self.connection() as conn:
-            self.stdout.output("[blue]Installing project on remote host...[/blue]")
-            conn.run(
-                f"mkdir -p {self.config.app_dir} && echo '{parsed_env}' > {self.config.app_dir}/.env"
-            )
-            self.install_project(conn)
-            self.stdout.output("[blue]Configuring systemd services...[/blue]")
-            self.install_services(conn)
-            self.restart_services(conn)
-            if self.config.webserver.enabled:
-                self.stdout.output("[blue]Configuring web server...[/blue]")
-                caddy_configured = caddy.setup(conn, self.config)
-                if not caddy_configured:
-                    self.stdout.output(
-                        "[red]Failed to reload Caddy.[/red]\n"
-                        "[yellow]Please ensure your Caddy configuration is correct:\n"
-                        "1. Directory /etc/caddy/conf.d must exist and be owned by caddy:caddy.\n"
-                        "2. /etc/caddy/Caddyfile must include 'import conf.d/*.caddy' (relative path).\n"
-                        "Fix these issues and rerun deploy.[/yellow]",
-                    )
+        version = self.config.version
+        distfile_path = self.config.get_distfile_path(version)
 
-            # prune old versions
-            with conn.cd(self.config.app_dir):
-                if self.config.versions_to_keep:
-                    logger.debug("Checking for old versions to prune")
-                    prune_cmd = f"""
-                        to_prune=$(sed -n '{self.config.versions_to_keep + 1},$p' .versions)
-                        if [ -n "$to_prune" ]; then
-                            for v in $to_prune; do
-                                rm -rf "v$v"
-                            done
-                            sed -i '{self.config.versions_to_keep + 1},$d' .versions
-                        fi
-                    """
-                    conn.run(prune_cmd, warn=True)
-        if caddy_configured:
-            self.stdout.output("[green]Deployment completed successfully![/green]")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.stdout.output("[blue]Preparing deployment bundle...[/blue]")
+            bundle_dir = Path(tmpdir) / "bundle"
+            bundle_dir.mkdir()
+
+            # Copy artifacts
+            shutil.copy(distfile_path, bundle_dir / distfile_path.name)
+            if self.config.requirements:
+                shutil.copy(self.config.requirements, bundle_dir / "requirements.txt")
+
+            # Write .env
+            (bundle_dir / ".env").write_text(parsed_env)
+
+            # Write systemd units
+            units_dir = bundle_dir / "units"
+            units_dir.mkdir()
+            new_units = self.config.render_systemd_units()
+            for name, content in new_units.items():
+                (units_dir / name).write_text(content)
+
+            # Write Caddyfile
+            if self.config.webserver.enabled:
+                (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
+
+            # Generate scripts
+            install_script = self._generate_install_script(
+                version=version,
+                distfile_name=distfile_path.name,
+                new_units=new_units,
+            )
+            (bundle_dir / "install.sh").write_text(install_script)
+
+            uninstall_script = self._generate_uninstall_script(new_units)
+            (bundle_dir / "uninstall.sh").write_text(uninstall_script)
+
+            # Create tarball
+            tar_path = Path(tmpdir) / "deploy.tar.gz"
+            with tarfile.open(tar_path, "w:gz") as tar:
+                tar.add(bundle_dir, arcname=".")
+
+            # Upload and Execute
+            with self.connection() as conn:
+                self.stdout.output("[blue]Uploading deployment bundle...[/blue]")
+
+                bundle_filename = f"{self.config.app_name}-{version}.tar.gz"
+                remote_bundle_dir = f"{self.config.app_dir}/.versions"
+                remote_bundle_path = f"{remote_bundle_dir}/{bundle_filename}"
+
+                conn.run(f"mkdir -p {remote_bundle_dir}")
+                conn.put(str(tar_path), remote_bundle_path)
+
+                self.stdout.output("[blue]Executing remote installation...[/blue]")
+                remote_extract_dir = f"/tmp/{self.config.app_name}-{version}"
+
+                install_cmd = (
+                    f"mkdir -p {remote_extract_dir} && "
+                    f"tar -xzf {remote_bundle_path} -C {remote_extract_dir} && "
+                    f"cd {remote_extract_dir} && "
+                    f"bash install.sh && "
+                    f"cd / && rm -rf {remote_extract_dir}"
+                )
+                conn.run(install_cmd, pty=True)
+
+        self.stdout.output("[green]Deployment completed successfully![/green]")
+        if self.config.webserver.enabled:
             self.stdout.output(
                 f"[blue]Application is available at: https://{self.config.host.domain_name}[/blue]"
             )
 
-    def install_services(self, conn: Connection) -> None:
-        new_units = self.config.render_systemd_units()
-        for filename, content in new_units.items():
-            conn.run(
-                f"echo '{content}' | sudo tee /etc/systemd/system/{filename}",
-                hide="out",
-                pty=True,
-            )
-
-        conn.run(
-            f"sudo systemctl daemon-reload && sudo systemctl enable {' '.join(self.config.active_systemd_units)}",
-            pty=True,
-        )
-
-        valid_units = [*self.config.active_systemd_units, *(list(new_units.keys()))]
-
-        # Cleanup Stale Instances (e.g: replicas downgrade)
-        ls_units_stdout, ls_units_ok = conn.run(
-            f"systemctl list-units --full --all --plain --no-legend '{self.config.app_name}*'",
-            warn=True,
-            hide=True,
-        )
-        stale_units = []
-        if ls_units_ok:
-            for line in ls_units_stdout.splitlines():
-                unit = line.split()[0]
-                if unit not in valid_units:
-                    stale_units.append(unit)
-
-        if stale_units:
-            self.stdout.output(
-                f"[yellow]Stopping stale service units: {', '.join(stale_units)}[/yellow]"
-            )
-            conn.run(f"sudo systemctl disable --now {' '.join(stale_units)}", warn=True)
-
-        # Cleanup Stale Files & Symlinks
-        stale_paths = []
-        search_dirs = [
-            "/etc/systemd/system",
-            "/etc/systemd/system/multi-user.target.wants",
-        ]
-
-        for directory in search_dirs:
-            result_stdout, result_ok = conn.run(
-                f"ls {directory}/{self.config.app_name}*", warn=True, hide=True
-            )
-            if result_ok:
-                for path in result_stdout.split():
-                    filename = Path(path).name
-                    if filename not in valid_units:
-                        stale_paths.append(path)
-
-        if stale_paths:
-            self.stdout.output(
-                f"[yellow]Cleaning up stale service files and symlinks: {', '.join([Path(p).name for p in stale_paths])}[/yellow]"
-            )
-            conn.run(f"sudo rm {' '.join(stale_paths)}", warn=True)
-
-    def restart_services(self, conn: Connection) -> None:
-        self.stdout.output("[blue]Restarting services...[/blue]")
-        conn.run(
-            f"sudo systemctl restart {' '.join(self.config.active_systemd_units)}",
-            pty=True,
-        )
-
-    def install_project(
+    def _generate_install_script(
         self,
-        conn: Connection,
-        *,
-        version: str | None = None,
-        rolling_back: bool = False,
-    ):
-        version = version or self.config.version
-        logger.debug(f"Installing project version {version}")
+        version: str,
+        distfile_name: str,
+        new_units: dict[str, str],
+    ) -> str:
+        script = ["#!/usr/bin/env bash", "set -e"]
+        script.append("BUNDLE_DIR=$(pwd)")
 
-        # transfer binary or package file
-        release_dir = self.config.get_release_dir(version)
-        conn.run(f"mkdir -p {release_dir}")
+        # Setup directories
+        script.append(f"mkdir -p {self.config.app_dir}")
+        script.append(f"mv .env {self.config.app_dir}/.env")
 
-        distfile_path = self.config.get_distfile_path(version)
-        remote_package_path = f"{release_dir}/{distfile_path.name}"
-        if not rolling_back:
-            logger.debug(f"Transferring {distfile_path} to {remote_package_path}")
-            conn.put(str(distfile_path), remote_package_path)
+        # Install Project
+        script.append(f"cd {self.config.app_dir}")
 
-        commands = []
-        # install project
-        with conn.cd(self.config.app_dir):
-            if self.config.installation_mode == InstallationMode.PY_PACKAGE:
-                if self.config.requirements:
-                    local_reqs_path = Path(self.config.requirements)
-                    curr_release_reqs = f"{release_dir}/requirements.txt"
-                    conn.put(str(local_reqs_path), curr_release_reqs)
-
-                commands.extend(
-                    self._get_python_package_install_commands(
-                        remote_package_path=remote_package_path,
-                        release_dir=release_dir,
-                    )
+        if self.config.installation_mode == InstallationMode.PY_PACKAGE:
+            script.extend(
+                self._get_python_package_install_commands(
+                    distfile_path=f"$BUNDLE_DIR/{distfile_name}",
+                    requirements_path=(
+                        f"$BUNDLE_DIR/requirements.txt"
+                        if self.config.requirements
+                        else None
+                    ),
                 )
-            else:
-                commands.extend(
-                    self._get_binary_install_commands(
-                        remote_package_path=remote_package_path
-                    )
+            )
+        else:
+            script.extend(
+                self._get_binary_install_commands(
+                    distfile_path=f"$BUNDLE_DIR/{distfile_name}"
                 )
-
-            if self.config.release_command:
-                logger.debug(
-                    f"Executing release command: {self.config.release_command}"
-                )
-                self.stdout.output("[blue]Executing release command...[/blue]")
-                # We use bash explicitly to ensure 'source' works and environment is preserved
-                commands.append(
-                    f"bash -c 'source .appenv && {self.config.release_command}'"
-                )
-
-            # update version history
-            commands.append(
-                f'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "{version}" ]; then if [ -z "$current" ]; then echo \'{version}\' > .versions; else sed -i \'1i {version}\' .versions; fi; fi'
             )
 
-            conn.run(" && ".join(commands))
+        # Release Command
+        if self.config.release_command:
+            script.append(f"bash -c 'source .appenv && {self.config.release_command}'")
+
+        # Version Management
+        script.append(f"echo '{version}' > .current_version")
+
+        script.append("cd $BUNDLE_DIR")
+
+        # Install Services
+        for name in new_units.keys():
+            script.append(f"sudo cp units/{name} /etc/systemd/system/")
+
+        script.append("sudo systemctl daemon-reload")
+
+        # Cleanup Stale Units & Files
+        valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
+        valid_units_str = " ".join(valid_units)
+        script.append(f"""
+# Cleanup Stale Units
+VALID_UNITS="{valid_units_str}"
+ALL_UNITS=$(systemctl list-units --full --all --plain --no-legend '{self.config.app_name}*' | awk '{{print $1}}')
+for UNIT in $ALL_UNITS; do
+    if [[ ! " $VALID_UNITS " =~ " $UNIT " ]]; then
+        echo "Stopping stale service unit: $UNIT"
+        sudo systemctl disable --now "$UNIT" || true
+    fi
+done
+
+# Cleanup Stale Files
+SEARCH_DIRS="/etc/systemd/system /etc/systemd/system/multi-user.target.wants"
+for DIR in $SEARCH_DIRS; do
+    if [ -d "$DIR" ]; then
+        FILES=$(ls $DIR/{self.config.app_name}* 2>/dev/null || true)
+        for FILE in $FILES; do
+            BASENAME=$(basename "$FILE")
+            if [[ ! " $VALID_UNITS " =~ " $BASENAME " ]]; then
+                echo "Removing stale service file: $FILE"
+                sudo rm -f "$FILE"
+            fi
+        done
+    fi
+done
+sudo systemctl daemon-reload
+""")
+
+        script.append(
+            f"sudo systemctl enable {' '.join(self.config.active_systemd_units)}"
+        )
+        script.append(
+            f"sudo systemctl restart {' '.join(self.config.active_systemd_units)}"
+        )
+
+        # Caddy
+        if self.config.webserver.enabled:
+            script.append(f"sudo mkdir -p $(dirname {self.config.caddy_config_path})")
+            script.append(f"sudo mv Caddyfile {self.config.caddy_config_path}")
+            script.append(f"sudo chown caddy:caddy {self.config.caddy_config_path}")
+            script.append("sudo systemctl reload caddy")
+
+        # Prune
+        if self.config.versions_to_keep:
+            script.append(f"cd {self.config.app_dir}/.versions")
+            # Keep only the N most recent bundles
+            script.append(
+                f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm"
+            )
+
+        return "\n".join(script)
+
+    def _generate_uninstall_script(self, new_units: dict[str, str]) -> str:
+        script = ["#!/usr/bin/env bash", "set -e"]
+
+        # Stop and disable services
+        units = " ".join(self.config.active_systemd_units)
+        if units:
+            script.append(f"sudo systemctl disable --now {units}")
+
+        # Remove units
+        for name in new_units.keys():
+            script.append(f"sudo rm -f /etc/systemd/system/{name}")
+
+        script.append("sudo systemctl daemon-reload")
+        script.append("sudo systemctl reset-failed")
+
+        # Remove Caddy config
+        if self.config.webserver.enabled:
+            script.append(f"sudo rm -f {self.config.caddy_config_path}")
+            script.append("sudo systemctl reload caddy")
+
+        return "\n".join(script)
 
     def _get_python_package_install_commands(
         self,
         *,
-        remote_package_path: str,
-        release_dir: str,
+        distfile_path: str,
+        requirements_path: str | None,
     ) -> list[str]:
         logger.debug("Installing python package")
         appenv = f"""
@@ -221,20 +255,18 @@ export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python{self.config.python_version}
 export PATH=".venv/bin:$PATH"
 """
-
         self.stdout.output("[blue]Syncing Python dependencies...[/blue]")
         commands = [
             f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
             f"uv python install {self.config.python_version}",
             "test -d .venv || uv venv",
         ]
-        if self.config.requirements:
-            commands.append(f"uv pip install -r {release_dir}/requirements.txt")
-
-        commands.append(f"uv pip install {remote_package_path}")
+        if requirements_path:
+            commands.append(f"uv pip install -r {requirements_path}")
+        commands.append(f"uv pip install {distfile_path}")
         return commands
 
-    def _get_binary_install_commands(self, remote_package_path: str) -> list[str]:
+    def _get_binary_install_commands(self, distfile_path: str) -> list[str]:
         logger.debug("Installing binary")
         appenv = f"""
 set -a  # Automatically export all variables
@@ -245,7 +277,7 @@ export PATH="{self.config.app_dir}:$PATH"
         full_path_app_bin = f"{self.config.app_dir}/{self.config.app_bin}"
         commands = [
             f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
-            f"rm -f {full_path_app_bin}",
-            f"ln -s {remote_package_path} {full_path_app_bin}",
+            f"cp {distfile_path} {full_path_app_bin}",
+            f"chmod +x {full_path_app_bin}",
         ]
         return commands

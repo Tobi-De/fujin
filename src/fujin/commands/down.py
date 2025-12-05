@@ -36,29 +36,30 @@ class Down(BaseCommand):
             raise cappa.Exit("Teardown aborted", code=0)
         if not confirm:
             return
+
         with self.connection() as conn:
-            conn.run(f"rm -rf {self.config.app_dir}")
-            if self.config.webserver.enabled:
-                caddy.teardown(conn, self.config)
-
-            active_systemd_units = self.config.active_systemd_units
-            self.stdout.output(
-                f"[blue]Stopping and disabling services: {' '.join(active_systemd_units)}[/blue]"
-            )
-            conn.run(
-                f"sudo systemctl disable --now {' '.join(active_systemd_units)}",
-                warn=True,
-            )
-            # Remove service files
-            unit_files = list(self.config.render_systemd_units().keys())
-            paths = [f"/etc/systemd/system/{name}" for name in unit_files]
-            conn.run(f"sudo rm {' '.join(paths)}", warn=True)
-
-            conn.run("sudo systemctl daemon-reload")
-            conn.run("sudo systemctl reset-failed")
-
+            self.stdout.output("[blue]Tearing down project...[/blue]")
+            script = [
+                f"APP_DIR={self.config.app_dir}",
+                f"APP_NAME={self.config.app_name}",
+                'if [ -f "$APP_DIR/.current_version" ]; then',
+                '  CURRENT_VERSION=$(cat "$APP_DIR/.current_version")',
+                '  CURRENT_BUNDLE="$APP_DIR/.versions/$APP_NAME-$CURRENT_VERSION.tar.gz"',
+                '  if [ -f "$CURRENT_BUNDLE" ]; then',
+                '    TMP_DIR="/tmp/uninstall-$CURRENT_VERSION"',
+                '    mkdir -p "$TMP_DIR"',
+                '    tar -xzf "$CURRENT_BUNDLE" -C "$TMP_DIR" uninstall.sh',
+                '    bash "$TMP_DIR/uninstall.sh" || true',
+                '    rm -rf "$TMP_DIR"',
+                "  fi",
+                "fi",
+                'rm -rf "$APP_DIR"',
+            ]
             if self.full and self.config.webserver.enabled:
-                caddy.uninstall(conn)
+                script.extend(caddy.get_uninstall_commands())
+
+            conn.run("\n".join(script), warn=True, pty=True)
+
             self.stdout.output(
                 "[green]Project teardown completed successfully![/green]"
             )

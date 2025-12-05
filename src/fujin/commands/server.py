@@ -37,13 +37,20 @@ class Server(BaseCommand):
             conn.run("uv tool install fastfetch-bin-edge")
             if self.config.webserver.enabled:
                 self.stdout.output("[blue]Setting up Caddy web server...[/blue]")
-                installed = caddy.install(conn)
-                if not installed:
+                
+                _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
+                if result_ok:
                     self.stdout.output("[yellow]Caddy is already installed.[/yellow]")
                     self.stdout.output(
                         "Please ensure your Caddyfile includes the following line to load Fujin configurations:"
                     )
                     self.stdout.output("[bold]import conf.d/*.caddy[/bold]")
+                else:
+                    version = caddy.get_latest_gh_tag()
+                    self.stdout.output(f"[blue]Installing Caddy version {version}...[/blue]")
+                    commands = caddy.get_install_commands(version)
+                    conn.run(" && ".join(commands), pty=True)
+
             self.stdout.output(
                 "[green]Server bootstrap completed successfully![/green]"
             )
