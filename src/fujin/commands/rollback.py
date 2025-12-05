@@ -13,9 +13,7 @@ from fujin.commands.deploy import Deploy
 class Rollback(BaseCommand):
     def __call__(self):
         with self.connection() as conn:
-            result, _ = conn.run(
-                "sed -n '2,$p' .versions", warn=True, hide=True
-            )
+            result, _ = conn.run("sed -n '2,$p' .versions", warn=True, hide=True)
             result = result.strip()
             if not result:
                 self.stdout.output("[blue]No rollback targets available")
@@ -45,8 +43,10 @@ class Rollback(BaseCommand):
             deploy = Deploy()
             deploy.install_project(conn, version=version, rolling_back=True)
             deploy.restart_services(conn)
-            conn.run(f"rm -r {' '.join(f'v{v}' for v in versions_to_clean)}", warn=True)
-            conn.run(f"sed -i '1,/{version}/{{/{version}/!d}}' .versions", warn=True)
+            conn.run(
+                f"rm -r {' '.join(f'v{v}' for v in versions_to_clean)} && sed -i '1,/{version}/{{/{version}/!d}}' .versions",
+                warn=True,
+            )
             self.stdout.output(
                 f"[green]Rollback to version {version} from {current_app_version} completed successfully![/green]"
             )

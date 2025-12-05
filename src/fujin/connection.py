@@ -102,7 +102,7 @@ class SSH2Connection:
             # and handle password masking correctly.
             if is_interactive:
                 # this redcuces latency on keystrokes
-                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                # self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 old_tty_attrs = termios.tcgetattr(sys.stdin)
                 tty.setraw(sys.stdin.fileno())
 
@@ -177,8 +177,8 @@ class SSH2Connection:
                     break
 
         finally:
-            if is_interactive:
-                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
+            # if is_interactive:
+            #     self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
             if old_tty_attrs:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty_attrs)
             self.session.set_blocking(True)
@@ -222,9 +222,9 @@ class SSH2Connection:
 
         try:
             with open(local, "rb") as local_fh:
-                # Read in 32KB chunks
+                # Read in 128KB chunks
                 while True:
-                    data = local_fh.read(32768)
+                    data = local_fh.read(131072)
                     if not data:
                         break
                     channel.write(data)
@@ -240,6 +240,7 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         sock.settimeout(30)
         sock.connect((host.ip or host.domain_name, host.ssh_port))
         sock.settimeout(None)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except socket.error as e:
         raise cappa.Exit(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import cappa
 
 from fujin import caddy
+import hashlib
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 from fujin.connection import SSH2Connection as Connection
@@ -101,7 +102,7 @@ class Deploy(BaseCommand):
             )
 
         conn.run(
-            f"sudo systemctl daemon-reload && sudo systemctl enable --now {' '.join(self.config.active_systemd_units)}",
+            f"sudo systemctl daemon-reload && sudo systemctl enable {' '.join(self.config.active_systemd_units)}",
             pty=True,
         )
 
