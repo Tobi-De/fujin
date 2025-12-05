@@ -193,9 +193,7 @@ class Deploy(BaseCommand):
 
         # Release Command
         if self.config.release_command:
-            script.append(
-                f"echo 'Running release command: {self.config.release_command}'"
-            )
+            script.append(f"echo 'Running release command'")
             script.append(f"bash -c 'source .appenv && {self.config.release_command}'")
 
         # Version Management

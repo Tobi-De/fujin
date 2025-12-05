@@ -73,10 +73,17 @@ class Rollback(BaseCommand):
                     # We extract to a temp dir to be safe
                     tmp_uninstall_dir = f"/tmp/uninstall-{current_version}"
                     conn.run(f"mkdir -p {tmp_uninstall_dir}")
-                    conn.run(
-                        f"tar -xzf {current_bundle} -C {tmp_uninstall_dir} uninstall.sh"
-                    )
-                    conn.run(f"bash {tmp_uninstall_dir}/uninstall.sh", warn=True)
+                    # Extract full bundle to ensure we get the script regardless of pathing
+                    conn.run(f"tar -xzf {current_bundle} -C {tmp_uninstall_dir}")
+                    if conn.run(f"test -f {tmp_uninstall_dir}/uninstall.sh", warn=True)[
+                        1
+                    ]:
+                        conn.run(f"bash {tmp_uninstall_dir}/uninstall.sh", warn=True)
+                    else:
+                        self.stdout.output(
+                            f"[yellow]Warning: uninstall.sh not found in bundle for version {current_version}.[/yellow]"
+                        )
+
                     conn.run(f"rm -rf {tmp_uninstall_dir}")
                 else:
                     self.stdout.output(
