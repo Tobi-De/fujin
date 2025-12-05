@@ -7,7 +7,6 @@ from pathlib import Path
 import cappa
 
 from fujin import caddy
-import hashlib
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 from fujin.connection import SSH2Connection as Connection
@@ -168,38 +167,51 @@ class Deploy(BaseCommand):
             logger.debug(f"Transferring {distfile_path} to {remote_package_path}")
             conn.put(str(distfile_path), remote_package_path)
 
+        commands = []
         # install project
         with conn.cd(self.config.app_dir):
             if self.config.installation_mode == InstallationMode.PY_PACKAGE:
-                self._install_python_package(
-                    conn,
-                    remote_package_path=remote_package_path,
-                    release_dir=release_dir,
+                if self.config.requirements:
+                    local_reqs_path = Path(self.config.requirements)
+                    curr_release_reqs = f"{release_dir}/requirements.txt"
+                    conn.put(str(local_reqs_path), curr_release_reqs)
+
+                commands.extend(
+                    self._get_python_package_install_commands(
+                        remote_package_path=remote_package_path,
+                        release_dir=release_dir,
+                    )
                 )
             else:
-                self._install_binary(conn, remote_package_path)
+                commands.extend(
+                    self._get_binary_install_commands(
+                        remote_package_path=remote_package_path
+                    )
+                )
 
-            # run release command
             if self.config.release_command:
                 logger.debug(
                     f"Executing release command: {self.config.release_command}"
                 )
                 self.stdout.output("[blue]Executing release command...[/blue]")
                 # We use bash explicitly to ensure 'source' works and environment is preserved
-                conn.run(f"bash -c 'source .appenv && {self.config.release_command}'")
+                commands.append(
+                    f"bash -c 'source .appenv && {self.config.release_command}'"
+                )
 
             # update version history
-            conn.run(
+            commands.append(
                 f'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "{version}" ]; then if [ -z "$current" ]; then echo \'{version}\' > .versions; else sed -i \'1i {version}\' .versions; fi; fi'
             )
 
-    def _install_python_package(
+            conn.run(" && ".join(commands))
+
+    def _get_python_package_install_commands(
         self,
-        conn: Connection,
         *,
         remote_package_path: str,
         release_dir: str,
-    ):
+    ) -> list[str]:
         logger.debug("Installing python package")
         appenv = f"""
 set -a  # Automatically export all variables
@@ -209,11 +221,6 @@ export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python{self.config.python_version}
 export PATH=".venv/bin:$PATH"
 """
-
-        if self.config.requirements:
-            local_reqs_path = Path(self.config.requirements)
-            curr_release_reqs = f"{release_dir}/requirements.txt"
-            conn.put(str(local_reqs_path), curr_release_reqs)
 
         self.stdout.output("[blue]Syncing Python dependencies...[/blue]")
         commands = [
@@ -225,9 +232,9 @@ export PATH=".venv/bin:$PATH"
             commands.append(f"uv pip install -r {release_dir}/requirements.txt")
 
         commands.append(f"uv pip install {remote_package_path}")
-        conn.run(" && ".join(commands))
+        return commands
 
-    def _install_binary(self, conn: Connection, remote_package_path: str):
+    def _get_binary_install_commands(self, remote_package_path: str) -> list[str]:
         logger.debug("Installing binary")
         appenv = f"""
 set -a  # Automatically export all variables
@@ -241,4 +248,4 @@ export PATH="{self.config.app_dir}:$PATH"
             f"rm -f {full_path_app_bin}",
             f"ln -s {remote_package_path} {full_path_app_bin}",
         ]
-        conn.run(" && ".join(commands))
+        return commands

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import secrets
-from functools import partial
 from typing import Annotated
 
 import cappa
@@ -25,13 +24,16 @@ class Server(BaseCommand):
     def bootstrap(self):
         with self.connection() as conn:
             self.stdout.output("[blue]Bootstrapping server...[/blue]")
-            conn.run("sudo apt update && sudo apt upgrade -y", pty=True)
-            conn.run("sudo apt install -y sqlite3 curl rsync", pty=True)
+            conn.run(
+                "sudo apt update && sudo apt upgrade -y && sudo apt install -y sqlite3 curl rsync",
+                pty=True,
+            )
             _, result_ok = conn.run("command -v uv", warn=True)
             if not result_ok:
                 self.output.output("[blue]Installing uv tool...[/blue]")
-                conn.run("curl -LsSf https://astral.sh/uv/install.sh | sh")
-                conn.run("uv tool update-shell")
+                conn.run(
+                    "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool update-shell"
+                )
             conn.run("uv tool install fastfetch-bin-edge")
             if self.config.webserver.enabled:
                 self.stdout.output("[blue]Setting up Caddy web server...[/blue]")
@@ -78,18 +80,22 @@ class Server(BaseCommand):
         ] = False,  # no short arg to force explicitness
     ):
         with self.connection() as conn:
-            run_pty = partial(conn.run, pty=True)
-            run_pty(
+            commands = [
                 f"sudo adduser --disabled-password --gecos '' {name}",
-            )
-            run_pty(f"sudo mkdir -p /home/{name}/.ssh")
-            run_pty(f"sudo cp ~/.ssh/authorized_keys /home/{name}/.ssh/")
-            run_pty(f"sudo chown -R {name}:{name} /home/{name}/.ssh")
+                f"sudo mkdir -p /home/{name}/.ssh",
+                f"sudo cp ~/.ssh/authorized_keys /home/{name}/.ssh/",
+                f"sudo chown -R {name}:{name} /home/{name}/.ssh",
+            ]
             if with_password:
                 password = secrets.token_hex(8)
-                run_pty(f"echo '{name}:{password}' | sudo chpasswd")
+                commands.append(f"echo '{name}:{password}' | sudo chpasswd")
                 self.stdout.output(f"[green]Generated password: [/green]{password}")
-            run_pty(f"sudo chmod 700 /home/{name}/.ssh")
-            run_pty(f"sudo chmod 600 /home/{name}/.ssh/authorized_keys")
-            run_pty(f"echo '{name} ALL=(ALL) NOPASSWD:ALL' | sudo tee -a /etc/sudoers")
+            commands.extend(
+                [
+                    f"sudo chmod 700 /home/{name}/.ssh",
+                    f"sudo chmod 600 /home/{name}/.ssh/authorized_keys",
+                    f"echo '{name} ALL=(ALL) NOPASSWD:ALL' | sudo tee -a /etc/sudoers",
+                ]
+            )
+            conn.run(" && ".join(commands), pty=True)
             self.stdout.output(f"[green]New user {name} created successfully![/green]")
