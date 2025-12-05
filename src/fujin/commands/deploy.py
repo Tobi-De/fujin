@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -8,6 +9,7 @@ import shutil
 import hashlib
 from typing import Annotated
 from pathlib import Path
+import time
 
 import cappa
 from rich.prompt import Confirm
@@ -91,41 +93,54 @@ class Deploy(BaseCommand):
 
             # Create tarball
             tar_path = Path(tmpdir) / "deploy.tar.gz"
-            with tarfile.open(tar_path, "w:gz") as tar:
+            with tarfile.open(tar_path, "w:gz", format=tarfile.PAX_FORMAT) as tar:
                 tar.add(bundle_dir, arcname=".")
 
             # Calculate local checksum
             logger.info("Calculating local bundle checksum")
-            sha256_hash = hashlib.sha256()
             with open(tar_path, "rb") as f:
-                for byte_block in iter(lambda: f.read(4096), b""):
-                    sha256_hash.update(byte_block)
-            local_checksum = sha256_hash.hexdigest()
+                local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
+
+            remote_bundle_dir = Path(self.config.app_dir) / ".versions"
+            remote_bundle_path = (
+                f"{remote_bundle_dir}/{self.config.app_name}-{version}.tar.gz"
+            )
+
+            # Quote remote paths for shell usage (safe insertion into remote commands)
+            remote_bundle_dir_q = shlex.quote(str(remote_bundle_dir))
+            remote_bundle_path_q = shlex.quote(str(remote_bundle_path))
 
             # Upload and Execute
             with self.connection() as conn:
-                remote_bundle_dir = f"{self.config.app_dir}/.versions"
-                remote_bundle_path = (
-                    f"{remote_bundle_dir}/{self.config.app_name}-{version}.tar.gz"
-                )
                 conn.run(f"mkdir -p {remote_bundle_dir}")
-                while True:
+
+                upload_ok = False
+                attempt = 0
+                max_upload_retries = 3
+                while not upload_ok and attempt < max_upload_retries:
                     self.stdout.output("[blue]Uploading deployment bundle...[/blue]")
-                    conn.put(str(tar_path), remote_bundle_path)
+
+                    # Upload to a temporary filename first, then atomically move into place
+                    tmp_remote = f"{remote_bundle_path}.uploading.{int(time.time())}"
+                    tmp_remote_q = shlex.quote(tmp_remote)
+                    conn.put(str(tar_path), tmp_remote)
 
                     logger.info("Verifying uploaded bundle checksum")
                     remote_checksum_out, _ = conn.run(
-                        f"sha256sum {remote_bundle_path} | awk '{{print $1}}'",
+                        f"sha256sum {tmp_remote_q} | awk '{{print $1}}'",
                         hide=True,
                     )
                     remote_checksum = remote_checksum_out.strip()
 
                     if local_checksum == remote_checksum:
+                        conn.run(f"mv {tmp_remote_q} {remote_bundle_path_q}")
+                        upload_ok = True
                         self.stdout.output(
                             "[green]Bundle uploaded and verified successfully.[/green]"
                         )
                         break
 
+                    conn.run(f"rm -f {tmp_remote_q}")
                     self.stdout.output(
                         f"[red]Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}[/red]"
                     )
@@ -133,16 +148,19 @@ class Deploy(BaseCommand):
                     if self.no_input:
                         raise cappa.Exit("Upload failed: Checksum mismatch.", code=1)
 
-                    if not Confirm.ask("Upload failed. Retry?"):
+                    if attempt >= max_upload_retries or not Confirm.ask(
+                        "Upload failed. Retry?"
+                    ):
                         raise cappa.Exit("Upload aborted by user.", code=1)
 
                 self.stdout.output("[blue]Executing remote installation...[/blue]")
                 remote_extract_dir = f"/tmp/{self.config.app_name}-{version}"
                 install_cmd = (
                     f"mkdir -p {remote_extract_dir} && "
-                    f"tar -xzf {remote_bundle_path} -C {remote_extract_dir} && "
+                    f"tar --overwrite -xzf {remote_bundle_path_q} -C {remote_extract_dir} && "
                     f"cd {remote_extract_dir} && "
-                    f"bash install.sh && "
+                    f"chmod +x install.sh || true && "
+                    f"bash ./install.sh || (echo 'install.sh failed' >&2; exit 1) && "
                     f"cd / && rm -rf {remote_extract_dir}"
                 )
                 conn.run(install_cmd, pty=True)
@@ -159,15 +177,18 @@ class Deploy(BaseCommand):
         distfile_name: str,
         new_units: dict[str, str],
     ) -> str:
+        app_dir_q = shlex.quote(self.config.app_dir)
         script = [
             "#!/usr/bin/env bash",
             "set -e",
             "BUNDLE_DIR=$(pwd)",
             'echo "==> Setting up directories..."',
-            f"mkdir -p {self.config.app_dir}",
-            f"mv .env {self.config.app_dir}/.env",
+            f"mkdir -p {app_dir_q}",
+            f"mv .env {app_dir_q}/.env",
             "echo '==> Installing application...'",
-            f"cd {self.config.app_dir}",
+            f"cd {app_dir_q} || exit 1",
+            # trap to report failures and keep temp dir if needed
+            'trap \'echo "ERROR: install failed at $(date)" >&2; echo "Working dir: $BUNDLE_DIR" >&2; exit 1\' ERR',
         ]
 
         if self.config.installation_mode == InstallationMode.PY_PACKAGE:
@@ -192,7 +213,7 @@ class Deploy(BaseCommand):
             script.extend(
                 [
                     f"echo '==> Running release command'",
-                    f"bash -c 'source .appenv && {self.config.release_command}'",
+                    f"bash -lc 'cd {app_dir_q} && source .appenv && {self.config.release_command}'",
                 ]
             )
 
@@ -220,13 +241,18 @@ class Deploy(BaseCommand):
         )
 
         if self.config.webserver.enabled:
+            caddy_config_path_q = shlex.quote(self.config.caddy_config_path)
             script.extend(
                 [
                     'echo "==> Configuring Caddy..."',
-                    f"sudo mkdir -p $(dirname {self.config.caddy_config_path})",
-                    f"sudo mv Caddyfile {self.config.caddy_config_path}",
-                    f"sudo chown caddy:caddy {self.config.caddy_config_path}",
-                    "sudo systemctl reload caddy",
+                    "sudo mkdir -p $(dirname {0})".format(caddy_config_path_q),
+                    "if caddy validate --config Caddyfile >/dev/null 2>&1; then",
+                    f"  sudo mv Caddyfile {caddy_config_path_q}",
+                    f"  sudo chown caddy:caddy {caddy_config_path_q}",
+                    "  sudo systemctl reload caddy",
+                    "else",
+                    "  echo 'Caddyfile validation failed, leaving local Caddyfile for inspection' >&2",
+                    "fi",
                 ]
             )
 
@@ -238,7 +264,7 @@ class Deploy(BaseCommand):
                     f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
                 ]
             )
-
+        script.append("echo '==> Install script completed successfully.'")
         return "\n".join(script)
 
     def _generate_uninstall_script(self, new_units: dict[str, str]) -> str:
@@ -255,11 +281,11 @@ class Deploy(BaseCommand):
         if self.config.webserver.enabled:
             script.extend(
                 [
-                    f"sudo rm -f {self.config.caddy_config_path}",
+                    f"sudo rm -f {shlex.quote(self.config.caddy_config_path)}",
                     "sudo systemctl reload caddy",
                 ]
             )
-
+        script.append("echo '==> Uninstall completed.'")
         return "\n".join(script)
 
     def _get_python_package_install_commands(
@@ -311,46 +337,48 @@ systemd_cleanup_script = """
 APP_NAME="{app_name}"
 read -r -a VALID_UNITS <<< "{valid_units_str}"
 
-# --- Helper: check if array contains item exactly ---
+# Exact match helper
 contains_exact() {{
-    local item="$1"
-    shift
-    for i in "$@"; do
-        [[ "$i" == "$item" ]] && return 0
-    done
+    local needle="$1"; shift
+    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
     return 1
 }}
 
-echo "==> Cleaning stale systemd units"
-
-mapfile -t ALL_UNITS < <(
-    systemctl list-unit-files --type=service --no-legend --no-pager |
-    awk -v app="$APP_NAME" '$1 ~ "^"app {{print $1}}'
+echo "==> Discovering installed unit files"
+mapfile -t INSTALLED_UNITS < <(
+    systemctl list-unit-files --type=service --no-legend --no-pager \\
+    | awk -v app="$APP_NAME" '$1 ~ "^"app {{print $1}}'
 )
 
-for UNIT in "${{ALL_UNITS[@]}}"; do
+echo "==> Disabling + stopping stale units"
+for UNIT in "${{INSTALLED_UNITS[@]}}"; do
     if ! contains_exact "$UNIT" "${{VALID_UNITS[@]}}"; then
-        echo "→ Disabling + stopping stale unit: $UNIT"
-        # Use conditionals instead of ignoring all errors
-        sudo systemctl disable "$UNIT" --quiet || true
-        sudo systemctl stop "$UNIT" --quiet || true
+
+        # If it's a template file (myapp@.service), only disable it.
+        if [[ "$UNIT" == *@.service ]]; then
+            echo "→ Disabling template unit: $UNIT"
+            sudo systemctl disable "$UNIT" --quiet || true
+        else
+            echo "→ Stopping + disabling stale unit: $UNIT"
+            sudo systemctl stop "$UNIT" --quiet || true
+            sudo systemctl disable "$UNIT" --quiet || true
+        fi
+
+        sudo systemctl reset-failed "$UNIT" --quiet || true
     fi
 done
 
-echo "==> Cleaning stale service files"
-
+echo "==> Removing stale service files"
 SEARCH_DIRS=(
-    "/etc/systemd/system"
-    "/etc/systemd/system/multi-user.target.wants"
+    /etc/systemd/system/
+    /etc/systemd/system/multi-user.target.wants/
 )
 
 for DIR in "${{SEARCH_DIRS[@]}}"; do
     [[ -d "$DIR" ]] || continue
 
-    # Find ONLY files belonging to this app
     while IFS= read -r -d '' FILE; do
         BASENAME=$(basename "$FILE")
-
         if ! contains_exact "$BASENAME" "${{VALID_UNITS[@]}}"; then
             echo "→ Removing stale file: $FILE"
             sudo rm -f -- "$FILE"
@@ -358,11 +386,7 @@ for DIR in "${{SEARCH_DIRS[@]}}"; do
     done < <(find "$DIR" -maxdepth 1 -type f -name "${{APP_NAME}}*" -print0)
 done
 
-# ---------------------------------------------------------------------------
-# RELOAD DAEMON
-# ---------------------------------------------------------------------------
-
-echo "==> Reloading systemd daemon"
+echo "==> Reloading systemd"
 sudo systemctl daemon-reload
 
 """

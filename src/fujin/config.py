@@ -86,6 +86,12 @@ class Config(msgspec.Struct, kw_only=True):
         if len(self.processes) == 0:
             raise ImproperlyConfiguredError("At least one process must be defined")
 
+        for process_name in self.processes:
+            if process_name.strip() == "":
+                raise ImproperlyConfiguredError("Process names cannot be empty strings")
+            elif process_name.count(" ") > 0:
+                raise ImproperlyConfiguredError("Process names cannot contain spaces")
+
         if "web" not in self.processes and self.webserver.enabled:
             raise ImproperlyConfiguredError(
                 "Missing web process or set the proxy enabled to False to disable the use of a proxy"
