@@ -102,9 +102,7 @@ class App(BaseCommand):
         self.stdout.output(infos_text)
         self.stdout.output(table)
 
-    @cappa.command(
-        help="Run an arbitrary command via the application binary, only for non-interactive commands"
-    )
+    @cappa.command(help="Run an arbitrary command via the application binary")
     def exec(
         self,
         command: str,
@@ -114,12 +112,15 @@ class App(BaseCommand):
                 conn.run(f"source .appenv && {self.config.app_bin} {command}", pty=True)
 
     @cappa.command(
-        help="Start a shell session or run an interactive command in the application environment"
+        help="Start an interactive shell session using the system SSH client"
     )
     def shell(
         self,
         command: Annotated[
-            str, cappa.Arg(help="The command to run. Defaults to the user's shell.")
+            str,
+            cappa.Arg(
+                help="Optional command to run. If not provided, starts a default shell"
+            ),
         ] = "$SHELL",
     ):
         host = self.config.host

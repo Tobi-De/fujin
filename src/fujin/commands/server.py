@@ -46,9 +46,7 @@ class Server(BaseCommand):
                 "[green]Server bootstrap completed successfully![/green]"
             )
 
-    @cappa.command(
-        help="Execute an arbitrary command on the server, only for non-interactive commands"
-    )
+    @cappa.command(help="Execute an arbitrary command on the server")
     def exec(
         self,
         command: str,

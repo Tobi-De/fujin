@@ -12,6 +12,7 @@ from typing import Generator
 from fujin.config import HostConfig
 import termios
 import tty
+import codecs
 
 from ssh2.session import (
     Session,
@@ -80,6 +81,10 @@ class SSH2Connection:
         stdout_buffer = []
         stderr_buffer = []
 
+        # Use incremental decoders to handle split UTF-8 characters across packets
+        stdout_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        stderr_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
         channel = self.session.open_session()
         # this allow us to show output in near real-time
         self.session.set_blocking(False)
@@ -138,7 +143,7 @@ class SSH2Connection:
                         if size == LIBSSH2_ERROR_EAGAIN:
                             break
                         if size > 0:
-                            text = data.decode("utf-8", errors="replace")
+                            text = stdout_decoder.decode(data)
                             if not hide or hide == "err":
                                 sys.stdout.write(text)
                                 sys.stdout.flush()
@@ -150,7 +155,7 @@ class SSH2Connection:
                                         logger.debug(
                                             "Password pattern matched, sending response"
                                         )
-                                        channel.write(pass_response)
+                                        channel.write(pass_response.encode())
                         else:
                             break
 
@@ -160,7 +165,7 @@ class SSH2Connection:
                         if size == LIBSSH2_ERROR_EAGAIN:
                             break
                         if size > 0:
-                            text = data.decode("utf-8", errors="replace")
+                            text = stderr_decoder.decode(data)
                             if not hide or hide == "out":
                                 sys.stderr.write(text)
                                 sys.stderr.flush()
@@ -217,7 +222,11 @@ class SSH2Connection:
 
         try:
             with open(local, "rb") as local_fh:
-                for data in local_fh:
+                # Read in 32KB chunks
+                while True:
+                    data = local_fh.read(32768)
+                    if not data:
+                        break
                     channel.write(data)
         finally:
             channel.close()
