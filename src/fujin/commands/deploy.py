@@ -5,9 +5,12 @@ import subprocess
 import tarfile
 import tempfile
 import shutil
+import hashlib
+from typing import Annotated
 from pathlib import Path
 
 import cappa
+from rich.prompt import Confirm
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
@@ -20,6 +23,14 @@ logger = logging.getLogger(__name__)
     help="Deploy the project by building, transferring files, installing, and configuring services"
 )
 class Deploy(BaseCommand):
+    no_input: Annotated[
+        bool,
+        cappa.Arg(
+            long="--no-input",
+            help="Do not prompt for input (e.g. retry upload)",
+        ),
+    ] = False
+
     def __call__(self):
         logger.info("Starting deployment process")
         if self.config.secret_config:
@@ -85,16 +96,47 @@ class Deploy(BaseCommand):
             with tarfile.open(tar_path, "w:gz") as tar:
                 tar.add(bundle_dir, arcname=".")
 
+            # Calculate local checksum
+            sha256_hash = hashlib.sha256()
+            with open(tar_path, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            local_checksum = sha256_hash.hexdigest()
+
             # Upload and Execute
             with self.connection() as conn:
-                self.stdout.output("[blue]Uploading deployment bundle...[/blue]")
-
                 bundle_filename = f"{self.config.app_name}-{version}.tar.gz"
                 remote_bundle_dir = f"{self.config.app_dir}/.versions"
                 remote_bundle_path = f"{remote_bundle_dir}/{bundle_filename}"
 
                 conn.run(f"mkdir -p {remote_bundle_dir}")
-                conn.put(str(tar_path), remote_bundle_path)
+
+                while True:
+                    self.stdout.output("[blue]Uploading deployment bundle...[/blue]")
+                    conn.put(str(tar_path), remote_bundle_path)
+
+                    # Verify checksum
+                    remote_checksum_out, _ = conn.run(
+                        f"sha256sum {remote_bundle_path} | awk '{{print $1}}'",
+                        hide=True,
+                    )
+                    remote_checksum = remote_checksum_out.strip()
+
+                    if local_checksum == remote_checksum:
+                        self.stdout.output(
+                            "[green]Bundle uploaded and verified successfully.[/green]"
+                        )
+                        break
+
+                    self.stdout.output(
+                        f"[red]Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}[/red]"
+                    )
+
+                    if self.no_input:
+                        raise cappa.Exit("Upload failed: Checksum mismatch.", code=1)
+
+                    if not Confirm.ask("Upload failed. Retry?"):
+                        raise cappa.Exit("Upload aborted by user.", code=1)
 
                 self.stdout.output("[blue]Executing remote installation...[/blue]")
                 remote_extract_dir = f"/tmp/{self.config.app_name}-{version}"
@@ -123,6 +165,7 @@ class Deploy(BaseCommand):
         script = ["#!/usr/bin/env bash", "set -e"]
         script.append("BUNDLE_DIR=$(pwd)")
 
+        script.append('echo "Setting up directories..."')
         # Setup directories
         script.append(f"mkdir -p {self.config.app_dir}")
         script.append(f"mv .env {self.config.app_dir}/.env")
@@ -150,6 +193,9 @@ class Deploy(BaseCommand):
 
         # Release Command
         if self.config.release_command:
+            script.append(
+                f"echo 'Running release command: {self.config.release_command}'"
+            )
             script.append(f"bash -c 'source .appenv && {self.config.release_command}'")
 
         # Version Management
@@ -157,6 +203,7 @@ class Deploy(BaseCommand):
 
         script.append("cd $BUNDLE_DIR")
 
+        script.append('echo "Configuring systemd services..."')
         # Install Services
         for name in new_units.keys():
             script.append(f"sudo cp units/{name} /etc/systemd/system/")
@@ -166,7 +213,8 @@ class Deploy(BaseCommand):
         # Cleanup Stale Units & Files
         valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
         valid_units_str = " ".join(valid_units)
-        script.append(f"""
+        script.append(
+            f"""
 # Cleanup Stale Units
 VALID_UNITS="{valid_units_str}"
 ALL_UNITS=$(systemctl list-units --full --all --plain --no-legend '{self.config.app_name}*' | awk '{{print $1}}')
@@ -192,8 +240,10 @@ for DIR in $SEARCH_DIRS; do
     fi
 done
 sudo systemctl daemon-reload
-""")
+"""
+        )
 
+        script.append('echo "Restarting services..."')
         script.append(
             f"sudo systemctl enable {' '.join(self.config.active_systemd_units)}"
         )
@@ -203,6 +253,7 @@ sudo systemctl daemon-reload
 
         # Caddy
         if self.config.webserver.enabled:
+            script.append('echo "Configuring Caddy..."')
             script.append(f"sudo mkdir -p $(dirname {self.config.caddy_config_path})")
             script.append(f"sudo mv Caddyfile {self.config.caddy_config_path}")
             script.append(f"sudo chown caddy:caddy {self.config.caddy_config_path}")
@@ -210,6 +261,7 @@ sudo systemctl daemon-reload
 
         # Prune
         if self.config.versions_to_keep:
+            script.append('echo "Pruning old versions..."')
             script.append(f"cd {self.config.app_dir}/.versions")
             # Keep only the N most recent bundles
             script.append(
@@ -255,9 +307,9 @@ export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python{self.config.python_version}
 export PATH=".venv/bin:$PATH"
 """
-        self.stdout.output("[blue]Syncing Python dependencies...[/blue]")
         commands = [
             f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
+            "echo 'Syncing Python dependencies...'",
             f"uv python install {self.config.python_version}",
             "test -d .venv || uv venv",
         ]
@@ -277,6 +329,7 @@ export PATH="{self.config.app_dir}:$PATH"
         full_path_app_bin = f"{self.config.app_dir}/{self.config.app_bin}"
         commands = [
             f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
+            "echo 'Installing binary...'",
             f"cp {distfile_path} {full_path_app_bin}",
             f"chmod +x {full_path_app_bin}",
         ]
