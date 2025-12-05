@@ -29,48 +29,52 @@ def install(conn: Connection) -> bool:
     download_url = GH_DOWNL0AD_URL.format(version=version)
     filename = GH_TAR_FILENAME.format(version=version)
     with conn.cd("/tmp"):
-        conn.run(f"curl -O -L {download_url}")
-        conn.run(f"tar -xzvf {filename}")
-        conn.run("sudo mv caddy /usr/bin/", pty=True)
-        conn.run(f"rm {filename}")
-        conn.run("rm LICENSE && rm README.md")
+        commands = [
+            f"curl -O -L {download_url}",
+            f"tar -xzvf {filename}",
+            "sudo mv caddy /usr/bin/",
+            f"rm {filename}",
+            "rm LICENSE README.md",
+        ]
+        conn.run(" && ".join(commands), pty=True)
     conn.run("sudo groupadd --force --system caddy", pty=True)
     conn.run(
         "sudo useradd --system --gid caddy --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin --comment 'Caddy web server' caddy",
         pty=True,
         warn=True,
     )
-
-    # Setup directories
-    conn.run("sudo mkdir -p /etc/caddy/conf.d", pty=True)
-    conn.run("sudo chown -R caddy:caddy /etc/caddy", pty=True)
-
-    # Create main Caddyfile
+    conn.run(
+        "sudo mkdir -p /etc/caddy/conf.d && sudo chown -R caddy:caddy /etc/caddy",
+        pty=True,
+    )
     main_caddyfile = "import conf.d/*.caddy\n"
     conn.run(
         f"echo '{main_caddyfile}' | sudo tee /etc/caddy/Caddyfile",
         hide="out",
         pty=True,
     )
-
     conn.run(
         f"echo '{systemd_service}' | sudo tee /etc/systemd/system/caddy.service",
         hide="out",
         pty=True,
     )
-    conn.run("sudo systemctl daemon-reload", pty=True)
-    conn.run("sudo systemctl enable --now caddy", pty=True)
+    conn.run(
+        "sudo systemctl daemon-reload && sudo systemctl enable --now caddy", pty=True
+    )
     return True
 
 
 def uninstall(conn: Connection):
     logger.info("Uninstalling Caddy")
-    conn.run("sudo systemctl stop caddy", pty=True)
-    conn.run("sudo systemctl disable caddy", pty=True)
-    conn.run("sudo rm /usr/bin/caddy", pty=True)
-    conn.run("sudo rm /etc/systemd/system/caddy.service", pty=True)
-    conn.run("sudo userdel caddy", pty=True)
-    conn.run("sudo rm -rf /etc/caddy", pty=True)
+    commands = [
+        "sudo systemctl stop caddy",
+        "sudo systemctl disable caddy",
+        "sudo rm /usr/bin/caddy",
+        "sudo rm /etc/systemd/system/caddy.service",
+        "sudo userdel caddy",
+        "sudo rm -rf /etc/caddy",
+    ]
+    conn.run(" && ".join(commands), pty=True)
 
 
 def setup(conn: Connection, config: Config):
@@ -78,13 +82,11 @@ def setup(conn: Connection, config: Config):
     rendered_content = config.render_caddyfile()
 
     remote_path = config.caddy_config_path
-    _, res_ok = conn.run(
+    commands = [
         f"echo '{rendered_content}' | sudo tee {remote_path}",
-        hide="out",
-        pty=True,
-        warn=True,
-    )
-    conn.run("sudo systemctl reload caddy", pty=True, warn=True)
+        "sudo systemctl reload caddy",
+    ]
+    _, res_ok = conn.run(" && ".join(commands), hide="out", pty=True, warn=True)
     return res_ok
 
 

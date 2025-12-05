@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import subprocess
 from pathlib import Path
@@ -22,7 +21,6 @@ logger = logging.getLogger(__name__)
 class Deploy(BaseCommand):
     def __call__(self):
         logger.info("Starting deployment process")
-        # parse and resolve secrets in .env file
         if self.config.secret_config:
             self.stdout.output("[blue]Resolving secrets from configuration...[/blue]")
             parsed_env = resolve_secrets(
@@ -31,7 +29,6 @@ class Deploy(BaseCommand):
         else:
             parsed_env = self.config.host.env_content
 
-        # run build command
         try:
             logger.debug(
                 f"Building application with command: {self.config.build_command}"
@@ -46,9 +43,9 @@ class Deploy(BaseCommand):
 
         with self.connection() as conn:
             self.stdout.output("[blue]Installing project on remote host...[/blue]")
-            conn.run(f"mkdir -p {self.config.app_dir}")
-            # copy env file
-            conn.run(f"echo '{parsed_env}' > {self.config.app_dir}/.env")
+            conn.run(
+                f"mkdir -p {self.config.app_dir} && echo '{parsed_env}' > {self.config.app_dir}/.env"
+            )
             self.install_project(conn)
             self.stdout.output("[blue]Configuring systemd services...[/blue]")
             self.install_services(conn)
@@ -84,9 +81,8 @@ class Deploy(BaseCommand):
                             self.stdout.output(
                                 "[blue]Pruning old release versions...[/blue]"
                             )
-                            conn.run(f"rm -r {' '.join(to_prune)}", warn=True)
                             conn.run(
-                                f"sed -i '{self.config.versions_to_keep + 1},$d' .versions",
+                                f"rm -r {' '.join(to_prune)} && sed -i '{self.config.versions_to_keep + 1},$d' .versions",
                                 warn=True,
                             )
         if caddy_configured:
@@ -201,14 +197,9 @@ class Deploy(BaseCommand):
                 conn.run(f"bash -c 'source .appenv && {self.config.release_command}'")
 
             # update version history
-            result, _ = conn.run("head -n 1 .versions", warn=True, hide=True)
-            result = result.strip()
-            if result == version:
-                return
-            if result == "":
-                conn.run(f"echo '{version}' > .versions")
-            else:
-                conn.run(f"sed -i '1i {version}' .versions")
+            conn.run(
+                f'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "{version}" ]; then if [ -z "$current" ]; then echo \'{version}\' > .versions; else sed -i \'1i {version}\' .versions; fi; fi'
+            )
 
     def _install_python_package(
         self,
@@ -226,7 +217,6 @@ export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python{self.config.python_version}
 export PATH=".venv/bin:$PATH"
 """
-        conn.run(f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv")
 
         if self.config.requirements:
             local_reqs_path = Path(self.config.requirements)
@@ -235,6 +225,7 @@ export PATH=".venv/bin:$PATH"
 
         self.stdout.output("[blue]Syncing Python dependencies...[/blue]")
         commands = [
+            f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
             f"uv python install {self.config.python_version}",
             "test -d .venv || uv venv",
         ]
