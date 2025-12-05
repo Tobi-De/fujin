@@ -10,6 +10,8 @@ import cappa
 from contextlib import contextmanager
 from typing import Generator
 from fujin.config import HostConfig
+import termios
+import tty
 
 from ssh2.session import (
     Session,
@@ -82,10 +84,22 @@ class SSH2Connection:
         # this allow us to show output in near real-time
         self.session.set_blocking(False)
 
+        # Save terminal settings if we are going to mess with them
+        old_tty_attrs = None
+        is_interactive = pty and sys.stdin.isatty()
+
         try:
             if pty:
                 channel.pty()
             channel.execute(full_command)
+
+            # Switch to raw mode for interactive sessions to prevent local echo
+            # and handle password masking correctly.
+            if is_interactive:
+                # this redcuces latency on keystrokes
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                old_tty_attrs = termios.tcgetattr(sys.stdin)
+                tty.setraw(sys.stdin.fileno())
 
             while True:
                 # Determine what libssh2 needs
@@ -110,12 +124,11 @@ class SSH2Connection:
                         data = os.read(sys.stdin.fileno(), 1024)
                         if data:
                             # User typed something → send to SSH channel
-                            rc = channel.write(data)
+                            rc, _ = channel.write(data)
                             while rc == LIBSSH2_ERROR_EAGAIN:
                                 select([], [self.sock], [], 1.0)
-                                rc = channel.write(data)
+                                rc, _ = channel.write(data)
                     except BlockingIOError:
-                        print("BlockingIOError on stdin read")
                         pass
 
                 if self.sock in r_ready or (directions & LIBSSH2_SESSION_BLOCK_INBOUND):
@@ -159,6 +172,10 @@ class SSH2Connection:
                     break
 
         finally:
+            if is_interactive:
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
+            if old_tty_attrs:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty_attrs)
             self.session.set_blocking(True)
             channel.wait_eof()
             channel.close()
