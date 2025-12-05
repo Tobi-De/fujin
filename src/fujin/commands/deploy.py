@@ -67,25 +67,16 @@ class Deploy(BaseCommand):
             with conn.cd(self.config.app_dir):
                 if self.config.versions_to_keep:
                     logger.debug("Checking for old versions to prune")
-                    result, _ = conn.run(
-                        f"sed -n '{self.config.versions_to_keep + 1},$p' .versions",
-                        hide=True,
-                    )
-                    result = result.strip()
-                    if result:
-                        result_list = result.split("\n")
-                        to_prune = [f"{self.config.app_dir}/v{v}" for v in result_list]
-                        if to_prune:
-                            logger.debug(
-                                f"Pruning old versions: {', '.join(result_list)}"
-                            )
-                            self.stdout.output(
-                                "[blue]Pruning old release versions...[/blue]"
-                            )
-                            conn.run(
-                                f"rm -r {' '.join(to_prune)} && sed -i '{self.config.versions_to_keep + 1},$d' .versions",
-                                warn=True,
-                            )
+                    prune_cmd = f"""
+                        to_prune=$(sed -n '{self.config.versions_to_keep + 1},$p' .versions)
+                        if [ -n "$to_prune" ]; then
+                            for v in $to_prune; do
+                                rm -rf "v$v"
+                            done
+                            sed -i '{self.config.versions_to_keep + 1},$d' .versions
+                        fi
+                    """
+                    conn.run(prune_cmd, warn=True)
         if caddy_configured:
             self.stdout.output("[green]Deployment completed successfully![/green]")
             self.stdout.output(

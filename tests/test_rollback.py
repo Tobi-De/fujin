@@ -32,16 +32,10 @@ source .env
 set +a  # Stop automatic export
 export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python3.12
-export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv\
+export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv && uv python install 3.12 && test -d .venv || uv venv && uv pip install /home/testuser/.local/share/fujin/testapp/v0.0.9/testapp-0.0.9.whl\
 """,
-                "sudo rm -rf .venv",
-                "uv python install 3.12",
-                "uv venv",
-                "uv pip install /home/testuser/.local/share/fujin/testapp/v0.0.9/testapp-0.0.9.whl",
-                "head -n 1 .versions",
-                "sed -i '1i 0.0.9' .versions",
+                'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "0.0.9" ]; then if [ -z "$current" ]; then echo \'0.0.9\' > .versions; else sed -i \'1i 0.0.9\' .versions; fi; fi',
                 "sudo systemctl restart testapp.service testapp-worker@1.service testapp-worker@2.service",
-                "rm -r v0.1.0",
-                "sed -i '1,/0.0.9/{/0.0.9/!d}' .versions",
+                "rm -r v0.1.0 && sed -i '1,/0.0.9/{/0.0.9/!d}' .versions",
             ]
         )

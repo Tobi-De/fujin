@@ -17,19 +17,15 @@ def test_deploy_binary_mode(mock_config, mock_connection, get_commands):
 
     assert get_commands(mock_connection.mock_calls) == snapshot(
         [
-            "mkdir -p /home/testuser/.local/share/fujin/myapp",
-            "echo 'FOO=bar' > /home/testuser/.local/share/fujin/myapp/.env",
+            "mkdir -p /home/testuser/.local/share/fujin/myapp && echo 'FOO=bar' > /home/testuser/.local/share/fujin/myapp/.env",
             "mkdir -p /home/testuser/.local/share/fujin/myapp/v0.1.0",
             """\
 echo 'set -a  # Automatically export all variables
 source .env
 set +a  # Stop automatic export
-export PATH="/home/testuser/.local/share/fujin/myapp:$PATH"' > /home/testuser/.local/share/fujin/myapp/.appenv\
+export PATH="/home/testuser/.local/share/fujin/myapp:$PATH"' > /home/testuser/.local/share/fujin/myapp/.appenv && rm -f /home/testuser/.local/share/fujin/myapp/myapp && ln -s /home/testuser/.local/share/fujin/myapp/v0.1.0/testapp-0.1.0.whl /home/testuser/.local/share/fujin/myapp/myapp\
 """,
-            "rm /home/testuser/.local/share/fujin/myapp/myapp",
-            "ln -s /home/testuser/.local/share/fujin/myapp/v0.1.0/testapp-0.1.0.whl /home/testuser/.local/share/fujin/myapp/myapp",
-            "head -n 1 .versions",
-            "echo '0.1.0' > .versions",
+            'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "0.1.0" ]; then if [ -z "$current" ]; then echo \'0.1.0\' > .versions; else sed -i \'1i 0.1.0\' .versions; fi; fi',
             """\
 echo '# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
@@ -73,8 +69,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target' | sudo tee /etc/systemd/system/myapp-worker@.service\
 """,
-            "sudo systemctl daemon-reload",
-            "sudo systemctl enable --now myapp.service myapp-worker@1.service myapp-worker@2.service",
+            "sudo systemctl daemon-reload && sudo systemctl enable myapp.service myapp-worker@1.service myapp-worker@2.service",
             "systemctl list-units --full --all --plain --no-legend 'myapp*'",
             "ls /etc/systemd/system/myapp*",
             "ls /etc/systemd/system/multi-user.target.wants/myapp*",
@@ -84,10 +79,19 @@ echo 'example.com {
 	
 
 	reverse_proxy localhost:8000
-}' | sudo tee /etc/caddy/conf.d/myapp.caddy\
+}' | sudo tee /etc/caddy/conf.d/myapp.caddy && sudo systemctl reload caddy\
 """,
-            "sudo systemctl reload caddy",
-            "sed -n '6,$p' .versions",
+            """\
+
+                        to_prune=$(sed -n '6,$p' .versions)
+                        if [ -n "$to_prune" ]; then
+                            for v in $to_prune; do
+                                rm -rf "v$v"
+                            done
+                            sed -i '6,$d' .versions
+                        fi
+                    \
+""",
         ]
     )
 
@@ -118,8 +122,7 @@ def test_deploy_python_rebuild_venv(
 
     assert get_commands(mock_connection.mock_calls) == snapshot(
         [
-            "mkdir -p /home/testuser/.local/share/fujin/testapp",
-            "echo 'FOO=bar' > /home/testuser/.local/share/fujin/testapp/.env",
+            "mkdir -p /home/testuser/.local/share/fujin/testapp && echo 'FOO=bar' > /home/testuser/.local/share/fujin/testapp/.env",
             "mkdir -p /home/testuser/.local/share/fujin/testapp/v0.1.0",
             """\
 echo 'set -a  # Automatically export all variables
@@ -127,16 +130,9 @@ source .env
 set +a  # Stop automatic export
 export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python3.12
-export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv\
+export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv && uv python install 3.12 && test -d .venv || uv venv && uv pip install -r /home/testuser/.local/share/fujin/testapp/v0.1.0/requirements.txt && uv pip install /home/testuser/.local/share/fujin/testapp/v0.1.0/testapp-0.1.0.whl\
 """,
-            "head -n 1 .versions",
-            "sudo rm -rf .venv",
-            "uv python install 3.12",
-            "uv venv",
-            "uv pip install -r /home/testuser/.local/share/fujin/testapp/v0.1.0/requirements.txt",
-            "uv pip install /home/testuser/.local/share/fujin/testapp/v0.1.0/testapp-0.1.0.whl",
-            "head -n 1 .versions",
-            "echo '0.1.0' > .versions",
+            'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "0.1.0" ]; then if [ -z "$current" ]; then echo \'0.1.0\' > .versions; else sed -i \'1i 0.1.0\' .versions; fi; fi',
             """\
 echo '# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
@@ -180,8 +176,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target' | sudo tee /etc/systemd/system/testapp-worker@.service\
 """,
-            "sudo systemctl daemon-reload",
-            "sudo systemctl enable --now testapp.service testapp-worker@1.service testapp-worker@2.service",
+            "sudo systemctl daemon-reload && sudo systemctl enable testapp.service testapp-worker@1.service testapp-worker@2.service",
             "systemctl list-units --full --all --plain --no-legend 'testapp*'",
             "ls /etc/systemd/system/testapp*",
             "ls /etc/systemd/system/multi-user.target.wants/testapp*",
@@ -191,10 +186,19 @@ echo 'example.com {
 	
 
 	reverse_proxy localhost:8000
-}' | sudo tee /etc/caddy/conf.d/testapp.caddy\
+}' | sudo tee /etc/caddy/conf.d/testapp.caddy && sudo systemctl reload caddy\
 """,
-            "sudo systemctl reload caddy",
-            "sed -n '6,$p' .versions",
+            """\
+
+                        to_prune=$(sed -n '6,$p' .versions)
+                        if [ -n "$to_prune" ]; then
+                            for v in $to_prune; do
+                                rm -rf "v$v"
+                            done
+                            sed -i '6,$d' .versions
+                        fi
+                    \
+""",
         ]
     )
 
@@ -227,8 +231,7 @@ def test_deploy_python_reuse_venv(mock_config, mock_connection, tmp_path, get_co
 
     assert get_commands(mock_connection.mock_calls) == snapshot(
         [
-            "mkdir -p /home/testuser/.local/share/fujin/testapp",
-            "echo 'FOO=bar' > /home/testuser/.local/share/fujin/testapp/.env",
+            "mkdir -p /home/testuser/.local/share/fujin/testapp && echo 'FOO=bar' > /home/testuser/.local/share/fujin/testapp/.env",
             "mkdir -p /home/testuser/.local/share/fujin/testapp/v0.1.0",
             """\
 echo 'set -a  # Automatically export all variables
@@ -236,14 +239,9 @@ source .env
 set +a  # Stop automatic export
 export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python3.12
-export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv\
+export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv && uv python install 3.12 && test -d .venv || uv venv && uv pip install -r /home/testuser/.local/share/fujin/testapp/v0.1.0/requirements.txt && uv pip install /home/testuser/.local/share/fujin/testapp/v0.1.0/testapp-0.1.0.whl\
 """,
-            "head -n 1 .versions",
-            "md5sum /home/testuser/.local/share/fujin/testapp/v0.0.1/requirements.txt",
-            "cp /home/testuser/.local/share/fujin/testapp/v0.0.1/requirements.txt /home/testuser/.local/share/fujin/testapp/v0.1.0/requirements.txt",
-            "uv pip install /home/testuser/.local/share/fujin/testapp/v0.1.0/testapp-0.1.0.whl",
-            "head -n 1 .versions",
-            "sed -i '1i 0.1.0' .versions",
+            'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "0.1.0" ]; then if [ -z "$current" ]; then echo \'0.1.0\' > .versions; else sed -i \'1i 0.1.0\' .versions; fi; fi',
             """\
 echo '# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
@@ -287,8 +285,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target' | sudo tee /etc/systemd/system/testapp-worker@.service\
 """,
-            "sudo systemctl daemon-reload",
-            "sudo systemctl enable --now testapp.service testapp-worker@1.service testapp-worker@2.service",
+            "sudo systemctl daemon-reload && sudo systemctl enable testapp.service testapp-worker@1.service testapp-worker@2.service",
             "systemctl list-units --full --all --plain --no-legend 'testapp*'",
             "ls /etc/systemd/system/testapp*",
             "ls /etc/systemd/system/multi-user.target.wants/testapp*",
@@ -298,10 +295,19 @@ echo 'example.com {
 	
 
 	reverse_proxy localhost:8000
-}' | sudo tee /etc/caddy/conf.d/testapp.caddy\
+}' | sudo tee /etc/caddy/conf.d/testapp.caddy && sudo systemctl reload caddy\
 """,
-            "sudo systemctl reload caddy",
-            "sed -n '6,$p' .versions",
+            """\
+
+                        to_prune=$(sed -n '6,$p' .versions)
+                        if [ -n "$to_prune" ]; then
+                            for v in $to_prune; do
+                                rm -rf "v$v"
+                            done
+                            sed -i '6,$d' .versions
+                        fi
+                    \
+""",
         ]
     )
 
@@ -322,8 +328,7 @@ def test_deploy_version_update(mock_config, mock_connection, get_commands):
 
     assert get_commands(mock_connection.mock_calls) == snapshot(
         [
-            "mkdir -p /home/testuser/.local/share/fujin/testapp",
-            "echo 'FOO=bar' > /home/testuser/.local/share/fujin/testapp/.env",
+            "mkdir -p /home/testuser/.local/share/fujin/testapp && echo 'FOO=bar' > /home/testuser/.local/share/fujin/testapp/.env",
             "mkdir -p /home/testuser/.local/share/fujin/testapp/v0.1.0",
             """\
 echo 'set -a  # Automatically export all variables
@@ -331,14 +336,9 @@ source .env
 set +a  # Stop automatic export
 export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python3.12
-export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv\
+export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv && uv python install 3.12 && test -d .venv || uv venv && uv pip install /home/testuser/.local/share/fujin/testapp/v0.1.0/testapp-0.1.0.whl\
 """,
-            "sudo rm -rf .venv",
-            "uv python install 3.12",
-            "uv venv",
-            "uv pip install /home/testuser/.local/share/fujin/testapp/v0.1.0/testapp-0.1.0.whl",
-            "head -n 1 .versions",
-            "sed -i '1i 0.1.0' .versions",
+            'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "0.1.0" ]; then if [ -z "$current" ]; then echo \'0.1.0\' > .versions; else sed -i \'1i 0.1.0\' .versions; fi; fi',
             """\
 echo '# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
@@ -382,8 +382,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target' | sudo tee /etc/systemd/system/testapp-worker@.service\
 """,
-            "sudo systemctl daemon-reload",
-            "sudo systemctl enable --now testapp.service testapp-worker@1.service testapp-worker@2.service",
+            "sudo systemctl daemon-reload && sudo systemctl enable testapp.service testapp-worker@1.service testapp-worker@2.service",
             "systemctl list-units --full --all --plain --no-legend 'testapp*'",
             "ls /etc/systemd/system/testapp*",
             "ls /etc/systemd/system/multi-user.target.wants/testapp*",
@@ -393,10 +392,19 @@ echo 'example.com {
 	
 
 	reverse_proxy localhost:8000
-}' | sudo tee /etc/caddy/conf.d/testapp.caddy\
+}' | sudo tee /etc/caddy/conf.d/testapp.caddy && sudo systemctl reload caddy\
 """,
-            "sudo systemctl reload caddy",
-            "sed -n '6,$p' .versions",
+            """\
+
+                        to_prune=$(sed -n '6,$p' .versions)
+                        if [ -n "$to_prune" ]; then
+                            for v in $to_prune; do
+                                rm -rf "v$v"
+                            done
+                            sed -i '6,$d' .versions
+                        fi
+                    \
+""",
         ]
     )
 
@@ -420,8 +428,7 @@ def test_deploy_pruning(mock_config, mock_connection, get_commands):
 
     assert get_commands(mock_connection.mock_calls) == snapshot(
         [
-            "mkdir -p /home/testuser/.local/share/fujin/testapp",
-            "echo 'FOO=bar' > /home/testuser/.local/share/fujin/testapp/.env",
+            "mkdir -p /home/testuser/.local/share/fujin/testapp && echo 'FOO=bar' > /home/testuser/.local/share/fujin/testapp/.env",
             "mkdir -p /home/testuser/.local/share/fujin/testapp/v0.1.0",
             """\
 echo 'set -a  # Automatically export all variables
@@ -429,14 +436,9 @@ source .env
 set +a  # Stop automatic export
 export UV_COMPILE_BYTECODE=1
 export UV_PYTHON=python3.12
-export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv\
+export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv && uv python install 3.12 && test -d .venv || uv venv && uv pip install /home/testuser/.local/share/fujin/testapp/v0.1.0/testapp-0.1.0.whl\
 """,
-            "sudo rm -rf .venv",
-            "uv python install 3.12",
-            "uv venv",
-            "uv pip install /home/testuser/.local/share/fujin/testapp/v0.1.0/testapp-0.1.0.whl",
-            "head -n 1 .versions",
-            "echo '0.1.0' > .versions",
+            'current=$(head -n 1 .versions 2>/dev/null); if [ "$current" != "0.1.0" ]; then if [ -z "$current" ]; then echo \'0.1.0\' > .versions; else sed -i \'1i 0.1.0\' .versions; fi; fi',
             """\
 echo '# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
@@ -480,8 +482,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target' | sudo tee /etc/systemd/system/testapp-worker@.service\
 """,
-            "sudo systemctl daemon-reload",
-            "sudo systemctl enable --now testapp.service testapp-worker@1.service testapp-worker@2.service",
+            "sudo systemctl daemon-reload && sudo systemctl enable testapp.service testapp-worker@1.service testapp-worker@2.service",
             "systemctl list-units --full --all --plain --no-legend 'testapp*'",
             "ls /etc/systemd/system/testapp*",
             "ls /etc/systemd/system/multi-user.target.wants/testapp*",
@@ -491,11 +492,18 @@ echo 'example.com {
 	
 
 	reverse_proxy localhost:8000
-}' | sudo tee /etc/caddy/conf.d/testapp.caddy\
+}' | sudo tee /etc/caddy/conf.d/testapp.caddy && sudo systemctl reload caddy\
 """,
-            "sudo systemctl reload caddy",
-            "sed -n '3,$p' .versions",
-            "rm -r /home/testuser/.local/share/fujin/testapp/v0.0.1",
-            "sed -i '3,$d' .versions",
+            """\
+
+                        to_prune=$(sed -n '3,$p' .versions)
+                        if [ -n "$to_prune" ]; then
+                            for v in $to_prune; do
+                                rm -rf "v$v"
+                            done
+                            sed -i '3,$d' .versions
+                        fi
+                    \
+""",
         ]
     )

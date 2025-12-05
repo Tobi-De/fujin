@@ -46,11 +46,6 @@ def test_down_full_uninstall_proxy(mock_connection, get_commands):
                 "sudo rm /etc/systemd/system/testapp.service /etc/systemd/system/testapp-worker@.service",
                 "sudo systemctl daemon-reload",
                 "sudo systemctl reset-failed",
-                "sudo systemctl stop caddy",
-                "sudo systemctl disable caddy",
-                "sudo rm /usr/bin/caddy",
-                "sudo rm /etc/systemd/system/caddy.service",
-                "sudo userdel caddy",
-                "sudo rm -rf /etc/caddy",
+                "sudo systemctl stop caddy && sudo systemctl disable caddy && sudo rm /usr/bin/caddy && sudo rm /etc/systemd/system/caddy.service && sudo userdel caddy && sudo rm -rf /etc/caddy",
             ]
         )
