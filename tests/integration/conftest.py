@@ -31,13 +31,21 @@ def vps_container(mock_vps_image):
         "/sys/fs/cgroup:/sys/fs/cgroup:rw",
         "--cgroupns=host",
         "-p",
-        "2222:22",  # Map SSH port
+        "0:22",  # Let Docker assign a port
         "--name",
         container_name,
         mock_vps_image,
     ]
 
     subprocess.run(cmd, check=True)
+
+    # Get the assigned port
+    port_output = subprocess.check_output(
+        ["docker", "port", container_name, "22"], text=True
+    ).strip()
+    # Output format usually: 0.0.0.0:32768
+    # We need the port number.
+    host_port = int(port_output.split(":")[-1])
 
     # Wait for SSH to be ready
     time.sleep(5)
@@ -52,7 +60,7 @@ def vps_container(mock_vps_image):
     yield {
         "name": container_name,
         "ip": "127.0.0.1",
-        "port": 2222,
+        "port": host_port,
         "user": "fujin",
         "password": "fujin",  # Or setup keys here
     }

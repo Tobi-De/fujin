@@ -1,4 +1,5 @@
 import subprocess
+import time
 from pathlib import Path
 from fujin.config import Config, HostConfig, Webserver, ProcessConfig, InstallationMode
 from fujin.commands.deploy import Deploy
@@ -6,49 +7,43 @@ from unittest.mock import patch
 
 
 def test_full_deployment_flow(vps_container, ssh_key_setup, tmp_path):
+    # Mock distfile
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    distfile = dist_dir / "app-0.1.0"
+    # Create a dummy executable script (Python HTTP server)
+    script_content = """#!/usr/bin/env python3
+import http.server
+import socketserver
+import sys
+
+PORT = 8000
+Handler = http.server.SimpleHTTPRequestHandler
+
+with socketserver.TCPServer(("", PORT), Handler) as httpd:
+    print("serving at port", PORT)
+    httpd.serve_forever()
+"""
+    distfile.write_text(script_content)
+    distfile.chmod(0o755)
+
     # 1. Setup Config pointing to Docker container
     config = Config(
         app_name="integration-test",
         version="0.1.0",
         build_command="echo 'building'",
-        distfile="dist/app-{version}.whl",
-        installation_mode=InstallationMode.BINARY,  # Using binary for simplicity in this test
+        distfile=str(distfile),  # Use absolute path
+        installation_mode=InstallationMode.BINARY,
         host=HostConfig(
             ip=vps_container["ip"],
             user=vps_container["user"],
             ssh_port=vps_container["port"],
-            _key_filename=ssh_key_setup,
+            _key_filename=str(ssh_key_setup),
             domain_name="localhost",
         ),
         webserver=Webserver(upstream="localhost:8000", enabled=True),
-        processes={"web": ProcessConfig(command="integration-test")},
+        processes={"web": ProcessConfig(command=f"python3 {distfile.name}")},
     )
-
-    # Mock distfile
-    dist_dir = tmp_path / "dist"
-    dist_dir.mkdir()
-    distfile = dist_dir / "app-0.1.0.whl"
-    # Create a dummy executable script
-    script_content = "#!/bin/sh\nwhile true; do sleep 1; done"
-    distfile.write_text(script_content)
-    distfile.chmod(0o755)
-
-    # We need to patch the config to use our tmp_path as root or adjust paths
-    # But Config uses relative paths. Let's just mock the distfile existence check if needed
-    # Or better, run the test from tmp_path?
-    # For now, let's assume we run pytest from root and we create the file relative to root?
-    # Actually, Config.get_distfile_path returns a Path object.
-    # Let's monkeypatch the distfile path resolution or just create the file in the current working dir?
-    # Creating in CWD is risky.
-
-    # Let's use a simpler approach: Mock the build command to create the file?
-    # Or just create it in the test.
-
-    # Since we are running in a real environment (the test runner), we need to create the file locally.
-    Path("dist").mkdir(exist_ok=True)
-    # Copy the executable script to the location expected by Config
-    Path("dist/app-0.1.0.whl").write_text(script_content)
-    Path("dist/app-0.1.0.whl").chmod(0o755)
 
     try:
         # 2. Run Deploy
@@ -97,6 +92,29 @@ def test_full_deployment_flow(vps_container, ssh_key_setup, tmp_path):
             )
 
         assert result.stdout.strip() == "active"
+
+        # 4. Verify application is responding
+        # We curl localhost:8000 inside the container
+        curl_cmd = [
+            "docker",
+            "exec",
+            vps_container["name"],
+            "curl",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "http://localhost:8000",
+        ]
+        # Retry a few times as startup might take a moment
+        for _ in range(10):
+            result = subprocess.run(curl_cmd, capture_output=True, text=True)
+            if result.stdout.strip() == "200":
+                break
+            time.sleep(1)
+
+        assert result.stdout.strip() == "200"
 
     finally:
         # Cleanup local artifact

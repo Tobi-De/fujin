@@ -82,7 +82,7 @@ class Deploy(BaseCommand):
                 (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
 
             valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
-            valid_units_str = " ".join(valid_units)
+            valid_units_str = " ".join(sorted(valid_units))
             install_script = self._generate_install_script(
                 version=version,
                 distfile_name=distfile_path.name,

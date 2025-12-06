@@ -42,6 +42,9 @@ def mock_ssh_channel():
         mock_channel = MagicMock()
         mock_session.open_session.return_value = mock_channel
 
+        # Attach session to channel for tests to access
+        mock_channel.mock_session = mock_session
+
         # Default behavior
         mock_channel.eof.return_value = True
         mock_channel.read.return_value = (0, b"")
