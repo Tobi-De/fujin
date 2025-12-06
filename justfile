@@ -64,7 +64,7 @@ download-pocketbase:
     uv export --no-hashes --group docs --format requirements-txt > docs/requirements.txt
 
 @test *ARGS:
-    uv run pytest --ignore=tests/integration {{ ARGS }}
+    uv run pytest --ignore=tests/integration -sv {{ ARGS }}
 
 @test-integration *ARGS:
     uv run pytest tests/integration {{ ARGS }}

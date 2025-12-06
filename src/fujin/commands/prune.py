@@ -24,19 +24,50 @@ class Prune(BaseCommand):
     def __call__(self):
         if self.keep < 1:
             raise cappa.Exit("The minimum value for the --keep option is 1", code=1)
-        with self.connection() as conn, conn.cd(self.config.app_dir):
-            result, _ = conn.run(f"sed -n '{self.keep + 1},$p' .versions", hide=True)
-            result = result.strip()
-            result_list = result.split("\n")
-            if result == "":
-                self.stdout.output("[blue]No versions to prune[/blue]")
+
+        versions_dir = f"{self.config.app_dir}/.versions"
+        with self.connection() as conn:
+            if conn.run(f"test -d {versions_dir}", warn=True, hide=True).failed:
+                self.stdout.output(
+                    "[blue]No versions directory found. Nothing to prune.[/blue]"
+                )
                 return
+
+            # List files sorted by time (newest first)
+            result, _ = conn.run(f"ls -1t {versions_dir}", warn=True, hide=True)
+
+            if not result:
+                self.stdout.output("[blue]No versions found to prune[/blue]")
+                return
+
+            filenames = result.strip().splitlines()
+            prefix = f"{self.config.app_name}-"
+            suffix = ".tar.gz"
+
+            valid_bundles = []
+            for fname in filenames:
+                if fname.startswith(prefix) and fname.endswith(suffix):
+                    valid_bundles.append(fname)
+
+            if len(valid_bundles) <= self.keep:
+                self.stdout.output(
+                    f"[blue]Only {len(valid_bundles)} versions found. Nothing to prune (keep={self.keep}).[/blue]"
+                )
+                return
+
+            to_delete = valid_bundles[self.keep :]
+            # Extract versions for display
+            versions_to_delete = []
+            for fname in to_delete:
+                v = fname[len(prefix) : -len(suffix)]
+                versions_to_delete.append(v)
+
             if not Confirm.ask(
-                f"""[red]The following versions will be permanently deleted: {", ".join(result_list)}. 
-                This action is irreversible. Are you sure you want to proceed?[/red]"""
+                f"[red]The following versions will be permanently deleted: {', '.join(versions_to_delete)}.\\n"
+                f"This action is irreversible. Are you sure you want to proceed?[/red]"
             ):
                 return
-            to_prune = [f"{self.config.app_dir}/v{v}" for v in result_list]
-            conn.run(f"rm -r {' '.join(to_prune)}", warn=True)
-            conn.run(f"sed -i '{self.keep + 1},$d' .versions", warn=True)
+
+            cmd = f"cd {versions_dir} && rm -f {' '.join(to_delete)}"
+            conn.run(cmd)
             self.stdout.output("[green]Pruning completed successfully[/green]")
