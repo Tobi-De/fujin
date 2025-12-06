@@ -10,6 +10,7 @@ import hashlib
 from typing import Annotated
 from pathlib import Path
 import time
+import sys
 
 import cappa
 from rich.prompt import Confirm
@@ -79,22 +80,71 @@ class Deploy(BaseCommand):
             if self.config.webserver.enabled:
                 (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
 
+            valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
+            valid_units_str = " ".join(valid_units)
             install_script = self._generate_install_script(
                 version=version,
                 distfile_name=distfile_path.name,
-                new_units=new_units,
+                valid_units_str=valid_units_str,
             )
+
             (bundle_dir / "install.sh").write_text(install_script)
             logger.debug("Generated install script:\n%s", install_script)
 
-            uninstall_script = self._generate_uninstall_script(new_units)
+            uninstall_script = self._generate_uninstall_script(valid_units_str)
             (bundle_dir / "uninstall.sh").write_text(uninstall_script)
             logger.debug("Generated uninstall script:\n%s", uninstall_script)
 
-            # Create tarball
-            tar_path = Path(tmpdir) / "deploy.tar.gz"
-            with tarfile.open(tar_path, "w:gz", format=tarfile.PAX_FORMAT) as tar:
-                tar.add(bundle_dir, arcname=".")
+            # Create tarball (prefer zstd, fallback to fast gzip)
+            tar_created = False
+            if sys.version_info.minor >= 14:
+                try:
+                    logger.info(
+                        "Creating zstd-compressed deployment bundle using stdlib"
+                    )
+                    tar_ext = "tar.zst"
+                    tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
+                    with tarfile.open(
+                        tar_path,
+                        "w:zst",
+                        format=tarfile.PAX_FORMAT,
+                    ) as tar:
+                        tar.add(bundle_dir, arcname=".")
+                    tar_created = True
+                except tarfile.CompressionError:
+                    logger.warning(
+                        "zstd compression not supported, falling back to gzip"
+                    )
+
+            if not tar_created:
+                if shutil.which("zstd"):
+                    logger.info(
+                        "Creating zstd-compressed deployment bundle using system zstd"
+                    )
+                    tar_ext = "tar.zst"
+                    tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
+                    subprocess.run(
+                        [
+                            "tar",
+                            "--zstd",
+                            "-cf",
+                            str(tar_path),
+                            "-C",
+                            str(bundle_dir),
+                            ".",
+                        ],
+                        check=True,
+                    )
+                else:
+                    logger.info("Creating gzip-compressed deployment bundle")
+                    tar_ext = "tar.gz"
+                    tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
+                    with tarfile.open(
+                        tar_path,
+                        "w:gz",
+                        format=tarfile.PAX_FORMAT,
+                    ) as tar:
+                        tar.add(bundle_dir, arcname=".")
 
             # Calculate local checksum
             logger.info("Calculating local bundle checksum")
@@ -103,7 +153,7 @@ class Deploy(BaseCommand):
 
             remote_bundle_dir = Path(self.config.app_dir) / ".versions"
             remote_bundle_path = (
-                f"{remote_bundle_dir}/{self.config.app_name}-{version}.tar.gz"
+                f"{remote_bundle_dir}/{self.config.app_name}-{version}.{tar_ext}"
             )
 
             # Quote remote paths for shell usage (safe insertion into remote commands)
@@ -112,54 +162,56 @@ class Deploy(BaseCommand):
 
             # Upload and Execute
             with self.connection() as conn:
-                conn.run(f"mkdir -p {remote_bundle_dir}")
+                conn.run(f"mkdir -p {remote_bundle_dir_q}")
 
-                upload_ok = False
-                attempt = 0
                 max_upload_retries = 3
-                while not upload_ok and attempt < max_upload_retries:
-                    self.stdout.output("[blue]Uploading deployment bundle...[/blue]")
+                upload_ok = False
+                for attempt in range(1, max_upload_retries + 1):
+                    self.stdout.output(
+                        f"[blue]Uploading deployment bundle (attempt {attempt}/{max_upload_retries})...[/blue]"
+                    )
 
-                    # Upload to a temporary filename first, then atomically move into place
+                    # Upload to a temporary filename first, then move into place
                     tmp_remote = f"{remote_bundle_path}.uploading.{int(time.time())}"
-                    tmp_remote_q = shlex.quote(tmp_remote)
                     conn.put(str(tar_path), tmp_remote)
 
                     logger.info("Verifying uploaded bundle checksum")
                     remote_checksum_out, _ = conn.run(
-                        f"sha256sum {tmp_remote_q} | awk '{{print $1}}'",
+                        f"sha256sum {tmp_remote} | awk '{{print $1}}'",
                         hide=True,
                     )
                     remote_checksum = remote_checksum_out.strip()
 
                     if local_checksum == remote_checksum:
-                        conn.run(f"mv {tmp_remote_q} {remote_bundle_path_q}")
+                        conn.run(f"mv {tmp_remote} {remote_bundle_path_q}")
                         upload_ok = True
                         self.stdout.output(
                             "[green]Bundle uploaded and verified successfully.[/green]"
                         )
                         break
 
-                    conn.run(f"rm -f {tmp_remote_q}")
+                    conn.run(f"rm -f {tmp_remote}")
                     self.stdout.output(
                         f"[red]Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}[/red]"
                     )
 
-                    if self.no_input:
-                        raise cappa.Exit("Upload failed: Checksum mismatch.", code=1)
-
-                    if attempt >= max_upload_retries or not Confirm.ask(
-                        "Upload failed. Retry?"
+                    if self.no_input or (
+                        attempt == max_upload_retries
+                        or not Confirm.ask("Upload failed. Retry?")
                     ):
                         raise cappa.Exit("Upload aborted by user.", code=1)
 
+                if not upload_ok:
+                    raise cappa.Exit("Upload failed after retries.", code=1)
+
                 self.stdout.output("[blue]Executing remote installation...[/blue]")
                 remote_extract_dir = f"/tmp/{self.config.app_name}-{version}"
+                tar_extract_flag = "--zstd" if tar_ext.endswith("zst") else "-z"
                 install_cmd = (
                     f"mkdir -p {remote_extract_dir} && "
-                    f"tar --overwrite -xzf {remote_bundle_path_q} -C {remote_extract_dir} && "
+                    f"tar --overwrite {tar_extract_flag} -xf {remote_bundle_path_q} -C {remote_extract_dir} && "
                     f"cd {remote_extract_dir} && "
-                    f"chmod +x install.sh || true && "
+                    f"chmod +x install.sh && "
                     f"bash ./install.sh || (echo 'install.sh failed' >&2; exit 1) && "
                     f"cd / && rm -rf {remote_extract_dir}"
                 )
@@ -172,10 +224,7 @@ class Deploy(BaseCommand):
             )
 
     def _generate_install_script(
-        self,
-        version: str,
-        distfile_name: str,
-        new_units: dict[str, str],
+        self, version: str, distfile_name: str, valid_units_str: str
     ) -> str:
         app_dir_q = shlex.quote(self.config.app_dir)
         script = [
@@ -225,12 +274,8 @@ class Deploy(BaseCommand):
             ]
         )
         script.extend(
-            [f"sudo cp units/{name} /etc/systemd/system/" for name in new_units.keys()]
-        )
-        valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
-        valid_units_str = " ".join(valid_units)
-        script.extend(
             [
+                f"sudo cp units/* /etc/systemd/system/",
                 systemd_cleanup_script.format(
                     app_name=self.config.app_name, valid_units_str=valid_units_str
                 ),
@@ -267,16 +312,31 @@ class Deploy(BaseCommand):
         script.append("echo '==> Install script completed successfully.'")
         return "\n".join(script)
 
-    def _generate_uninstall_script(self, new_units: dict[str, str]) -> str:
+    def _generate_uninstall_script(self, valid_units_str: str) -> str:
         script = ["#!/usr/bin/env bash", "set -e"]
-        units = " ".join(self.config.active_systemd_units)
-        if units:
-            script.append(f"sudo systemctl disable --now {units}")
+        app_name = self.config.app_name
+
+        if valid_units_str:
+            script.append(f"sudo systemctl disable --now {valid_units_str}")
 
         script.extend(
-            [f"sudo rm -f /etc/systemd/system/{name}" for name in new_units.keys()]
+            [
+                'APP_NAME="' + app_name + '"',
+                f"UNITS=({valid_units_str})",
+                'for UNIT in "${UNITS[@]}"; do',
+                '  case "$UNIT" in',
+                '    */*|*..*) echo "Skipping suspicious unit name: $UNIT" >&2; continue;;',
+                "  esac",
+                '  if [[ "$UNIT" != ${APP_NAME}* ]]; then',
+                '    echo "Refusing to remove non-app unit: $UNIT" >&2',
+                "    continue",
+                "  fi",
+                '  sudo rm -f /etc/systemd/system/"$UNIT"',
+                "done",
+                "sudo systemctl daemon-reload",
+                "sudo systemctl reset-failed",
+            ]
         )
-        script.extend(["sudo systemctl daemon-reload", "sudo systemctl reset-failed"])
 
         if self.config.webserver.enabled:
             script.extend(
@@ -311,7 +371,9 @@ export PATH=".venv/bin:$PATH"
         ]
         if requirements_path:
             commands.append(f"uv pip install -r {requirements_path}")
-        commands.append(f"uv pip install {distfile_path}")
+            commands.append(f"uv pip install --no-deps {distfile_path}")
+        else:
+            commands.append(f"uv pip install {distfile_path}")
         return commands
 
     def _get_binary_install_commands(self, distfile_path: str) -> list[str]:
@@ -364,7 +426,7 @@ for UNIT in "${{INSTALLED_UNITS[@]}}"; do
             sudo systemctl disable "$UNIT" --quiet || true
         fi
 
-        sudo systemctl reset-failed "$UNIT" --quiet || true
+        sudo systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
     fi
 done
 

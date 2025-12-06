@@ -25,6 +25,19 @@ else:
     import tomli as tomllib
 
 
+def _set_logging(verbose):
+    verbose = int(verbose)
+    if verbose == 0:
+        level = logging.WARN
+    elif verbose == 1:
+        level = logging.INFO
+    else:
+        level = logging.DEBUG
+    logging.basicConfig(level=level, format="%(message)s")
+    logging.getLogger("markdown_it").setLevel(logging.WARNING)
+    return verbose
+
+
 @cappa.command(help="Deployment of python web apps in a breeze :)")
 class Fujin:
     subcommands: cappa.Subcommands[
@@ -41,19 +54,18 @@ class Fujin:
         | Printenv
     ]
     verbose: Annotated[
-        bool,
-        cappa.Arg(short=None, long="--verbose", help="Enable verbose logging"),
-    ] = False
+        int,
+        cappa.Arg(
+            short=None,
+            long="--verbose",
+            help="Enable verbose logging",
+            action=_set_logging,
+            choices=[0, 1, 2],
+        ),
+    ] = 0
 
 
 def main():
-    # Configure logging early based on argv
-    verbose = "-v" in sys.argv or "--verbose" in sys.argv
-    level = logging.DEBUG if verbose else logging.WARN
-    logging.basicConfig(level=level, format="%(message)s")
-    if verbose:
-        logging.getLogger("markdown_it").setLevel(logging.WARNING)
-
     alias_cmd = _parse_aliases()
     if alias_cmd:
         cappa.invoke(Fujin, argv=alias_cmd, version=fujin.__version__)

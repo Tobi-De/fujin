@@ -19,7 +19,6 @@ shell = "server exec --appenv -i bash"
 [processes]
 web = { command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -" }
 worker = { command = ".venv/bin/bookstore db_worker", replicas = 2 }
-worker2 = { command = ".venv/bin/bookstore db_worker", replicas = 1 }
 
 # [host]
 # domain_name = "localhost"

@@ -245,7 +245,6 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         raise cappa.Exit(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
 
     session = Session()
-    # session.flag(LIBSSH2_FLAG_COMPRESS)
     try:
         logger.info("Starting SSH session...")
         session.handshake(sock)

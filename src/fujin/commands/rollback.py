@@ -81,7 +81,10 @@ class Rollback(BaseCommand):
                     if conn.run(f"test -f {tmp_uninstall_dir}/uninstall.sh", warn=True)[
                         1
                     ]:
-                        conn.run(f"bash {tmp_uninstall_dir}/uninstall.sh", warn=True)
+                        conn.run(
+                            f"cd {tmp_uninstall_dir} && chmod +x ./uninstall.sh && bash ./uninstall.sh",
+                            warn=True,
+                        )
                     else:
                         self.stdout.output(
                             f"[yellow]Warning: uninstall.sh not found in bundle for version {current_version}.[/yellow]"

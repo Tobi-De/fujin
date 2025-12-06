@@ -64,6 +64,7 @@ class Down(BaseCommand):
                 '    if tar -xzf "$CURRENT_BUNDLE" -C "$TMP_DIR"; then',
                 '      if [ -f "$TMP_DIR/uninstall.sh" ]; then',
                 '        echo "Running uninstall script for version $CURRENT_VERSION..."',
+                '        chmod +x "$TMP_DIR/uninstall.sh"',
                 '        bash "$TMP_DIR/uninstall.sh"',
                 "      else",
                 '        echo "Warning: uninstall.sh not found in bundle."',
