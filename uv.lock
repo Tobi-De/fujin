@@ -81,7 +81,7 @@ wheels = [
 
 [[package]]
 name = "bookstore"
-version = "0.1.3"
+version = "0.1.0"
 source = { editable = "examples/django/bookstore" }
 dependencies = [
     { name = "django" },

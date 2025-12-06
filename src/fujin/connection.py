@@ -254,12 +254,14 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
 
     logger.info("Authenticating...")
     try:
-        # TODO: maybe add support for passphrase later
         if host.key_filename:
             logger.debug(
                 "Authenticating with public key from file %s", host.key_filename
             )
-            session.userauth_publickey_fromfile(host.user, str(host.key_filename), "")
+            passphrase = host.key_passphrase or ""
+            session.userauth_publickey_fromfile(
+                host.user, str(host.key_filename), passphrase
+            )
         elif host.password:
             logger.debug("Authenticating with password")
             session.userauth_password(host.user, host.password)

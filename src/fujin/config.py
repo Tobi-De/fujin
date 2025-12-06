@@ -240,6 +240,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
     password_env: str | None = None
     ssh_port: int = 22
     _key_filename: str | None = msgspec.field(name="key_filename", default=None)
+    key_passphrase_env: str | None = None
 
     def __post_init__(self):
         if self._env_file and self.env_content:
@@ -265,10 +266,21 @@ class HostConfig(msgspec.Struct, kw_only=True):
         if not self.password_env:
             return
         password = os.getenv(self.password_env)
-        if not password:
+        if password is None:
             msg = f"Env {self.password_env} can not be found"
             raise ImproperlyConfiguredError(msg)
         return password
+
+    @property
+    def key_passphrase(self) -> str | None:
+        if not self.key_passphrase_env:
+            return None
+        value = os.getenv(self.key_passphrase_env)
+        if value is None:
+            raise ImproperlyConfiguredError(
+                f"Env {self.key_passphrase_env} can not be found"
+            )
+        return value
 
 
 class Webserver(msgspec.Struct):
