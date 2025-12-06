@@ -10,7 +10,6 @@ import hashlib
 from typing import Annotated
 from pathlib import Path
 import time
-import sys
 
 import cappa
 from rich.prompt import Confirm
@@ -95,56 +94,17 @@ class Deploy(BaseCommand):
             (bundle_dir / "uninstall.sh").write_text(uninstall_script)
             logger.debug("Generated uninstall script:\n%s", uninstall_script)
 
-            # Create tarball (prefer zstd, fallback to fast gzip)
-            tar_created = False
-            if sys.version_info.minor >= 14:
-                try:
-                    logger.info(
-                        "Creating zstd-compressed deployment bundle using stdlib"
-                    )
-                    tar_ext = "tar.zst"
-                    tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
-                    with tarfile.open(
-                        tar_path,
-                        "w:zst",
-                        format=tarfile.PAX_FORMAT,
-                    ) as tar:
-                        tar.add(bundle_dir, arcname=".")
-                    tar_created = True
-                except tarfile.CompressionError:
-                    logger.warning(
-                        "zstd compression not supported, falling back to gzip"
-                    )
-
-            if not tar_created:
-                if shutil.which("zstd"):
-                    logger.info(
-                        "Creating zstd-compressed deployment bundle using system zstd"
-                    )
-                    tar_ext = "tar.zst"
-                    tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
-                    subprocess.run(
-                        [
-                            "tar",
-                            "--zstd",
-                            "-cf",
-                            str(tar_path),
-                            "-C",
-                            str(bundle_dir),
-                            ".",
-                        ],
-                        check=True,
-                    )
-                else:
-                    logger.info("Creating gzip-compressed deployment bundle")
-                    tar_ext = "tar.gz"
-                    tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
-                    with tarfile.open(
-                        tar_path,
-                        "w:gz",
-                        format=tarfile.PAX_FORMAT,
-                    ) as tar:
-                        tar.add(bundle_dir, arcname=".")
+            # Create tarball
+            logger.info("Creating gzip-compressed deployment bundle")
+            tar_ext = "tar.gz"
+            tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
+            with tarfile.open(
+                tar_path,
+                "w:gz",
+                format=tarfile.PAX_FORMAT,
+                compresslevel=1,
+            ) as tar:
+                tar.add(bundle_dir, arcname=".")
 
             # Calculate local checksum
             logger.info("Calculating local bundle checksum")
@@ -206,10 +166,9 @@ class Deploy(BaseCommand):
 
                 self.stdout.output("[blue]Executing remote installation...[/blue]")
                 remote_extract_dir = f"/tmp/{self.config.app_name}-{version}"
-                tar_extract_flag = "--zstd" if tar_ext.endswith("zst") else "-z"
                 install_cmd = (
                     f"mkdir -p {remote_extract_dir} && "
-                    f"tar --overwrite {tar_extract_flag} -xf {remote_bundle_path_q} -C {remote_extract_dir} && "
+                    f"tar --overwrite -xzf {remote_bundle_path_q} -C {remote_extract_dir} && "
                     f"cd {remote_extract_dir} && "
                     f"chmod +x install.sh && "
                     f"bash ./install.sh || (echo 'install.sh failed' >&2; exit 1) && "

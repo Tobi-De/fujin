@@ -59,7 +59,7 @@ class Down(BaseCommand):
                 '  CURRENT_VERSION=$(cat "$APP_DIR/.version")',
                 '  CURRENT_BUNDLE="$APP_DIR/.versions/$APP_NAME-$CURRENT_VERSION.tar.gz"',
                 '  if [ -f "$CURRENT_BUNDLE" ]; then',
-                '    TMP_DIR="/tmp/uninstall-$CURRENT_VERSION"',
+                '    TMP_DIR="/tmp/uninstall-$APP_NAME-$CURRENT_VERSION"',
                 '    mkdir -p "$TMP_DIR"',
                 '    if tar -xzf "$CURRENT_BUNDLE" -C "$TMP_DIR"; then',
                 '      if [ -f "$TMP_DIR/uninstall.sh" ]; then',
