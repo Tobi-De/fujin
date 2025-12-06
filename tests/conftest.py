@@ -28,26 +28,39 @@ def mock_config():
 
 
 @pytest.fixture
-def mock_connection():
-    with patch("fujin.commands._base.host_connection") as mock:
-        conn = MagicMock()
-        # Setup context manager behavior for the connection itself
-        mock.return_value.__enter__.return_value = conn
+def mock_ssh_channel():
+    with (
+        patch("fujin.connection.socket"),
+        patch("fujin.connection.Session") as mock_session_cls,
+        patch("fujin.connection.select") as mock_select,
+    ):
 
-        # Setup context manager behavior for conn.cd() and conn.prefix()
-        # These methods return context managers that yield the connection (or None)
-        conn.cd.return_value.__enter__.return_value = conn
-        conn.prefix.return_value.__enter__.return_value = conn
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
+        mock_session.userauth_authenticated.return_value = True
 
-        # Setup run to return a tuple (stdout, ok)
-        conn.run.return_value = ("", True)
+        mock_channel = MagicMock()
+        mock_session.open_session.return_value = mock_channel
 
-        yield conn
+        # Default behavior
+        mock_channel.eof.return_value = True
+        mock_channel.read.return_value = (0, b"")
+        mock_channel.read_stderr.return_value = (0, b"")
+        mock_channel.get_exit_status.return_value = 0
+
+        mock_select.return_value = ([], [], [])
+
+        yield mock_channel
+
+
+@pytest.fixture
+def mock_connection(mock_ssh_channel):
+    return mock_ssh_channel
 
 
 @pytest.fixture
 def mock_calls(mock_connection):
-    return mock_connection.run.call_args_list
+    return mock_connection.execute.call_args_list
 
 
 @pytest.fixture(autouse=True)
@@ -62,12 +75,10 @@ def get_commands():
     def _get(mock_calls):
         commands = []
         for c in mock_calls:
-            name = c[0]
-            if name == "run":
-                if c.args:
-                    commands.append(str(c.args[0]))
-                elif "command" in c.kwargs:
-                    commands.append(str(c.kwargs["command"]))
+            if c.args:
+                commands.append(str(c.args[0]))
+            elif "command" in c.kwargs:
+                commands.append(str(c.kwargs["command"]))
         return commands
 
     return _get

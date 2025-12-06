@@ -33,6 +33,18 @@ fujin *ARGS:
     cd examples/django/bookstore
     ../../../.venv/bin/python -m fujin {{ ARGS }}
 
+
+download-pocketbase:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    curl -L -o pocketbase_0.34.2_linux_arm64.zip "https://github.com/pocketbase/pocketbase/releases/download/v0.34.2/pocketbase_0.34.2_linux_amd64.zip"
+    unzip pocketbase_0.34.2_linux_arm64.zip -d ./examples/golang/pocketbase/
+    rm pocketbase_0.34.2_linux_arm64.zip
+    rm ./examples/golang/pocketbase/LICENSE.md
+    rm ./examples/golang/pocketbase/CHANGELOG.md
+    chmod +x ./examples/golang/pocketbase/pocketbase
+
+
 # -------------------------------------------------------------------------
 # Maintenance
 #---------------------------------------------------------------------------

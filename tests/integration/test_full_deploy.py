@@ -54,11 +54,7 @@ def test_full_deployment_flow(vps_container, ssh_key_setup, tmp_path):
         # 2. Run Deploy
         deploy_cmd = Deploy()
         deploy_cmd.config = config
-        # We need to capture stdout to avoid cluttering test output
-        # Patch handle_stdin to avoid "Inappropriate ioctl for device" or "reading from stdin" errors
-        # when running fabric with pty=True in a test environment.
-        with patch("invoke.runners.Runner.handle_stdin"):
-            deploy_cmd()
+        deploy_cmd()
 
         # 3. Verify inside the container
         # Check if service is active

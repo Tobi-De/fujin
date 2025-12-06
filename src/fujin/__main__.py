@@ -25,7 +25,7 @@ else:
     import tomli as tomllib
 
 
-def _set_logging(verbose):
+def _setup_logging(verbose):
     verbose = int(verbose)
     if verbose == 0:
         level = logging.WARN
@@ -59,7 +59,7 @@ class Fujin:
             short=None,
             long="--verbose",
             help="Enable verbose logging",
-            action=_set_logging,
+            action=_setup_logging,
             choices=[0, 1, 2],
         ),
     ] = 0

@@ -22,5 +22,7 @@ def test_rollback(mock_connection, get_commands):
         rollback()
 
         assert get_commands(mock_connection.mock_calls) == snapshot(
-            ["ls -1t /home/testuser/.local/share/fujin/testapp/.versions"]
+            [
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && ls -1t /home/testuser/.local/share/fujin/testapp/.versions'
+            ]
         )

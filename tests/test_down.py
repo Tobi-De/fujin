@@ -22,7 +22,7 @@ def test_down_removes_files_and_stops_services(mock_connection, get_commands):
         assert get_commands(mock_connection.mock_calls) == snapshot(
             [
                 """\
-#!/usr/bin/env bash
+export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && #!/usr/bin/env bash
 set -e
 APP_DIR=/home/testuser/.local/share/fujin/testapp
 APP_NAME=testapp
@@ -63,7 +63,7 @@ def test_down_full_uninstall_proxy(mock_connection, get_commands):
         assert get_commands(mock_connection.mock_calls) == snapshot(
             [
                 """\
-#!/usr/bin/env bash
+export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && #!/usr/bin/env bash
 set -e
 APP_DIR=/home/testuser/.local/share/fujin/testapp
 APP_NAME=testapp

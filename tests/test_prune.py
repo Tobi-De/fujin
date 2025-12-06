@@ -12,8 +12,6 @@ def test_prune(mock_connection, get_commands):
 
         assert get_commands(mock_connection.mock_calls) == snapshot(
             [
-                "sed -n '3,$p' .versions",
-                "rm -r /home/testuser/.local/share/fujin/testapp/v0.0.8 /home/testuser/.local/share/fujin/testapp/v0.0.7",
-                "sed -i '3,$d' .versions",
+                "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && cd /home/testuser/.local/share/fujin/testapp && sed -n '3,$p' .versions"
             ]
         )

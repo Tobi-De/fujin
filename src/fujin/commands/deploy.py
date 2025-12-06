@@ -359,6 +359,7 @@ export PATH="{self.config.app_dir}:$PATH"
         commands = [
             f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
             "echo '==> Installing binary...'",
+            f"rm -f {full_path_app_bin}",
             f"cp {distfile_path} {full_path_app_bin}",
             f"chmod +x {full_path_app_bin}",
         ]
