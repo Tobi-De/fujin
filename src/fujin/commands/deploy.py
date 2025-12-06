@@ -47,7 +47,9 @@ class Deploy(BaseCommand):
             logger.debug(
                 f"Building application with command: {self.config.build_command}"
             )
-            self.stdout.output("[blue]Building application...[/blue]")
+            self.stdout.output(
+                f"[blue]Building application v{self.config.version}...[/blue]"
+            )
             subprocess.run(self.config.build_command, check=True, shell=True)
         except subprocess.CalledProcessError as e:
             raise cappa.Exit(f"build command failed: {e}", code=1) from e
@@ -90,7 +92,7 @@ class Deploy(BaseCommand):
             (bundle_dir / "install.sh").write_text(install_script)
             logger.debug("Generated install script:\n%s", install_script)
 
-            uninstall_script = self._generate_uninstall_script(valid_units_str)
+            uninstall_script = self._generate_uninstall_script()
             (bundle_dir / "uninstall.sh").write_text(uninstall_script)
             logger.debug("Generated uninstall script:\n%s", uninstall_script)
 
@@ -271,17 +273,27 @@ class Deploy(BaseCommand):
         script.append("echo '==> Install script completed successfully.'")
         return "\n".join(script)
 
-    def _generate_uninstall_script(self, valid_units_str: str) -> str:
+    def _generate_uninstall_script(self) -> str:
         script = ["#!/usr/bin/env bash", "set -e"]
         app_name = self.config.app_name
+        active_systemd_units = list(self.config.active_systemd_units)
+        unit_files = list(self.config.render_systemd_units())
+        template_units = [u for u in active_systemd_units if u.endswith("@.service")]
+        regular_units = [u for u in active_systemd_units if not u.endswith("@.service")]
 
-        if valid_units_str:
-            script.append(f"sudo systemctl disable --now {valid_units_str}")
+        if regular_units:
+            script.append(
+                f"sudo systemctl disable --now {' '.join(regular_units)} --quiet || true"
+            )
+        if template_units:
+            script.append(
+                f"sudo systemctl disable {' '.join(template_units)} --quiet || true"
+            )
 
         script.extend(
             [
                 'APP_NAME="' + app_name + '"',
-                f"UNITS=({valid_units_str})",
+                f"UNITS=({' '.join(unit_files)})",
                 'for UNIT in "${UNITS[@]}"; do',
                 '  case "$UNIT" in',
                 '    */*|*..*) echo "Skipping suspicious unit name: $UNIT" >&2; continue;;',
