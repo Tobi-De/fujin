@@ -48,62 +48,61 @@ class Down(BaseCommand):
         with self.connection() as conn:
             self.stdout.output("[blue]Tearing down project...[/blue]")
 
-            script_header = ["#!/usr/bin/env bash"]
+            command = "uninstall-full" if self.full else "uninstall"
+            # Try remote script first
+            app_dir = self.config.app_dir
+            res, ok = conn.run(f"cat {app_dir}/.version", warn=True, hide=True)
+            version = res.strip() if ok else self.config.version
+
+            bundle_path = f"{app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
+            remote_script = f"/tmp/setup-{self.config.app_name}-{version}"
+
+            # Extract setup script
+            cmd = f"tar -xzf {bundle_path} -O setup > {remote_script} && chmod +x {remote_script}"
+            res, ok = conn.run(cmd, warn=True)
+            if ok:
+                _, result_ok = conn.run(
+                    f"bash {remote_script} {command}", warn=True, pty=True
+                )
+                conn.run(f"rm -f {remote_script}", warn=True)
+                if result_ok:
+                    self.stdout.output(
+                        "[green]Project teardown completed successfully![/green]"
+                    )
+                    return
+
             if not self.force:
-                script_header.append("set -e")
+                self.stdout.output("[red]Teardown failed[/red]")
+                self.stdout.output(
+                    "[yellow]Use --force to ignore errors and continue teardown.[/yellow]"
+                )
+                raise cappa.Exit(code=1)
 
-            script_body = [
-                f"APP_DIR={self.config.app_dir}",
-                f"APP_NAME={self.config.app_name}",
-                'if [ -f "$APP_DIR/.version" ]; then',
-                '  CURRENT_VERSION=$(cat "$APP_DIR/.version")',
-                '  CURRENT_BUNDLE="$APP_DIR/.versions/$APP_NAME-$CURRENT_VERSION.tar.gz"',
-                '  if [ -f "$CURRENT_BUNDLE" ]; then',
-                '    TMP_DIR="/tmp/uninstall-$APP_NAME-$CURRENT_VERSION"',
-                '    mkdir -p "$TMP_DIR"',
-                '    if tar -xzf "$CURRENT_BUNDLE" -C "$TMP_DIR"; then',
-                '      if [ -f "$TMP_DIR/uninstall.sh" ]; then',
-                '        echo "Running uninstall script for version $CURRENT_VERSION..."',
-                '        chmod +x "$TMP_DIR/uninstall.sh"',
-                '        bash "$TMP_DIR/uninstall.sh"',
-                "      else",
-                '        echo "Warning: uninstall.sh not found in bundle."',
-                '        if [ -z "$FORCE" ]; then exit 1; fi',
-                "      fi",
-                "    else",
-                '      echo "Warning: Failed to extract bundle."',
-                '      if [ -z "$FORCE" ]; then exit 1; fi',
-                "    fi",
-                '    rm -rf "$TMP_DIR"',
-                "  fi",
-                "fi",
-                # this is a fallback in case services were not stopped due to uninstall script failure, they need to be stopped before removing app dir
-                f"sudo systemctl disable --now {' '.join(self.config.active_systemd_units)} 2>/dev/null || true",
-                'echo "Removing application directory..."',
-                'rm -rf "$APP_DIR"',
-            ]
+            self.stdout.output(
+                "[yellow]Teardown encountered errors but continuing due to --force[/yellow]"
+            )
 
-            if self.force:
-                script_header.append("FORCE=1")
+            # Local fallback
+            new_units, user_units = self.config.render_systemd_units()
+            valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
+            valid_units_str = " ".join(sorted(valid_units))
+            setup_script = self.config.render_setup_script(
+                distfile_name="",  # Not needed for uninstall
+                valid_units_str=valid_units_str,
+                user_units=user_units,
+            )
 
-            script = script_header + script_body
-
-            if self.full and self.config.webserver.enabled:
-                script.extend(caddy.get_uninstall_commands())
-
-            _, result_ok = conn.run("\n".join(script), warn=True, pty=True)
-            if not result_ok:
-                if not self.force:
-                    self.stdout.output("[red]Teardown failed[/red]")
-                    self.stdout.output(
-                        "[yellow]Use --force to ignore errors and continue teardown.[/yellow]"
-                    )
-                    raise cappa.Exit(code=1)
-                else:
-                    self.stdout.output(
-                        "[yellow]Teardown encountered errors but continuing due to --force[/yellow]"
-                    )
-
+            # Upload script to a temporary location
+            remote_script_path = (
+                f"/tmp/setup-{self.config.app_name}-{self.config.version}-local"
+            )
+            conn.run(
+                f"cat << 'EOF' > {remote_script_path}\n{setup_script}\nEOF && chmod +x {remote_script_path}"
+            )
+            conn.run(
+                f"bash {remote_script_path} {command} && rm -f {remote_script_path}",
+                pty=True,
+            )
             self.stdout.output(
                 "[green]Project teardown completed successfully![/green]"
             )

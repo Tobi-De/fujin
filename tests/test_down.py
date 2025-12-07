@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from fujin.commands.down import Down
 from inline_snapshot import snapshot
 from tests.script_runner import script_runner  # noqa: F401

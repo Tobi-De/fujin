@@ -83,19 +83,15 @@ class Deploy(BaseCommand):
 
             valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
             valid_units_str = " ".join(sorted(valid_units))
-            install_script = self._generate_install_script(
-                version=version,
+            
+            setup_script = self.config.render_setup_script(
                 distfile_name=distfile_path.name,
                 valid_units_str=valid_units_str,
                 user_units=user_units,
             )
 
-            (bundle_dir / "install.sh").write_text(install_script)
-            logger.debug("Generated install script:\n%s", install_script)
-
-            uninstall_script = self._generate_uninstall_script()
-            (bundle_dir / "uninstall.sh").write_text(uninstall_script)
-            logger.debug("Generated uninstall script:\n%s", uninstall_script)
+            (bundle_dir / "setup").write_text(setup_script)
+            logger.debug("Generated setup script:\n%s", setup_script)
 
             # Create tarball
             logger.info("Creating gzip-compressed deployment bundle")
@@ -173,8 +169,8 @@ class Deploy(BaseCommand):
                     f"mkdir -p {remote_extract_dir} && "
                     f"tar --overwrite -xzf {remote_bundle_path_q} -C {remote_extract_dir} && "
                     f"cd {remote_extract_dir} && "
-                    f"chmod +x install.sh && "
-                    f"bash ./install.sh || (echo 'install.sh failed' >&2; exit 1) && "
+                    f"chmod +x setup && "
+                    f"bash ./setup install || (echo 'setup install failed' >&2; exit 1) && "
                     f"cd / && rm -rf {remote_extract_dir}"
                 )
                 conn.run(install_cmd, pty=True)
@@ -185,253 +181,6 @@ class Deploy(BaseCommand):
                 f"[blue]Application is available at: https://{self.config.host.domain_name}[/blue]"
             )
 
-    def _generate_install_script(
-        self,
-        version: str,
-        distfile_name: str,
-        valid_units_str: str,
-        user_units: list[str],
-    ) -> str:
-        app_dir_q = shlex.quote(self.config.app_dir)
-        script = [
-            "#!/usr/bin/env bash",
-            "set -e",
-            "BUNDLE_DIR=$(pwd)",
-            'echo "==> Setting up directories..."',
-            f"mkdir -p {app_dir_q}",
-            f"mv .env {app_dir_q}/.env",
-            "echo '==> Installing application...'",
-            f"cd {app_dir_q} || exit 1",
-            # trap to report failures and keep temp dir if needed
-            'trap \'echo "ERROR: install failed at $(date)" >&2; echo "Working dir: $BUNDLE_DIR" >&2; exit 1\' ERR',
-        ]
-
-        if self.config.installation_mode == InstallationMode.PY_PACKAGE:
-            script.extend(
-                self._get_python_package_install_commands(
-                    distfile_path=f"$BUNDLE_DIR/{distfile_name}",
-                    requirements_path=(
-                        f"$BUNDLE_DIR/requirements.txt"
-                        if self.config.requirements
-                        else None
-                    ),
-                )
-            )
-        else:
-            script.extend(
-                self._get_binary_install_commands(
-                    distfile_path=f"$BUNDLE_DIR/{distfile_name}"
-                )
-            )
-
-        if self.config.release_command:
-            script.extend(
-                [
-                    f"echo '==> Running release command'",
-                    f"bash -lc 'cd {app_dir_q} && source .appenv && {self.config.release_command}'",
-                ]
-            )
-
-        script.extend(
-            [
-                f"echo '{version}' > .version",
-                "cd $BUNDLE_DIR",
-                'echo "==> Configuring systemd services..."',
-            ]
-        )
-
-        if user_units:
-            script.append('echo "==> Verifying user-provided systemd units..."')
-            for unit in user_units:
-                script.append(f"systemd-analyze verify units/{unit}")
-
-        script.extend(
-            [
-                f"sudo cp units/* /etc/systemd/system/",
-                systemd_cleanup_script.format(
-                    app_name=self.config.app_name, valid_units_str=valid_units_str
-                ),
-                'echo "==> Restarting services..."',
-                f"sudo systemctl enable {' '.join(self.config.active_systemd_units)}",
-                f"sudo systemctl restart {' '.join(self.config.active_systemd_units)}",
-            ]
-        )
-
-        if self.config.webserver.enabled:
-            caddy_config_path_q = shlex.quote(self.config.caddy_config_path)
-            script.extend(
-                [
-                    'echo "==> Configuring Caddy..."',
-                    "sudo mkdir -p $(dirname {0})".format(caddy_config_path_q),
-                    "if caddy validate --config Caddyfile >/dev/null 2>&1; then",
-                    f"  sudo mv Caddyfile {caddy_config_path_q}",
-                    f"  sudo chown caddy:caddy {caddy_config_path_q}",
-                    "  sudo systemctl reload caddy",
-                    "else",
-                    "  echo 'Caddyfile validation failed, leaving local Caddyfile for inspection' >&2",
-                    "fi",
-                ]
-            )
-
-        if self.config.versions_to_keep:
-            script.extend(
-                [
-                    'echo "==> Pruning old versions..."',
-                    f"cd {self.config.app_dir}/.versions",
-                    f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
-                ]
-            )
-        script.append("echo '==> Install script completed successfully.'")
-        return "\n".join(script)
-
-    def _generate_uninstall_script(self) -> str:
-        script = ["#!/usr/bin/env bash", "set -e"]
-        app_name = self.config.app_name
-        active_systemd_units = list(self.config.active_systemd_units)
-        unit_files = list(self.config.render_systemd_units()[0])
-        template_units = [u for u in active_systemd_units if u.endswith("@.service")]
-        regular_units = [u for u in active_systemd_units if not u.endswith("@.service")]
-
-        if regular_units:
-            script.append(
-                f"sudo systemctl disable --now {' '.join(regular_units)} --quiet || true"
-            )
-        if template_units:
-            script.append(
-                f"sudo systemctl disable {' '.join(template_units)} --quiet || true"
-            )
-
-        script.extend(
-            [
-                'APP_NAME="' + app_name + '"',
-                f"UNITS=({' '.join(unit_files)})",
-                'for UNIT in "${UNITS[@]}"; do',
-                '  case "$UNIT" in',
-                '    */*|*..*) echo "Skipping suspicious unit name: $UNIT" >&2; continue;;',
-                "  esac",
-                '  if [[ "$UNIT" != ${APP_NAME}* ]]; then',
-                '    echo "Refusing to remove non-app unit: $UNIT" >&2',
-                "    continue",
-                "  fi",
-                '  sudo rm -f /etc/systemd/system/"$UNIT"',
-                "done",
-                "sudo systemctl daemon-reload",
-                "sudo systemctl reset-failed",
-            ]
-        )
-
-        if self.config.webserver.enabled:
-            script.extend(
-                [
-                    f"sudo rm -f {shlex.quote(self.config.caddy_config_path)}",
-                    "sudo systemctl reload caddy",
-                ]
-            )
-        script.append("echo '==> Uninstall completed.'")
-        return "\n".join(script)
-
-    def _get_python_package_install_commands(
-        self,
-        *,
-        distfile_path: str,
-        requirements_path: str | None,
-    ) -> list[str]:
-        logger.info("Generating Python package installation commands")
-        appenv = f"""
-set -a  # Automatically export all variables
-source .env
-set +a  # Stop automatic export
-export UV_COMPILE_BYTECODE=1
-export UV_PYTHON=python{self.config.python_version}
-export PATH=".venv/bin:$PATH"
-"""
-        commands = [
-            f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
-            "echo '==> Syncing Python dependencies...'",
-            f"uv python install {self.config.python_version}",
-            "test -d .venv || uv venv",
-        ]
-        if requirements_path:
-            commands.append(f"uv pip install -r {requirements_path}")
-            commands.append(f"uv pip install --no-deps {distfile_path}")
-        else:
-            commands.append(f"uv pip install {distfile_path}")
-        return commands
-
-    def _get_binary_install_commands(self, distfile_path: str) -> list[str]:
-        logger.info("Generating binary installation commands")
-        appenv = f"""
-set -a  # Automatically export all variables
-source .env
-set +a  # Stop automatic export
-export PATH="{self.config.app_dir}:$PATH"
-"""
-        full_path_app_bin = f"{self.config.app_dir}/{self.config.app_bin}"
-        commands = [
-            f"echo '{appenv.strip()}' > {self.config.app_dir}/.appenv",
-            "echo '==> Installing binary...'",
-            f"rm -f {full_path_app_bin}",
-            f"cp {distfile_path} {full_path_app_bin}",
-            f"chmod +x {full_path_app_bin}",
-        ]
-        return commands
 
 
-systemd_cleanup_script = """
 
-APP_NAME="{app_name}"
-read -r -a VALID_UNITS <<< "{valid_units_str}"
-
-# Exact match helper
-contains_exact() {{
-    local needle="$1"; shift
-    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
-    return 1
-}}
-
-echo "==> Discovering installed unit files"
-mapfile -t INSTALLED_UNITS < <(
-    systemctl list-unit-files --type=service --no-legend --no-pager \\
-    | awk -v app="$APP_NAME" '$1 ~ "^"app {{print $1}}'
-)
-
-echo "==> Disabling + stopping stale units"
-for UNIT in "${{INSTALLED_UNITS[@]}}"; do
-    if ! contains_exact "$UNIT" "${{VALID_UNITS[@]}}"; then
-
-        # If it's a template file (myapp@.service), only disable it.
-        if [[ "$UNIT" == *@.service ]]; then
-            echo "→ Disabling template unit: $UNIT"
-            sudo systemctl disable "$UNIT" --quiet || true
-        else
-            echo "→ Stopping + disabling stale unit: $UNIT"
-            sudo systemctl stop "$UNIT" --quiet || true
-            sudo systemctl disable "$UNIT" --quiet || true
-        fi
-
-        sudo systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
-    fi
-done
-
-echo "==> Removing stale service files"
-SEARCH_DIRS=(
-    /etc/systemd/system/
-    /etc/systemd/system/multi-user.target.wants/
-)
-
-for DIR in "${{SEARCH_DIRS[@]}}"; do
-    [[ -d "$DIR" ]] || continue
-
-    while IFS= read -r -d '' FILE; do
-        BASENAME=$(basename "$FILE")
-        if ! contains_exact "$BASENAME" "${{VALID_UNITS[@]}}"; then
-            echo "→ Removing stale file: $FILE"
-            sudo rm -f -- "$FILE"
-        fi
-    done < <(find "$DIR" -maxdepth 1 -type f -name "${{APP_NAME}}*" -print0)
-done
-
-echo "==> Reloading systemd"
-sudo systemctl daemon-reload
-
-"""

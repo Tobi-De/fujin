@@ -240,6 +240,36 @@ class Config(msgspec.Struct, kw_only=True):
             statics=self.webserver.statics,
         )
 
+    def render_setup_script(
+        self,
+        distfile_name: str,
+        valid_units_str: str,
+        user_units: list[str],
+    ) -> str:
+        package_templates = (
+            Path(importlib.util.find_spec("fujin").origin).parent / "templates"
+        )
+        search_paths = [self.local_config_dir, package_templates]
+        env = Environment(loader=FileSystemLoader(search_paths))
+        template = env.get_template("setup.j2")
+        return template.render(
+            app_name=self.app_name,
+            app_dir=self.app_dir,
+            version=self.version,
+            installation_mode=self.installation_mode,
+            python_version=self.python_version,
+            requirements=str(bool(self.requirements)),
+            distfile_name=distfile_name,
+            release_command=str(self.release_command),
+            versions_to_keep=str(self.versions_to_keep),
+            webserver_enabled=str(self.webserver.enabled),
+            caddy_config_path=self.caddy_config_path,
+            app_bin=self.app_bin,
+            active_systemd_units=self.active_systemd_units,
+            valid_units_str=valid_units_str,
+            user_units=user_units,
+        )
+
     @property
     def caddy_config_path(self) -> str:
         return f"{self.webserver.config_dir}/{self.app_name}.caddy"
