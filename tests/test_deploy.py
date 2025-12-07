@@ -70,8 +70,8 @@ def test_script_execution_binary(
             deploy()
 
     bundle_dir = capture_bundle / "myapp-bundle"
-    install_script = (bundle_dir / "install.sh").read_text()
-    uninstall_script = (bundle_dir / "uninstall.sh").read_text()
+    install_script = (bundle_dir / "install").read_text()
+    uninstall_script = (bundle_dir / "uninstall").read_text()
 
     (script_runner.root / "home/testuser/.local/share/fujin/myapp/.versions").mkdir(
         parents=True, exist_ok=True

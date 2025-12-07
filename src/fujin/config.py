@@ -240,7 +240,7 @@ class Config(msgspec.Struct, kw_only=True):
             statics=self.webserver.statics,
         )
 
-    def render_setup_script(
+    def render_install_script(
         self,
         distfile_name: str,
         valid_units_str: str,
@@ -251,7 +251,7 @@ class Config(msgspec.Struct, kw_only=True):
         )
         search_paths = [self.local_config_dir, package_templates]
         env = Environment(loader=FileSystemLoader(search_paths))
-        template = env.get_template("setup.j2")
+        template = env.get_template("install.sh.j2")
         return template.render(
             app_name=self.app_name,
             app_dir=self.app_dir,
@@ -268,6 +268,31 @@ class Config(msgspec.Struct, kw_only=True):
             active_systemd_units=self.active_systemd_units,
             valid_units_str=valid_units_str,
             user_units=user_units,
+        )
+
+    def render_uninstall_script(
+        self,
+        valid_units_str: str,
+    ) -> str:
+        package_templates = (
+            Path(importlib.util.find_spec("fujin").origin).parent / "templates"
+        )
+        search_paths = [self.local_config_dir, package_templates]
+        env = Environment(loader=FileSystemLoader(search_paths))
+        template = env.get_template("uninstall.sh.j2")
+
+        active_units = self.active_systemd_units
+        regular_units = [u for u in active_units if not u.endswith("@.service")]
+        template_units = [u for u in active_units if u.endswith("@.service")]
+
+        return template.render(
+            app_name=self.app_name,
+            app_dir=self.app_dir,
+            webserver_enabled=str(self.webserver.enabled),
+            caddy_config_path=self.caddy_config_path,
+            regular_units=regular_units,
+            template_units=template_units,
+            valid_units_str=valid_units_str,
         )
 
     @property

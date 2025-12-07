@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -e
+
+APP_NAME="{{ app_name }}"
+APP_DIR="{{ app_dir }}"
+WEBSERVER_ENABLED="{{ webserver_enabled }}"
+CADDY_CONFIG_PATH="{{ caddy_config_path }}"
+
+# Systemd variables
+REGULAR_UNITS="{{ regular_units | join(' ') }}"
+TEMPLATE_UNITS="{{ template_units | join(' ') }}"
+VALID_UNITS_STR="{{ valid_units_str }}"
+
+function log() {
+    echo "==> $1"
+}
+
+log "Uninstalling application..."
+
+# Stop and disable services
+
+if [ -n "$REGULAR_UNITS" ]; then
+    read -r -a REGULAR_UNITS_ARR <<< "$REGULAR_UNITS"
+    sudo systemctl disable --now "${REGULAR_UNITS_ARR[@]}" --quiet || true
+fi
+
+if [ -n "$TEMPLATE_UNITS" ]; then
+    read -r -a TEMPLATE_UNITS_ARR <<< "$TEMPLATE_UNITS"
+    sudo systemctl disable "${TEMPLATE_UNITS_ARR[@]}" --quiet || true
+fi
+
+# Remove unit files
+# We need the list of generated files. In python it was `unit_files`.
+# We can infer it or pass it. `VALID_UNITS_STR` contains all valid units.
+read -r -a ALL_UNITS <<< "$VALID_UNITS_STR"
+for UNIT in "${ALL_UNITS[@]}"; do
+    # Safety check
+    if [[ "$UNIT" != ${APP_NAME}* ]]; then
+            echo "Refusing to remove non-app unit: $UNIT" >&2
+            continue
+    fi
+    sudo rm -f "/etc/systemd/system/$UNIT"
+done
+
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+
+if [ "$WEBSERVER_ENABLED" == "True" ]; then
+    sudo rm -f "$CADDY_CONFIG_PATH"
+    sudo systemctl reload caddy
+fi
+
+log "Removing application directory..."
+rm -rf "$APP_DIR"
+
+log "Uninstall completed."

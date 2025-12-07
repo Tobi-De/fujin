@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -7,7 +8,7 @@ import cappa
 from rich.prompt import Confirm
 
 from fujin import caddy
-from fujin.commands import BaseCommand
+from fujin.commands import BaseCommand, uninstall_archive_script
 
 
 @cappa.command(
@@ -48,61 +49,49 @@ class Down(BaseCommand):
         with self.connection() as conn:
             self.stdout.output("[blue]Tearing down project...[/blue]")
 
-            command = "uninstall-full" if self.full else "uninstall"
             # Try remote script first
             app_dir = self.config.app_dir
             res, ok = conn.run(f"cat {app_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
-
             bundle_path = f"{app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
-            remote_script = f"/tmp/setup-{self.config.app_name}-{version}"
 
-            # Extract setup script
-            cmd = f"tar -xzf {bundle_path} -O setup > {remote_script} && chmod +x {remote_script}"
-            res, ok = conn.run(cmd, warn=True)
-            if ok:
-                _, result_ok = conn.run(
-                    f"bash {remote_script} {command}", warn=True, pty=True
+            uninstall_ok = False
+            _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
+
+            if bundle_exists:
+                uninstall_cmd = uninstall_archive_script(
+                    bundle_path, self.config.app_name, version
                 )
-                conn.run(f"rm -f {remote_script}", warn=True)
-                if result_ok:
+                _, uninstall_ok = conn.run(uninstall_cmd, warn=True, pty=True)
+
+            if not uninstall_ok:
+                if not self.force:
+                    self.stdout.output("[red]Teardown failed[/red]")
                     self.stdout.output(
-                        "[green]Project teardown completed successfully![/green]"
+                        "[yellow]Use --force to ignore errors and continue teardown.[/yellow]"
                     )
-                    return
+                    raise cappa.Exit(code=1)
 
-            if not self.force:
-                self.stdout.output("[red]Teardown failed[/red]")
                 self.stdout.output(
-                    "[yellow]Use --force to ignore errors and continue teardown.[/yellow]"
+                    "[yellow]Teardown encountered errors but continuing due to --force[/yellow]"
                 )
-                raise cappa.Exit(code=1)
 
-            self.stdout.output(
-                "[yellow]Teardown encountered errors but continuing due to --force[/yellow]"
-            )
+                # Local fallback
+                new_units, _ = self.config.render_systemd_units()
+                valid_units = set(self.config.active_systemd_units) | set(
+                    new_units.keys()
+                )
+                valid_units_str = " ".join(sorted(valid_units))
+                uninstall_script = self.config.render_uninstall_script(
+                    valid_units_str=valid_units_str
+                )
+                conn.run(f"bash -c {shlex.quote(uninstall_script)}", pty=True)
 
-            # Local fallback
-            new_units, user_units = self.config.render_systemd_units()
-            valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
-            valid_units_str = " ".join(sorted(valid_units))
-            setup_script = self.config.render_setup_script(
-                distfile_name="",  # Not needed for uninstall
-                valid_units_str=valid_units_str,
-                user_units=user_units,
-            )
+            if self.full:
+                conn.run(
+                    "&& ".join(caddy.get_uninstall_commands()), pty=True, warn=True
+                )
 
-            # Upload script to a temporary location
-            remote_script_path = (
-                f"/tmp/setup-{self.config.app_name}-{self.config.version}-local"
-            )
-            conn.run(
-                f"cat << 'EOF' > {remote_script_path}\n{setup_script}\nEOF && chmod +x {remote_script_path}"
-            )
-            conn.run(
-                f"bash {remote_script_path} {command} && rm -f {remote_script_path}",
-                pty=True,
-            )
             self.stdout.output(
                 "[green]Project teardown completed successfully![/green]"
             )

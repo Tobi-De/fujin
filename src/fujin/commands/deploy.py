@@ -14,8 +14,7 @@ import time
 import cappa
 from rich.prompt import Confirm
 
-from fujin.commands import BaseCommand
-from fujin.config import InstallationMode
+from fujin.commands import BaseCommand, install_archive_script
 from fujin.secrets import resolve_secrets
 
 logger = logging.getLogger(__name__)
@@ -83,26 +82,27 @@ class Deploy(BaseCommand):
 
             valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
             valid_units_str = " ".join(sorted(valid_units))
-            
-            setup_script = self.config.render_setup_script(
+
+            install_script = self.config.render_install_script(
                 distfile_name=distfile_path.name,
                 valid_units_str=valid_units_str,
                 user_units=user_units,
             )
 
-            (bundle_dir / "setup").write_text(setup_script)
-            logger.debug("Generated setup script:\n%s", setup_script)
+            (bundle_dir / "install.sh").write_text(install_script)
+            logger.debug("Generated install script:\n%s", install_script)
+
+            uninstall_script = self.config.render_uninstall_script(
+                valid_units_str=valid_units_str,
+            )
+            (bundle_dir / "uninstall.sh").write_text(uninstall_script)
+            logger.debug("Generated uninstall script:\n%s", uninstall_script)
 
             # Create tarball
             logger.info("Creating gzip-compressed deployment bundle")
             tar_ext = "tar.gz"
             tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
-            with tarfile.open(
-                tar_path,
-                "w:gz",
-                format=tarfile.PAX_FORMAT,
-                compresslevel=1,
-            ) as tar:
+            with tarfile.open(tar_path, "w:gz", format=tarfile.PAX_FORMAT) as tar:
                 tar.add(bundle_dir, arcname=".")
 
             # Calculate local checksum
@@ -164,23 +164,17 @@ class Deploy(BaseCommand):
                     raise cappa.Exit("Upload failed after retries.", code=1)
 
                 self.stdout.output("[blue]Executing remote installation...[/blue]")
-                remote_extract_dir = f"/tmp/{self.config.app_name}-{version}"
-                install_cmd = (
-                    f"mkdir -p {remote_extract_dir} && "
-                    f"tar --overwrite -xzf {remote_bundle_path_q} -C {remote_extract_dir} && "
-                    f"cd {remote_extract_dir} && "
-                    f"chmod +x setup && "
-                    f"bash ./setup install || (echo 'setup install failed' >&2; exit 1) && "
-                    f"cd / && rm -rf {remote_extract_dir}"
+                conn.run(
+                    install_archive_script(
+                        remote_bundle_path_q,
+                        app_name=self.config.app_name,
+                        version=version,
+                    ),
+                    pty=True,
                 )
-                conn.run(install_cmd, pty=True)
 
         self.stdout.output("[green]Deployment completed successfully![/green]")
         if self.config.webserver.enabled:
             self.stdout.output(
                 f"[blue]Application is available at: https://{self.config.host.domain_name}[/blue]"
             )
-
-
-
-

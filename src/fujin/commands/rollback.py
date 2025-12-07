@@ -4,8 +4,7 @@ import cappa
 from rich.prompt import Confirm
 from rich.prompt import Prompt
 
-from fujin.commands import BaseCommand
-from fujin.commands.deploy import Deploy
+from fujin.commands import BaseCommand, install_archive_script, uninstall_archive_script
 
 
 @cappa.command(help="Rollback application to a previous version")
@@ -69,28 +68,14 @@ class Rollback(BaseCommand):
                 # Check if bundle exists
                 _, exists = conn.run(f"test -f {current_bundle}", warn=True, hide=True)
                 if exists:
-                    # Extract and run uninstall.sh
-                    # We extract to a temp dir to be safe
-                    tmp_uninstall_dir = (
-                        f"/tmp/uninstall-{self.config.app_name}-{current_version}"
+                    uninstall_cmd = uninstall_archive_script(
+                        current_bundle, self.config.app_name, current_version
                     )
-                    # Extract full bundle to ensure we get the script regardless of pathing
-                    conn.run(
-                        f"mkdir -p {tmp_uninstall_dir} && tar -xzf {current_bundle} -C {tmp_uninstall_dir}"
-                    )
-                    if conn.run(f"test -f {tmp_uninstall_dir}/uninstall.sh", warn=True)[
-                        1
-                    ]:
-                        conn.run(
-                            f"cd {tmp_uninstall_dir} && chmod +x ./uninstall.sh && bash ./uninstall.sh",
-                            warn=True,
-                        )
-                    else:
+                    _, ok = conn.run(uninstall_cmd, warn=True)
+                    if not ok:
                         self.stdout.output(
-                            f"[yellow]Warning: uninstall.sh not found in bundle for version {current_version}.[/yellow]"
+                            f"[yellow]Warning: uninstall failed for version {current_version}.[/yellow]"
                         )
-
-                    conn.run(f"rm -rf {tmp_uninstall_dir}")
                 else:
                     self.stdout.output(
                         f"[yellow]Bundle for current version {current_version} not found. Skipping uninstall.[/yellow]"
@@ -99,14 +84,8 @@ class Rollback(BaseCommand):
             # Install target
             self.stdout.output(f"[blue]Installing version {version}...[/blue]")
             target_bundle = f"{self.config.app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
-            remote_extract_dir = f"/tmp/{self.config.app_name}-{version}"
-
-            install_cmd = (
-                f"mkdir -p {remote_extract_dir} && "
-                f"tar -xzf {target_bundle} -C {remote_extract_dir} && "
-                f"cd {remote_extract_dir} && "
-                f"bash install.sh && "
-                f"cd / && rm -rf {remote_extract_dir}"
+            install_cmd = install_archive_script(
+                target_bundle, self.config.app_name, version
             )
             conn.run(install_cmd, pty=True)
             self.stdout.output(
