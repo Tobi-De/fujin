@@ -27,7 +27,8 @@ class Prune(BaseCommand):
 
         versions_dir = f"{self.config.app_dir}/.versions"
         with self.connection() as conn:
-            if conn.run(f"test -d {versions_dir}", warn=True, hide=True).failed:
+            _, success = conn.run(f"test -d {versions_dir}", warn=True, hide=True)
+            if not success:
                 self.stdout.output(
                     "[blue]No versions directory found. Nothing to prune.[/blue]"
                 )

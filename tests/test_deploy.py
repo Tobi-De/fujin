@@ -12,9 +12,6 @@ from fujin.commands.deploy import Deploy
 from fujin.config import InstallationMode
 from tests.script_runner import script_runner  # noqa: F401
 
-# Value from ssh2.session
-LIBSSH2_SESSION_BLOCK_INBOUND = 1
-
 
 @pytest.fixture
 def setup_distfile(tmp_path, mock_config):
@@ -59,27 +56,12 @@ def test_script_execution_binary(
     mock_config.installation_mode = InstallationMode.BINARY
     mock_config.app_name = "myapp"
 
-    mock_connection.mock_session.block_directions.return_value = (
-        LIBSSH2_SESSION_BLOCK_INBOUND
-    )
-    mock_connection.execute.return_value = 0
+    def run_side_effect(command, **kwargs):
+        if "sha256sum" in command:
+            return "checksum123\n", True
+        return "", True
 
-    # We need to handle the read call for checksum
-    # Since we don't use side_effect on execute here (we just set return_value),
-    # we need to set read.side_effect globally for this test, but execute is called multiple times.
-    # However, in this test we only care about the bundle generation which happens BEFORE upload.
-    # Wait, Deploy() runs the whole thing including upload.
-    # So we DO need to mock the checksum response correctly.
-
-    def execute_side_effect(cmd):
-        if "sha256sum" in cmd:
-            data = b"checksum123\n"
-            mock_connection.read.side_effect = [(len(data), data), (0, b"")]
-        else:
-            mock_connection.read.side_effect = [(0, b"")]
-        return 0
-
-    mock_connection.execute.side_effect = execute_side_effect
+    mock_connection.run.side_effect = run_side_effect
 
     with patch("hashlib.file_digest") as mock_digest:
         mock_digest.return_value.hexdigest.return_value = "checksum123"
@@ -142,19 +124,12 @@ def test_script_execution_python(
     req_path.write_text("django")
     mock_config.requirements = str(req_path)
 
-    mock_connection.mock_session.block_directions.return_value = (
-        LIBSSH2_SESSION_BLOCK_INBOUND
-    )
+    def run_side_effect(command, **kwargs):
+        if "sha256sum" in command:
+            return "checksum123\n", True
+        return "", True
 
-    def execute_side_effect(cmd):
-        if "sha256sum" in cmd:
-            data = b"checksum123\n"
-            mock_connection.read.side_effect = [(len(data), data), (0, b"")]
-        else:
-            mock_connection.read.side_effect = [(0, b"")]
-        return 0
-
-    mock_connection.execute.side_effect = execute_side_effect
+    mock_connection.run.side_effect = run_side_effect
 
     with patch("hashlib.file_digest") as mock_digest:
         mock_digest.return_value.hexdigest.return_value = "checksum123"
@@ -186,19 +161,12 @@ def test_script_execution_pruning(
 ):
     mock_config.versions_to_keep = 2
 
-    mock_connection.mock_session.block_directions.return_value = (
-        LIBSSH2_SESSION_BLOCK_INBOUND
-    )
+    def run_side_effect(command, **kwargs):
+        if "sha256sum" in command:
+            return "checksum123\n", True
+        return "", True
 
-    def execute_side_effect(cmd):
-        if "sha256sum" in cmd:
-            data = b"checksum123\n"
-            mock_connection.read.side_effect = [(len(data), data), (0, b"")]
-        else:
-            mock_connection.read.side_effect = [(0, b"")]
-        return 0
-
-    mock_connection.execute.side_effect = execute_side_effect
+    mock_connection.run.side_effect = run_side_effect
 
     with patch("hashlib.file_digest") as mock_digest:
         mock_digest.return_value.hexdigest.return_value = "checksum123"
@@ -250,19 +218,12 @@ def test_script_execution_update(
     dist_dir.mkdir(exist_ok=True)
     (dist_dir / "testapp-0.2.0.whl").touch()
 
-    mock_connection.mock_session.block_directions.return_value = (
-        LIBSSH2_SESSION_BLOCK_INBOUND
-    )
+    def run_side_effect(command, **kwargs):
+        if "sha256sum" in command:
+            return "checksum123\n", True
+        return "", True
 
-    def execute_side_effect(cmd):
-        if "sha256sum" in cmd:
-            data = b"checksum123\n"
-            mock_connection.read.side_effect = [(len(data), data), (0, b"")]
-        else:
-            mock_connection.read.side_effect = [(0, b"")]
-        return 0
-
-    mock_connection.execute.side_effect = execute_side_effect
+    mock_connection.run.side_effect = run_side_effect
 
     with patch("hashlib.file_digest") as mock_digest:
         mock_digest.return_value.hexdigest.return_value = "checksum123"
@@ -298,21 +259,12 @@ def test_deploy_binary_commands(
     mock_config.installation_mode = InstallationMode.BINARY
     mock_config.app_name = "myapp"
 
-    # Mock session to allow reading
-    mock_connection.mock_session.block_directions.return_value = (
-        LIBSSH2_SESSION_BLOCK_INBOUND
-    )
+    def run_side_effect(command, **kwargs):
+        if "sha256sum" in command:
+            return "checksum123\n", True
+        return "", True
 
-    # Mock channel behavior to handle checksum verification
-    def execute_side_effect(cmd):
-        if "sha256sum" in cmd:
-            data = b"checksum123\n"
-            mock_connection.read.side_effect = [(len(data), data), (0, b"")]
-        else:
-            mock_connection.read.side_effect = [(0, b"")]
-        return 0
-
-    mock_connection.execute.side_effect = execute_side_effect
+    mock_connection.run.side_effect = run_side_effect
 
     # Mock subprocess to avoid actual build
     with patch("subprocess.run"):
@@ -509,19 +461,12 @@ def test_deploy_python_commands(
     req_path.write_text("django")
     mock_config.requirements = str(req_path)
 
-    mock_connection.mock_session.block_directions.return_value = (
-        LIBSSH2_SESSION_BLOCK_INBOUND
-    )
+    def run_side_effect(command, **kwargs):
+        if "sha256sum" in command:
+            return "checksum123\n", True
+        return "", True
 
-    def execute_side_effect(cmd):
-        if "sha256sum" in cmd:
-            data = b"checksum123\n"
-            mock_connection.read.side_effect = [(len(data), data), (0, b"")]
-        else:
-            mock_connection.read.side_effect = [(0, b"")]
-        return 0
-
-    mock_connection.execute.side_effect = execute_side_effect
+    mock_connection.run.side_effect = run_side_effect
 
     with patch("subprocess.run"):
         deploy = Deploy()

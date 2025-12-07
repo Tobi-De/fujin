@@ -28,42 +28,22 @@ def mock_config():
 
 
 @pytest.fixture
-def mock_ssh_channel():
-    with (
-        patch("fujin.connection.socket"),
-        patch("fujin.connection.Session") as mock_session_cls,
-        patch("fujin.connection.select") as mock_select,
-    ):
-
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-        mock_session.userauth_authenticated.return_value = True
-
-        mock_channel = MagicMock()
-        mock_session.open_session.return_value = mock_channel
-
-        # Attach session to channel for tests to access
-        mock_channel.mock_session = mock_session
-
-        # Default behavior
-        mock_channel.eof.return_value = True
-        mock_channel.read.return_value = (0, b"")
-        mock_channel.read_stderr.return_value = (0, b"")
-        mock_channel.get_exit_status.return_value = 0
-
-        mock_select.return_value = ([], [], [])
-
-        yield mock_channel
+def mock_connection():
+    conn = MagicMock()
+    conn.run.return_value = ("", True)
+    return conn
 
 
-@pytest.fixture
-def mock_connection(mock_ssh_channel):
-    return mock_ssh_channel
+@pytest.fixture(autouse=True)
+def patch_host_connection(mock_connection):
+    with patch("fujin.commands.BaseCommand.connection") as mock_ctx:
+        mock_ctx.return_value.__enter__.return_value = mock_connection
+        yield
 
 
 @pytest.fixture
 def mock_calls(mock_connection):
-    return mock_connection.execute.call_args_list
+    return mock_connection.run.call_args_list
 
 
 @pytest.fixture(autouse=True)
@@ -78,10 +58,26 @@ def get_commands():
     def _get(mock_calls):
         commands = []
         for c in mock_calls:
+            # Filter out non-run calls if using mock_connection.mock_calls
+            if c[0] and c[0] != "run":
+                continue
+
             if c.args:
-                commands.append(str(c.args[0]))
+                cmd = str(c.args[0])
             elif "command" in c.kwargs:
-                commands.append(str(c.kwargs["command"]))
+                cmd = str(c.kwargs["command"])
+            else:
+                continue
+
+            env_prefix = "/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"
+            full_command = f'export PATH="{env_prefix}" && {cmd}'
+            commands.append(full_command)
         return commands
 
     return _get
+
+
+@pytest.fixture(autouse=True)
+def silence_command_output():
+    with patch("fujin.commands.BaseCommand.stdout"):
+        yield
