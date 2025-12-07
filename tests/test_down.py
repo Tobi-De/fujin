@@ -47,6 +47,7 @@ if [ -f "$APP_DIR/.version" ]; then
     rm -rf "$TMP_DIR"
   fi
 fi
+sudo systemctl disable --now testapp.service testapp-worker@1.service testapp-worker@2.service 2>/dev/null || true
 echo "Removing application directory..."
 rm -rf "$APP_DIR"\
 """

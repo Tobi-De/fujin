@@ -77,6 +77,8 @@ class Down(BaseCommand):
                 '    rm -rf "$TMP_DIR"',
                 "  fi",
                 "fi",
+                # this is a fallback in case services were not stopped due to uninstall script failure, they need to be stopped before removing app dir
+                f"sudo systemctl disable --now {' '.join(self.config.active_systemd_units)} 2>/dev/null || true",
                 'echo "Removing application directory..."',
                 'rm -rf "$APP_DIR"',
             ]
