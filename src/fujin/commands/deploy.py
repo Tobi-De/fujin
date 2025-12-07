@@ -74,7 +74,7 @@ class Deploy(BaseCommand):
 
             units_dir = bundle_dir / "units"
             units_dir.mkdir()
-            new_units = self.config.render_systemd_units()
+            new_units, user_units = self.config.render_systemd_units()
             for name, content in new_units.items():
                 (units_dir / name).write_text(content)
 
@@ -87,6 +87,7 @@ class Deploy(BaseCommand):
                 version=version,
                 distfile_name=distfile_path.name,
                 valid_units_str=valid_units_str,
+                user_units=user_units,
             )
 
             (bundle_dir / "install.sh").write_text(install_script)
@@ -185,7 +186,11 @@ class Deploy(BaseCommand):
             )
 
     def _generate_install_script(
-        self, version: str, distfile_name: str, valid_units_str: str
+        self,
+        version: str,
+        distfile_name: str,
+        valid_units_str: str,
+        user_units: list[str],
     ) -> str:
         app_dir_q = shlex.quote(self.config.app_dir)
         script = [
@@ -234,6 +239,12 @@ class Deploy(BaseCommand):
                 'echo "==> Configuring systemd services..."',
             ]
         )
+
+        if user_units:
+            script.append('echo "==> Verifying user-provided systemd units..."')
+            for unit in user_units:
+                script.append(f"systemd-analyze verify units/{unit}")
+
         script.extend(
             [
                 f"sudo cp units/* /etc/systemd/system/",
@@ -277,7 +288,7 @@ class Deploy(BaseCommand):
         script = ["#!/usr/bin/env bash", "set -e"]
         app_name = self.config.app_name
         active_systemd_units = list(self.config.active_systemd_units)
-        unit_files = list(self.config.render_systemd_units())
+        unit_files = list(self.config.render_systemd_units()[0])
         template_units = [u for u in active_systemd_units if u.endswith("@.service")]
         regular_units = [u for u in active_systemd_units if not u.endswith("@.service")]
 

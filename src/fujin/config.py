@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import msgspec
-from jinja2 import Environment, FileSystemLoader, TemplateNotFound
+from jinja2 import Environment, FileSystemLoader, Template, TemplateNotFound
 
 from .errors import ImproperlyConfiguredError
 
@@ -154,7 +154,7 @@ class Config(msgspec.Struct, kw_only=True):
                 services.append(f"{service_name.replace('.service', '')}.timer")
         return services
 
-    def render_systemd_units(self) -> dict[str, str]:
+    def render_systemd_units(self) -> tuple[dict[str, str], list[str]]:
         package_templates = (
             Path(importlib.util.find_spec("fujin").origin).parent / "templates"
         )
@@ -168,17 +168,28 @@ class Config(msgspec.Struct, kw_only=True):
         }
 
         files = {}
+        user_template_units = []
+
+        def _get_template(name: str, default: str) -> tuple[Template, bool]:
+            try:
+                template = env.get_template(name)
+                is_user_template = Path(template.filename).parent != package_templates
+                return template, is_user_template
+            except TemplateNotFound:
+                template = env.get_template(default)
+                return template, False
+
         for name, config in self.processes.items():
             service_name = self.get_unit_template_name(name)
             process_name = service_name.replace(".service", "")
             command = config.command
             process_config = config
 
-            # Try to find a specific template for the process, otherwise use default
-            try:
-                template = env.get_template(f"{name}.service.j2")
-            except TemplateNotFound:
-                template = env.get_template("default.service.j2")
+            template, is_user_template = _get_template(
+                f"{name}.service.j2", "default.service.j2"
+            )
+            if is_user_template:
+                user_template_units.append(service_name)
 
             body = template.render(
                 **context,
@@ -190,19 +201,23 @@ class Config(msgspec.Struct, kw_only=True):
 
             if process_config.socket:
                 socket_name = f"{self.app_name}.socket"
-                try:
-                    template = env.get_template(f"{name}.socket.j2")
-                except TemplateNotFound:
-                    template = env.get_template("default.socket.j2")
+                template, is_user_template = _get_template(
+                    f"{name}.socket.j2", "default.socket.j2"
+                )
+                if is_user_template:
+                    user_template_units.append(socket_name)
+
                 body = template.render(**context)
                 files[socket_name] = body
 
             if process_config.timer:
                 timer_name = f"{service_name.replace('.service', '')}.timer"
-                try:
-                    template = env.get_template(f"{name}.timer.j2")
-                except TemplateNotFound:
-                    template = env.get_template("default.timer.j2")
+                template, is_user_template = _get_template(
+                    f"{name}.timer.j2", "default.timer.j2"
+                )
+                if is_user_template:
+                    user_template_units.append(timer_name)
+
                 body = template.render(
                     **context,
                     process_name=process_name,
@@ -210,7 +225,7 @@ class Config(msgspec.Struct, kw_only=True):
                 )
                 files[timer_name] = body
 
-        return files
+        return files, user_template_units
 
     def render_caddyfile(self) -> str:
         package_templates = (
