@@ -177,8 +177,6 @@ class SSH2Connection:
                     break
 
         finally:
-            # if is_interactive:
-            #     self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
             if old_tty_attrs:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty_attrs)
             self.session.set_blocking(True)
@@ -240,6 +238,7 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         sock.settimeout(30)
         sock.connect((host.ip or host.domain_name, host.ssh_port))
         sock.settimeout(None)
+        # disable Nagle's algorithm for lower latency
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except socket.error as e:
         raise cappa.Exit(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
