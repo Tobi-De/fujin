@@ -14,7 +14,8 @@ import time
 import cappa
 from rich.prompt import Confirm
 
-from fujin.commands import BaseCommand, install_archive_script
+from fujin.commands import BaseCommand
+from fujin.commands._base import install_archive_script
 from fujin.secrets import resolve_secrets
 
 logger = logging.getLogger(__name__)
@@ -80,20 +81,21 @@ class Deploy(BaseCommand):
             if self.config.webserver.enabled:
                 (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
 
-            valid_units = set(self.config.active_systemd_units) | set(new_units.keys())
-            valid_units_str = " ".join(sorted(valid_units))
+            context = self.config.build_context(
+                distfile_name=distfile_path.name,
+                user_units=user_units,
+                new_units=new_units,
+            )
 
             install_script = self.config.render_install_script(
-                distfile_name=distfile_path.name,
-                valid_units_str=valid_units_str,
-                user_units=user_units,
+                context=context,
             )
 
             (bundle_dir / "install.sh").write_text(install_script)
             logger.debug("Generated install script:\n%s", install_script)
 
             uninstall_script = self.config.render_uninstall_script(
-                valid_units_str=valid_units_str,
+                context=context,
             )
             (bundle_dir / "uninstall.sh").write_text(uninstall_script)
             logger.debug("Generated uninstall script:\n%s", uninstall_script)
@@ -164,14 +166,18 @@ class Deploy(BaseCommand):
                     raise cappa.Exit("Upload failed after retries.", code=1)
 
                 self.stdout.output("[blue]Executing remote installation...[/blue]")
-                conn.run(
-                    install_archive_script(
-                        remote_bundle_path_q,
-                        app_name=self.config.app_name,
-                        version=version,
-                    ),
-                    pty=True,
+                deploy_script = install_archive_script(
+                    remote_bundle_path_q,
+                    app_name=self.config.app_name,
+                    version=version,
                 )
+                if self.config.versions_to_keep:
+                    deploy_script += (
+                        "&& echo '==> Pruning old versions...' && "
+                        f"cd {remote_bundle_dir_q} && "
+                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm"
+                    )
+                conn.run(deploy_script, pty=True)
 
         self.stdout.output("[green]Deployment completed successfully![/green]")
         if self.config.webserver.enabled:

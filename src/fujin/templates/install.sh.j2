@@ -6,29 +6,30 @@ APP_DIR="{{ app_dir }}"
 VERSION="{{ version }}"
 INSTALLATION_MODE="{{ installation_mode }}"
 PYTHON_VERSION="{{ python_version }}"
-REQUIREMENTS="{{ requirements }}"
+REQUIREMENTS="{{ requirements | lower }}"
 DISTFILE_NAME="{{ distfile_name }}"
-RELEASE_COMMAND="{{ release_command }}"
-VERSIONS_TO_KEEP="{{ versions_to_keep }}"
-WEBSERVER_ENABLED="{{ webserver_enabled }}"
+RELEASE_COMMAND="{{ release_command or '' }}"
+WEBSERVER_ENABLED="{{ webserver_enabled | lower }}"
 CADDY_CONFIG_PATH="{{ caddy_config_path }}"
 APP_BIN="{{ app_bin }}"
+ACTIVE_UNITS={{ units.active }}
+VALID_UNITS={{ units.valid }}
+{% if units.user_len > 0 %}
+USER_UNITS={{ units.user }}
+{% endif %}
 
-# Systemd variables
-ACTIVE_SYSTEMD_UNITS="{{ active_systemd_units | join(' ') }}"
-VALID_UNITS_STR="{{ valid_units_str }}"
-USER_UNITS="{{ user_units | join(' ') }}"
-
-function log() {
+log() {
     echo "==> $1"
 }
 
-function error() {
-    echo "ERROR: $1" >&2
-    exit 1
+contains_exact() {
+    local needle="$1"; shift
+    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
+    return 1
 }
 
 BUNDLE_DIR=$(pwd)
+
 log "Setting up directories..."
 mkdir -p "$APP_DIR"
 mv .env "$APP_DIR/.env"
@@ -39,7 +40,7 @@ cd "$APP_DIR" || exit 1
 # trap to report failures
 trap 'echo "ERROR: install failed at $(date)" >&2; echo "Working dir: $BUNDLE_DIR" >&2; exit 1' ERR
 
-if [ "$INSTALLATION_MODE" == "python-package" ]; then
+if [ "$INSTALLATION_MODE" = "python-package" ]; then
     # Python package installation
     log "Installing Python package..."
     cat <<EOF > "$APP_DIR/.appenv"
@@ -53,8 +54,8 @@ EOF
     log "Syncing Python dependencies..."
     uv python install "$PYTHON_VERSION"
     test -d .venv || uv venv
-    
-    if [ "$REQUIREMENTS" == "True" ]; then
+
+    if [ "$REQUIREMENTS" = "true" ]; then
         uv pip install -r "$BUNDLE_DIR/requirements.txt"
         uv pip install --no-deps "$BUNDLE_DIR/$DISTFILE_NAME"
     else
@@ -75,7 +76,7 @@ EOF
     chmod +x "$FULL_PATH_APP_BIN"
 fi
 
-if [ -n "$RELEASE_COMMAND" ] && [ "$RELEASE_COMMAND" != "None" ]; then
+if [ -n "$RELEASE_COMMAND" ]; then
     log "Running release command"
     bash -lc "cd $APP_DIR && source .appenv && $RELEASE_COMMAND"
 fi
@@ -84,23 +85,13 @@ echo "$VERSION" > .version
 cd "$BUNDLE_DIR"
 
 log "Configuring systemd services..."
-if [ -n "$USER_UNITS" ]; then
+
+{% if units.user_len > 0 %}
     log "Verifying user-provided systemd units..."
-    for unit in $USER_UNITS; do
+    for unit in "${USER_UNITS[@]}"; do
         systemd-analyze verify "units/$unit"
     done
-fi
-sudo cp units/* /etc/systemd/system/
-
-# Systemd cleanup logic
-read -r -a VALID_UNITS <<< "$VALID_UNITS_STR"
-
-# Exact match helper
-contains_exact() {
-    local needle="$1"; shift
-    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
-    return 1
-}
+{% endif %}
 
 log "Discovering installed unit files"
 mapfile -t INSTALLED_UNITS < <(
@@ -140,17 +131,17 @@ for DIR in "${SEARCH_DIRS[@]}"; do
     done < <(find "$DIR" -maxdepth 1 -type f -name "${APP_NAME}*" -print0)
 done
 
-log "Reloading systemd"
-sudo systemctl daemon-reload
+log "Installing new service files..."
+sudo cp units/* /etc/systemd/system/
 
 log "Restarting services..."
-if [ -n "$ACTIVE_SYSTEMD_UNITS" ]; then
-    read -r -a ACTIVE_SYSTEMD_UNITS_ARR <<< "$ACTIVE_SYSTEMD_UNITS"
-    sudo systemctl enable "${ACTIVE_SYSTEMD_UNITS_ARR[@]}"
-    sudo systemctl restart "${ACTIVE_SYSTEMD_UNITS_ARR[@]}"
-fi
 
-if [ "$WEBSERVER_ENABLED" == "True" ]; then
+sudo systemctl daemon-reload
+sudo systemctl enable "${ACTIVE_UNITS[@]}"
+sudo systemctl restart "${ACTIVE_UNITS[@]}"
+
+
+if [ "$WEBSERVER_ENABLED" = "true" ]; then
     log "Configuring Caddy..."
     sudo mkdir -p "$(dirname "$CADDY_CONFIG_PATH")"
     if caddy validate --config Caddyfile >/dev/null 2>&1; then
@@ -160,13 +151,6 @@ if [ "$WEBSERVER_ENABLED" == "True" ]; then
     else
         echo 'Caddyfile validation failed, leaving local Caddyfile for inspection' >&2
     fi
-fi
-
-if [ -n "$VERSIONS_TO_KEEP" ] && [ "$VERSIONS_TO_KEEP" != "None" ]; then
-    log "Pruning old versions..."
-    cd "$APP_DIR/.versions"
-    # shellcheck disable=SC2012
-    ls -1t | tail -n +$((VERSIONS_TO_KEEP + 1)) | xargs -r rm
 fi
 
 log "Install script completed successfully."

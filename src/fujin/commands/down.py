@@ -50,7 +50,7 @@ class Down(BaseCommand):
             self.stdout.output("[blue]Tearing down project...[/blue]")
 
             # Try remote script first
-            app_dir = self.config.app_dir
+            app_dir = shlex.quote(self.config.app_dir)
             res, ok = conn.run(f"cat {app_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
             bundle_path = f"{app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
@@ -59,8 +59,9 @@ class Down(BaseCommand):
             _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
 
             if bundle_exists:
-                uninstall_cmd = uninstall_archive_script(
-                    bundle_path, self.config.app_name, version
+                uninstall_cmd = (
+                    uninstall_archive_script(bundle_path, self.config.app_name, version)
+                    + f"rm -rf {app_dir}"
                 )
                 _, uninstall_ok = conn.run(uninstall_cmd, warn=True, pty=True)
 
@@ -77,15 +78,18 @@ class Down(BaseCommand):
                 )
 
                 # Local fallback
-                new_units, _ = self.config.render_systemd_units()
-                valid_units = set(self.config.active_systemd_units) | set(
-                    new_units.keys()
+                new_units, user_units = self.config.render_systemd_units()
+                context = self.config.build_context(
+                    distfile_name=f"{self.config.app_name}-{version}.tar.gz",
+                    user_units=user_units,
+                    new_units=new_units,
                 )
-                valid_units_str = " ".join(sorted(valid_units))
-                uninstall_script = self.config.render_uninstall_script(
-                    valid_units_str=valid_units_str
+                uninstall_script = self.config.render_uninstall_script(context=context)
+                combined = uninstall_script + f"\nrm -rf {app_dir}"
+                conn.run(
+                    f"bash -s <<'FUJIN_UNINSTALL'\n{combined}\nFUJIN_UNINSTALL",
+                    pty=True,
                 )
-                conn.run(f"bash -c {shlex.quote(uninstall_script)}", pty=True)
 
             if self.full:
                 conn.run(

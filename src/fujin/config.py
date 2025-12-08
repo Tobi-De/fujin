@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import shlex
 from pathlib import Path
 
 import msgspec
@@ -56,6 +57,9 @@ class ProcessConfig(msgspec.Struct):
             raise ImproperlyConfiguredError(
                 "A process cannot have replicas > 1 and either 'socket' or 'timer' enabled."
             )
+
+        if self.replicas < 1:
+            raise ImproperlyConfiguredError("A process must have at least 1 replica.")
 
 
 class Config(msgspec.Struct, kw_only=True):
@@ -154,12 +158,17 @@ class Config(msgspec.Struct, kw_only=True):
                 services.append(f"{service_name.replace('.service', '')}.timer")
         return services
 
-    def render_systemd_units(self) -> tuple[dict[str, str], list[str]]:
-        package_templates = (
-            Path(importlib.util.find_spec("fujin").origin).parent / "templates"
-        )
+    def _template_env(self) -> Environment:
+        package_templates = self._package_templates_path()
         search_paths = [self.local_config_dir, package_templates]
-        env = Environment(loader=FileSystemLoader(search_paths))
+        return Environment(loader=FileSystemLoader(search_paths))
+
+    def _package_templates_path(self) -> Path:
+        return Path(importlib.util.find_spec("fujin").origin).parent / "templates"
+
+    def render_systemd_units(self) -> tuple[dict[str, str], list[str]]:
+        env = self._template_env()
+        package_templates = self._package_templates_path()
 
         context = {
             "app_name": self.app_name,
@@ -228,11 +237,7 @@ class Config(msgspec.Struct, kw_only=True):
         return files, user_template_units
 
     def render_caddyfile(self) -> str:
-        package_templates = (
-            Path(importlib.util.find_spec("fujin").origin).parent / "templates"
-        )
-        search_paths = [self.local_config_dir, package_templates]
-        env = Environment(loader=FileSystemLoader(search_paths))
+        env = self._template_env()
         template = env.get_template("Caddyfile.j2")
         return template.render(
             domain_name=self.host.domain_name,
@@ -240,60 +245,57 @@ class Config(msgspec.Struct, kw_only=True):
             statics=self.webserver.statics,
         )
 
-    def render_install_script(
+    def build_context(
         self,
+        *,
         distfile_name: str,
-        valid_units_str: str,
         user_units: list[str],
-    ) -> str:
-        package_templates = (
-            Path(importlib.util.find_spec("fujin").origin).parent / "templates"
-        )
-        search_paths = [self.local_config_dir, package_templates]
-        env = Environment(loader=FileSystemLoader(search_paths))
+        new_units: dict[str, str],
+    ) -> dict:
+        units_valid = sorted(set(self.active_systemd_units) | set(new_units.keys()))
+        regular_units = [
+            u for u in self.active_systemd_units if not u.endswith("@.service")
+        ]
+        template_units = [
+            u for u in self.active_systemd_units if u.endswith("@.service")
+        ]
+
+        def to_bash_array(values: list[str]) -> str:
+            return "(" + " ".join(shlex.quote(v) for v in values) + ")"
+
+        return {
+            "app_name": self.app_name,
+            "app_dir": self.app_dir,
+            "version": self.version,
+            "installation_mode": self.installation_mode.value,
+            "python_version": self.python_version,
+            "requirements": bool(self.requirements),
+            "distfile_name": distfile_name,
+            "release_command": self.release_command,
+            "webserver_enabled": self.webserver.enabled,
+            "caddy_config_path": self.caddy_config_path,
+            "app_bin": self.app_bin,
+            "units": {
+                "active": to_bash_array(self.active_systemd_units),
+                "valid": to_bash_array(units_valid),
+                "regular": to_bash_array(regular_units),
+                "regular_len": len(regular_units),
+                "template": to_bash_array(template_units),
+                "template_len": len(template_units),
+                "user": to_bash_array(user_units),
+                "user_len": len(user_units),
+            },
+        }
+
+    def render_install_script(self, *, context: dict) -> str:
+        env = self._template_env()
         template = env.get_template("install.sh.j2")
-        return template.render(
-            app_name=self.app_name,
-            app_dir=self.app_dir,
-            version=self.version,
-            installation_mode=self.installation_mode,
-            python_version=self.python_version,
-            requirements=str(bool(self.requirements)),
-            distfile_name=distfile_name,
-            release_command=str(self.release_command),
-            versions_to_keep=str(self.versions_to_keep),
-            webserver_enabled=str(self.webserver.enabled),
-            caddy_config_path=self.caddy_config_path,
-            app_bin=self.app_bin,
-            active_systemd_units=self.active_systemd_units,
-            valid_units_str=valid_units_str,
-            user_units=user_units,
-        )
+        return template.render(**context)
 
-    def render_uninstall_script(
-        self,
-        valid_units_str: str,
-    ) -> str:
-        package_templates = (
-            Path(importlib.util.find_spec("fujin").origin).parent / "templates"
-        )
-        search_paths = [self.local_config_dir, package_templates]
-        env = Environment(loader=FileSystemLoader(search_paths))
+    def render_uninstall_script(self, *, context: dict) -> str:
+        env = self._template_env()
         template = env.get_template("uninstall.sh.j2")
-
-        active_units = self.active_systemd_units
-        regular_units = [u for u in active_units if not u.endswith("@.service")]
-        template_units = [u for u in active_units if u.endswith("@.service")]
-
-        return template.render(
-            app_name=self.app_name,
-            app_dir=self.app_dir,
-            webserver_enabled=str(self.webserver.enabled),
-            caddy_config_path=self.caddy_config_path,
-            regular_units=regular_units,
-            template_units=template_units,
-            valid_units_str=valid_units_str,
-        )
+        return template.render(**context)
 
     @property
     def caddy_config_path(self) -> str:

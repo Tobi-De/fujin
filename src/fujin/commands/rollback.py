@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import shlex
 
 import cappa
 from rich.prompt import Confirm
@@ -12,9 +13,8 @@ from fujin.commands import BaseCommand, install_archive_script, uninstall_archiv
 class Rollback(BaseCommand):
     def __call__(self):
         with self.connection() as conn:
-            result, _ = conn.run(
-                f"ls -1t {self.config.app_dir}/.versions", warn=True, hide=True
-            )
+            app_dir = shlex.quote(self.config.app_dir)
+            result, _ = conn.run(f"ls -1t {app_dir}/.versions", warn=True, hide=True)
             if not result:
                 self.stdout.output("[blue]No rollback targets available")
                 return
@@ -42,7 +42,7 @@ class Rollback(BaseCommand):
                 raise cappa.Exit("Rollback aborted by user.", code=0) from e
 
             current_version, _ = conn.run(
-                f"cat {self.config.app_dir}/.version", warn=True, hide=True
+                f"cat {app_dir}/.version", warn=True, hide=True
             )
             current_version = current_version.strip()
 
@@ -63,7 +63,7 @@ class Rollback(BaseCommand):
                 self.stdout.output(
                     f"[blue]Uninstalling current version {current_version}...[/blue]"
                 )
-                current_bundle = f"{self.config.app_dir}/.versions/{self.config.app_name}-{current_version}.tar.gz"
+                current_bundle = f"{app_dir}/.versions/{self.config.app_name}-{current_version}.tar.gz"
 
                 # Check if bundle exists
                 _, exists = conn.run(f"test -f {current_bundle}", warn=True, hide=True)
@@ -83,11 +83,22 @@ class Rollback(BaseCommand):
 
             # Install target
             self.stdout.output(f"[blue]Installing version {version}...[/blue]")
-            target_bundle = f"{self.config.app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
+            target_bundle = (
+                f"{app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
+            )
             install_cmd = install_archive_script(
                 target_bundle, self.config.app_name, version
             )
-            conn.run(install_cmd, pty=True)
+            # delete all versions after new target
+            cleanup_cmd = (
+                f"cd {app_dir}/.versions && ls -1t | "
+                f"awk '/{self.config.app_name}-{version}\\.tar\\.gz/{{exit}} {{print}}' | "
+                "xargs -r rm"
+            )
+            full_cmd = install_cmd + (
+                f" && echo '==> Cleaning up newer versions...' && {cleanup_cmd}"
+            )
+            conn.run(full_cmd, pty=True)
             self.stdout.output(
                 f"[green]Rollback to version {version} completed successfully![/green]"
             )

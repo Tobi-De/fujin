@@ -26,7 +26,7 @@ class BaseCommand:
         return cappa.Output()
 
     @contextmanager
-    def connection(self):
+    def connection(self) -> Generator[SSH2Connection, None, None]:
         with host_connection(host=self.config.host) as conn:
             yield conn
 

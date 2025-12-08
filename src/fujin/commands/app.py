@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import subprocess
 from typing import Annotated
 
@@ -16,13 +17,40 @@ class App(BaseCommand):
     @cappa.command(help="Display information about the application")
     def info(self):
         with self.connection() as conn:
-            remote_version = (
-                conn.run("head -n 1 .versions", warn=True, hide=True)[0].strip()
-                or "N/A"
+            app_dir = shlex.quote(self.config.app_dir)
+            names = self.config.active_systemd_units
+            delimiter = "___FUJIN_DELIM___"
+
+            # Combine commands to reduce SSH roundtrips
+            # 1. Get remote version from .version file
+            # 2. List files in .versions directory for rollback targets
+            # 3. Get service statuses (systemctl)
+            cmds = [
+                f"cat {app_dir}/.version 2>/dev/null || true",
+                f"ls -1t {app_dir}/.versions 2>/dev/null || true",
+                f"sudo systemctl is-active {' '.join(names)}",
+            ]
+            full_cmd = f"; echo '{delimiter}'; ".join(cmds)
+            result_stdout, _ = conn.run(full_cmd, warn=True, hide=True)
+            parts = result_stdout.split(delimiter)
+            remote_version = parts[0].strip() or "N/A"
+
+            # Parse rollback targets from filenames
+            rollback_files = parts[1].strip().splitlines()
+            rollback_versions = []
+            prefix = f"{self.config.app_name}-"
+            suffix = ".tar.gz"
+            for fname in rollback_files:
+                fname = fname.strip()
+                if fname.startswith(prefix) and fname.endswith(suffix):
+                    v = fname[len(prefix) : -len(suffix)]
+                    if v != remote_version:
+                        rollback_versions.append(v)
+
+            rollback_targets = (
+                ", ".join(rollback_versions) if rollback_versions else "N/A"
             )
-            rollback_targets = conn.run(
-                "sed -n '2,$p' .versions", warn=True, hide=True
-            )[0].strip()
+
             infos = {
                 "app_name": self.config.app_name,
                 "app_dir": self.config.app_dir,
@@ -41,17 +69,9 @@ class App(BaseCommand):
             if self.config.webserver.enabled:
                 infos["running_at"] = f"https://{self.config.host.domain_name}"
 
-            names = self.config.active_systemd_units
-            if names:
-                result_stdout, _ = conn.run(
-                    f"sudo systemctl is-active {' '.join(names)}",
-                    warn=True,
-                    hide=True,
-                )
-                statuses = result_stdout.strip().split("\n")
-                services_status = dict(zip(names, statuses))
-            else:
-                services_status = {}
+            services_status = {}
+            statuses = parts[2].strip().split("\n")
+            services_status = dict(zip(names, statuses))
 
             services = {}
             for process_name in self.config.processes:
