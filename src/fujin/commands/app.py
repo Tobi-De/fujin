@@ -235,6 +235,15 @@ class App(BaseCommand):
         name: Annotated[str, cappa.Arg(help="Service name")],
     ):
         with self.connection() as conn:
+            if name == "caddy" and self.config.webserver.enabled:
+                # Special case for Caddy
+                self.stdout.output(
+                    f"Showing Caddy configuration at: [cyan]{self.config.caddy_config_path}[/cyan]"
+                )
+                print()
+                conn.run(f"cat {self.config.caddy_config_path}")
+                return
+
             names = self._resolve_active_systemd_units(name)
 
             if not names:
