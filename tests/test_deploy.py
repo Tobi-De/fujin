@@ -573,8 +573,6 @@ log "Uninstall completed."\
     assert (bundle_dir / "Caddyfile").read_text() == snapshot(
         """\
 example.com {
-	
-
 	reverse_proxy localhost:8000
 }\
 """
@@ -845,8 +843,6 @@ log "Uninstall completed."\
     assert (bundle_dir / "Caddyfile").read_text() == snapshot(
         """\
 example.com {
-	
-
 	reverse_proxy localhost:8000
 }\
 """
