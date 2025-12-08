@@ -81,7 +81,7 @@ wheels = [
 
 [[package]]
 name = "bookstore"
-version = "0.1.0"
+version = "0.1.2"
 source = { editable = "examples/django/bookstore" }
 dependencies = [
     { name = "django" },
@@ -89,23 +89,11 @@ dependencies = [
     { name = "gunicorn" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "pytest-subprocess" },
-    { name = "shellcheck-py" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "django", specifier = ">=5.1.2" },
     { name = "django-tasks", specifier = ">=0.5" },
     { name = "gunicorn", specifier = ">=23.0.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest-subprocess", specifier = ">=1.5.3" },
-    { name = "shellcheck-py", specifier = ">=0.11.0.1" },
 ]
 
 [[package]]
@@ -330,6 +318,8 @@ dev = [
     { name = "django" },
     { name = "inline-snapshot" },
     { name = "pytest" },
+    { name = "pytest-subprocess" },
+    { name = "shellcheck-py" },
 ]
 docs = [
     { name = "myst-parser" },
@@ -358,6 +348,8 @@ dev = [
     { name = "django", specifier = ">=5.1.2" },
     { name = "inline-snapshot", specifier = ">=0.13.0" },
     { name = "pytest", specifier = ">=9.0.1" },
+    { name = "pytest-subprocess", specifier = ">=1.5.3" },
+    { name = "shellcheck-py", specifier = ">=0.11.0.1" },
 ]
 docs = [
     { name = "myst-parser" },

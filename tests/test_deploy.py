@@ -37,15 +37,6 @@ def mock_time():
 
 
 @pytest.fixture
-def capture_bundle(tmp_path):
-    @contextmanager
-    def _mock_temp_dir():
-        yield str(tmp_path)
-
-    with patch("tempfile.TemporaryDirectory", side_effect=_mock_temp_dir):
-        yield tmp_path
-
-
 def test_script_execution_binary(
     mock_config,
     capture_bundle,
@@ -70,8 +61,8 @@ def test_script_execution_binary(
             deploy()
 
     bundle_dir = capture_bundle / "myapp-bundle"
-    install_script = (bundle_dir / "install").read_text()
-    uninstall_script = (bundle_dir / "uninstall").read_text()
+    install_script = (bundle_dir / "install.sh").read_text()
+    uninstall_script = (bundle_dir / "uninstall.sh").read_text()
 
     (script_runner.root / "home/testuser/.local/share/fujin/myapp/.versions").mkdir(
         parents=True, exist_ok=True
@@ -96,6 +87,16 @@ def test_script_execution_binary(
     # Check caddy config
     caddy_dir = result.root / "etc/caddy/conf.d"
     assert (caddy_dir / "myapp.caddy").exists()
+
+    # Check commands run
+    systemctl_log = result.get_log("systemctl")
+    assert "systemctl daemon-reload" in systemctl_log
+    assert "systemctl enable myapp.service" in systemctl_log
+    assert "systemctl restart myapp.service" in systemctl_log
+
+    caddy_log = result.get_log("caddy")
+    assert "caddy validate" in caddy_log
+    assert "systemctl reload caddy" in systemctl_log
 
     # --- Run Uninstall ---
     result_uninstall = script_runner.run(uninstall_script, cwd=bundle_dir)
@@ -151,6 +152,12 @@ def test_script_execution_python(
     assert (app_dir / ".venv").exists()
     assert "uv pip install -r" in result.get_log("uv")
 
+    # Check commands run
+    systemctl_log = result.get_log("systemctl")
+    assert "systemctl daemon-reload" in systemctl_log
+    assert "systemctl enable testapp.service" in systemctl_log
+    assert "systemctl restart testapp.service" in systemctl_log
+
 
 def test_script_execution_pruning(
     mock_config,
@@ -174,8 +181,18 @@ def test_script_execution_pruning(
             deploy = Deploy()
             deploy()
 
-    bundle_dir = capture_bundle / "testapp-bundle"
-    install_script = (bundle_dir / "install.sh").read_text()
+    # Extract the pruning command from the connection calls
+    calls = mock_connection.run.call_args_list
+    pruning_cmd = None
+    for call in calls:
+        cmd = call[0][0]
+        if "Pruning old versions" in cmd:
+            # The command is like: ... && echo '==> Pruning old versions...' && <pruning_cmd>
+            _, part = cmd.split("echo '==> Pruning old versions...' &&")
+            pruning_cmd = part.strip()
+            break
+
+    assert pruning_cmd, "Pruning command not found in connection calls"
 
     # Setup old versions
     versions_dir = (
@@ -193,7 +210,8 @@ def test_script_execution_pruning(
     os.utime(versions_dir / "v3", (now - 200, now - 200))
     os.utime(versions_dir / "v4", (now - 100, now - 100))
 
-    result = script_runner.run(install_script, cwd=bundle_dir)
+    # Run the pruning command using script_runner
+    result = script_runner.run(f"#!/bin/bash\n{pruning_cmd}")
     result.assert_success()
 
     remaining = sorted([p.name for p in versions_dir.iterdir()])
@@ -248,15 +266,13 @@ def test_script_execution_update(
     assert (app_dir / ".version").read_text().strip() == "0.2.0"
 
 
-def test_deploy_binary_commands(
+def test_script_execution_cleanup_stale_units(
     mock_config,
-    mock_connection,
-    get_commands,
-    setup_distfile,
-    mock_checksum_match,
     capture_bundle,
+    script_runner,
+    setup_distfile,
+    mock_connection,
 ):
-    mock_config.installation_mode = InstallationMode.BINARY
     mock_config.app_name = "myapp"
 
     def run_side_effect(command, **kwargs):
@@ -266,182 +282,61 @@ def test_deploy_binary_commands(
 
     mock_connection.run.side_effect = run_side_effect
 
-    # Mock subprocess to avoid actual build
-    with patch("subprocess.run"):
-        deploy = Deploy()
-        deploy()
+    with patch("hashlib.file_digest") as mock_digest:
+        mock_digest.return_value.hexdigest.return_value = "checksum123"
+        with patch("subprocess.run"):
+            deploy = Deploy()
+            deploy()
 
     bundle_dir = capture_bundle / "myapp-bundle"
-    assert (bundle_dir / "install.sh").read_text() == snapshot(
-        """\
-#!/usr/bin/env bash
-set -e
-BUNDLE_DIR=$(pwd)
-echo "==> Setting up directories..."
-mkdir -p /home/testuser/.local/share/fujin/myapp
-mv .env /home/testuser/.local/share/fujin/myapp/.env
-echo '==> Installing application...'
-cd /home/testuser/.local/share/fujin/myapp || exit 1
-trap 'echo "ERROR: install failed at $(date)" >&2; echo "Working dir: $BUNDLE_DIR" >&2; exit 1' ERR
-echo 'set -a  # Automatically export all variables
-source .env
-set +a  # Stop automatic export
-export PATH="/home/testuser/.local/share/fujin/myapp:$PATH"' > /home/testuser/.local/share/fujin/myapp/.appenv
-echo '==> Installing binary...'
-rm -f /home/testuser/.local/share/fujin/myapp/myapp
-cp $BUNDLE_DIR/testapp-0.1.0.whl /home/testuser/.local/share/fujin/myapp/myapp
-chmod +x /home/testuser/.local/share/fujin/myapp/myapp
-echo '0.1.0' > .version
-cd $BUNDLE_DIR
-echo "==> Configuring systemd services..."
-sudo cp units/* /etc/systemd/system/
+    install_script = (bundle_dir / "install.sh").read_text()
 
+    # Setup environment with stale units
+    systemd_dir = script_runner.root / "etc/systemd/system"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
 
-APP_NAME="myapp"
-read -r -a VALID_UNITS <<< "myapp-worker@.service myapp-worker@1.service myapp-worker@2.service myapp.service"
+    # Valid units (should be kept)
+    (systemd_dir / "myapp.service").touch()
+    (systemd_dir / "myapp-worker@.service").touch()
 
-# Exact match helper
-contains_exact() {
-    local needle="$1"; shift
-    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
-    return 1
-}
+    # Stale units (should be removed/disabled)
+    (systemd_dir / "myapp-old.service").touch()
+    (systemd_dir / "myapp-stale.timer").touch()
 
-echo "==> Discovering installed unit files"
-mapfile -t INSTALLED_UNITS < <(
-    systemctl list-unit-files --type=service --no-legend --no-pager \\
-    | awk -v app="$APP_NAME" '$1 ~ "^"app {print $1}'
-)
-
-echo "==> Disabling + stopping stale units"
-for UNIT in "${INSTALLED_UNITS[@]}"; do
-    if ! contains_exact "$UNIT" "${VALID_UNITS[@]}"; then
-
-        # If it's a template file (myapp@.service), only disable it.
-        if [[ "$UNIT" == *@.service ]]; then
-            echo "→ Disabling template unit: $UNIT"
-            sudo systemctl disable "$UNIT" --quiet || true
-        else
-            echo "→ Stopping + disabling stale unit: $UNIT"
-            sudo systemctl stop "$UNIT" --quiet || true
-            sudo systemctl disable "$UNIT" --quiet || true
-        fi
-
-        sudo systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
-    fi
-done
-
-echo "==> Removing stale service files"
-SEARCH_DIRS=(
-    /etc/systemd/system/
-    /etc/systemd/system/multi-user.target.wants/
-)
-
-for DIR in "${SEARCH_DIRS[@]}"; do
-    [[ -d "$DIR" ]] || continue
-
-    while IFS= read -r -d '' FILE; do
-        BASENAME=$(basename "$FILE")
-        if ! contains_exact "$BASENAME" "${VALID_UNITS[@]}"; then
-            echo "→ Removing stale file: $FILE"
-            sudo rm -f -- "$FILE"
-        fi
-    done < <(find "$DIR" -maxdepth 1 -type f -name "${APP_NAME}*" -print0)
-done
-
-echo "==> Reloading systemd"
-sudo systemctl daemon-reload
-
-
-echo "==> Restarting services..."
-sudo systemctl enable myapp.service myapp-worker@1.service myapp-worker@2.service
-sudo systemctl restart myapp.service myapp-worker@1.service myapp-worker@2.service
-echo "==> Configuring Caddy..."
-sudo mkdir -p $(dirname /etc/caddy/conf.d/myapp.caddy)
-if caddy validate --config Caddyfile >/dev/null 2>&1; then
-  sudo mv Caddyfile /etc/caddy/conf.d/myapp.caddy
-  sudo chown caddy:caddy /etc/caddy/conf.d/myapp.caddy
-  sudo systemctl reload caddy
+    # Mock systemctl list-unit-files output
+    # The script uses this to find installed units
+    script_runner._create_mock(
+        "systemctl",
+        """
+if [[ "$1" == "list-unit-files" ]]; then
+    echo "myapp.service enabled"
+    echo "myapp-worker@.service enabled"
+    echo "myapp-old.service enabled"
+    echo "myapp-stale.timer enabled"
 else
-  echo 'Caddyfile validation failed, leaving local Caddyfile for inspection' >&2
+    # Log other commands
+    echo "systemctl $@" >> """
+        + str(script_runner.logs / "systemctl.log")
+        + """
 fi
-echo "==> Pruning old versions..."
-cd /home/testuser/.local/share/fujin/myapp/.versions
-ls -1t | tail -n +6 | xargs -r rm
-echo '==> Install script completed successfully.'\
-"""
-    )
-    assert (bundle_dir / "uninstall.sh").read_text() == snapshot(
-        """\
-#!/usr/bin/env bash
-set -e
-sudo systemctl disable --now myapp.service myapp-worker@1.service myapp-worker@2.service --quiet || true
-APP_NAME="myapp"
-UNITS=(myapp.service myapp-worker@.service)
-for UNIT in "${UNITS[@]}"; do
-  case "$UNIT" in
-    */*|*..*) echo "Skipping suspicious unit name: $UNIT" >&2; continue;;
-  esac
-  if [[ "$UNIT" != ${APP_NAME}* ]]; then
-    echo "Refusing to remove non-app unit: $UNIT" >&2
-    continue
-  fi
-  sudo rm -f /etc/systemd/system/"$UNIT"
-done
-sudo systemctl daemon-reload
-sudo systemctl reset-failed
-sudo rm -f /etc/caddy/conf.d/myapp.caddy
-sudo systemctl reload caddy
-echo '==> Uninstall completed.'\
-"""
-    )
-    assert (bundle_dir / "Caddyfile").read_text() == snapshot(
-        """\
-example.com {
-	
-
-	reverse_proxy localhost:8000
-}\
-"""
-    )
-    assert (bundle_dir / "units" / "myapp.service").read_text() == snapshot(
-        """\
-# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
-# Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
-[Unit]
-Description=myapp
-
-After=network.target
-
-[Service]
-#Type=notify
-#NotifyAccess=main
-User=testuser
-Group=testuser
-RuntimeDirectory=myapp
-WorkingDirectory=/home/testuser/.local/share/fujin/myapp
-ExecStart=/home/testuser/.local/share/fujin/myapp/run web
-EnvironmentFile=/home/testuser/.local/share/fujin/myapp/.env
-ExecReload=/bin/kill -s HUP $MAINPID
-KillMode=mixed
-TimeoutStopSec=5
-PrivateTmp=true
-# if your app does not need administrative capabilities, let systemd know
-ProtectSystem=strict
-
-[Install]
-WantedBy=multi-user.target\
-"""
+""",
     )
 
-    assert get_commands(mock_connection.mock_calls) == snapshot(
-        [
-            'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mkdir -p /home/testuser/.local/share/fujin/myapp/.versions',
-            "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && sha256sum /home/testuser/.local/share/fujin/myapp/.versions/myapp-0.1.0.tar.gz.uploading.1234567890 | awk '{print $1}'",
-            'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mv /home/testuser/.local/share/fujin/myapp/.versions/myapp-0.1.0.tar.gz.uploading.1234567890 /home/testuser/.local/share/fujin/myapp/.versions/myapp-0.1.0.tar.gz',
-            "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && mkdir -p /tmp/myapp-0.1.0 && tar --overwrite -xzf /home/testuser/.local/share/fujin/myapp/.versions/myapp-0.1.0.tar.gz -C /tmp/myapp-0.1.0 && cd /tmp/myapp-0.1.0 && chmod +x install.sh && bash ./install.sh || (echo 'install.sh failed' >&2; exit 1) && cd / && rm -rf /tmp/myapp-0.1.0",
-        ]
-    )
+    result = script_runner.run(install_script, cwd=bundle_dir)
+    result.assert_success()
+
+    # Check stale files removed
+    assert (systemd_dir / "myapp.service").exists()
+    assert (systemd_dir / "myapp-worker@.service").exists()
+    assert not (systemd_dir / "myapp-old.service").exists()
+    assert not (systemd_dir / "myapp-stale.timer").exists()
+
+    # Check systemctl commands for disabling stale units
+    log = result.get_log("systemctl")
+    assert "disable myapp-old.service" in log
+    assert "stop myapp-old.service" in log
+    assert "disable myapp-stale.timer" in log
+    assert "stop myapp-stale.timer" in log
 
 
 def test_deploy_python_commands(
@@ -477,51 +372,101 @@ def test_deploy_python_commands(
         """\
 #!/usr/bin/env bash
 set -e
-BUNDLE_DIR=$(pwd)
-echo "==> Setting up directories..."
-mkdir -p /home/testuser/.local/share/fujin/testapp
-mv .env /home/testuser/.local/share/fujin/testapp/.env
-echo '==> Installing application...'
-cd /home/testuser/.local/share/fujin/testapp || exit 1
-trap 'echo "ERROR: install failed at $(date)" >&2; echo "Working dir: $BUNDLE_DIR" >&2; exit 1' ERR
-echo 'set -a  # Automatically export all variables
-source .env
-set +a  # Stop automatic export
-export UV_COMPILE_BYTECODE=1
-export UV_PYTHON=python3.12
-export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv
-echo '==> Syncing Python dependencies...'
-uv python install 3.12
-test -d .venv || uv venv
-uv pip install -r $BUNDLE_DIR/requirements.txt
-uv pip install --no-deps $BUNDLE_DIR/testapp-0.1.0.whl
-echo '0.1.0' > .version
-cd $BUNDLE_DIR
-echo "==> Configuring systemd services..."
-sudo cp units/* /etc/systemd/system/
-
 
 APP_NAME="testapp"
-read -r -a VALID_UNITS <<< "testapp-worker@.service testapp-worker@1.service testapp-worker@2.service testapp.service"
+APP_DIR="/home/testuser/.local/share/fujin/testapp"
+VERSION="0.1.0"
+INSTALLATION_MODE="python-package"
+PYTHON_VERSION="3.12"
+REQUIREMENTS="true"
+DISTFILE_NAME="testapp-0.1.0.whl"
+RELEASE_COMMAND=""
+WEBSERVER_ENABLED="true"
+CADDY_CONFIG_PATH="/etc/caddy/conf.d/testapp.caddy"
+APP_BIN=".venv/bin/testapp"
+ACTIVE_UNITS=(testapp.service testapp-worker@1.service testapp-worker@2.service)
+VALID_UNITS=(testapp-worker@.service testapp-worker@1.service testapp-worker@2.service testapp.service)
 
-# Exact match helper
+
+log() {
+    echo "==> $1"
+}
+
 contains_exact() {
     local needle="$1"; shift
     for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
     return 1
 }
 
-echo "==> Discovering installed unit files"
+BUNDLE_DIR=$(pwd)
+
+log "Setting up directories..."
+mkdir -p "$APP_DIR"
+mv .env "$APP_DIR/.env"
+
+log "Installing application..."
+cd "$APP_DIR" || exit 1
+
+# trap to report failures
+trap 'echo "ERROR: install failed at $(date)" >&2; echo "Working dir: $BUNDLE_DIR" >&2; exit 1' ERR
+
+if [ "$INSTALLATION_MODE" = "python-package" ]; then
+    # Python package installation
+    log "Installing Python package..."
+    cat <<EOF > "$APP_DIR/.appenv"
+set -a
+source .env
+set +a
+export UV_COMPILE_BYTECODE=1
+export UV_PYTHON=python$PYTHON_VERSION
+export PATH=".venv/bin:\\$PATH"
+EOF
+    log "Syncing Python dependencies..."
+    uv python install "$PYTHON_VERSION"
+    test -d .venv || uv venv
+
+    if [ "$REQUIREMENTS" = "true" ]; then
+        uv pip install -r "$BUNDLE_DIR/requirements.txt"
+        uv pip install --no-deps "$BUNDLE_DIR/$DISTFILE_NAME"
+    else
+        uv pip install "$BUNDLE_DIR/$DISTFILE_NAME"
+    fi
+else
+    # Binary installation
+    log "Installing binary..."
+    cat <<EOF > "$APP_DIR/.appenv"
+set -a
+source .env
+set +a
+export PATH="$APP_DIR:\\$PATH"
+EOF
+    FULL_PATH_APP_BIN="$APP_DIR/$APP_BIN"
+    rm -f "$FULL_PATH_APP_BIN"
+    cp "$BUNDLE_DIR/$DISTFILE_NAME" "$FULL_PATH_APP_BIN"
+    chmod +x "$FULL_PATH_APP_BIN"
+fi
+
+if [ -n "$RELEASE_COMMAND" ]; then
+    log "Running release command"
+    bash -lc "cd $APP_DIR && source .appenv && $RELEASE_COMMAND"
+fi
+
+echo "$VERSION" > .version
+cd "$BUNDLE_DIR"
+
+log "Configuring systemd services..."
+
+
+
+log "Discovering installed unit files"
 mapfile -t INSTALLED_UNITS < <(
     systemctl list-unit-files --type=service --no-legend --no-pager \\
     | awk -v app="$APP_NAME" '$1 ~ "^"app {print $1}'
 )
 
-echo "==> Disabling + stopping stale units"
+log "Disabling + stopping stale units"
 for UNIT in "${INSTALLED_UNITS[@]}"; do
     if ! contains_exact "$UNIT" "${VALID_UNITS[@]}"; then
-
-        # If it's a template file (myapp@.service), only disable it.
         if [[ "$UNIT" == *@.service ]]; then
             echo "→ Disabling template unit: $UNIT"
             sudo systemctl disable "$UNIT" --quiet || true
@@ -530,12 +475,11 @@ for UNIT in "${INSTALLED_UNITS[@]}"; do
             sudo systemctl stop "$UNIT" --quiet || true
             sudo systemctl disable "$UNIT" --quiet || true
         fi
-
         sudo systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
     fi
 done
 
-echo "==> Removing stale service files"
+log "Removing stale service files"
 SEARCH_DIRS=(
     /etc/systemd/system/
     /etc/systemd/system/multi-user.target.wants/
@@ -543,7 +487,6 @@ SEARCH_DIRS=(
 
 for DIR in "${SEARCH_DIRS[@]}"; do
     [[ -d "$DIR" ]] || continue
-
     while IFS= read -r -d '' FILE; do
         BASENAME=$(basename "$FILE")
         if ! contains_exact "$BASENAME" "${VALID_UNITS[@]}"; then
@@ -553,50 +496,78 @@ for DIR in "${SEARCH_DIRS[@]}"; do
     done < <(find "$DIR" -maxdepth 1 -type f -name "${APP_NAME}*" -print0)
 done
 
-echo "==> Reloading systemd"
+log "Installing new service files..."
+sudo cp units/* /etc/systemd/system/
+
+log "Restarting services..."
+
 sudo systemctl daemon-reload
+sudo systemctl enable "${ACTIVE_UNITS[@]}"
+sudo systemctl restart "${ACTIVE_UNITS[@]}"
 
 
-echo "==> Restarting services..."
-sudo systemctl enable testapp.service testapp-worker@1.service testapp-worker@2.service
-sudo systemctl restart testapp.service testapp-worker@1.service testapp-worker@2.service
-echo "==> Configuring Caddy..."
-sudo mkdir -p $(dirname /etc/caddy/conf.d/testapp.caddy)
-if caddy validate --config Caddyfile >/dev/null 2>&1; then
-  sudo mv Caddyfile /etc/caddy/conf.d/testapp.caddy
-  sudo chown caddy:caddy /etc/caddy/conf.d/testapp.caddy
-  sudo systemctl reload caddy
-else
-  echo 'Caddyfile validation failed, leaving local Caddyfile for inspection' >&2
+if [ "$WEBSERVER_ENABLED" = "true" ]; then
+    log "Configuring Caddy..."
+    sudo mkdir -p "$(dirname "$CADDY_CONFIG_PATH")"
+    if caddy validate --config Caddyfile >/dev/null 2>&1; then
+        sudo mv Caddyfile "$CADDY_CONFIG_PATH"
+        sudo chown caddy:caddy "$CADDY_CONFIG_PATH"
+        sudo systemctl reload caddy
+    else
+        echo 'Caddyfile validation failed, leaving local Caddyfile for inspection' >&2
+    fi
 fi
-echo "==> Pruning old versions..."
-cd /home/testuser/.local/share/fujin/testapp/.versions
-ls -1t | tail -n +6 | xargs -r rm
-echo '==> Install script completed successfully.'\
+
+log "Install script completed successfully."\
 """
     )
     assert (bundle_dir / "uninstall.sh").read_text() == snapshot(
         """\
 #!/usr/bin/env bash
 set -e
-sudo systemctl disable --now testapp.service testapp-worker@1.service testapp-worker@2.service --quiet || true
+
 APP_NAME="testapp"
-UNITS=(testapp.service testapp-worker@.service)
-for UNIT in "${UNITS[@]}"; do
-  case "$UNIT" in
-    */*|*..*) echo "Skipping suspicious unit name: $UNIT" >&2; continue;;
-  esac
-  if [[ "$UNIT" != ${APP_NAME}* ]]; then
-    echo "Refusing to remove non-app unit: $UNIT" >&2
-    continue
-  fi
-  sudo rm -f /etc/systemd/system/"$UNIT"
+WEBSERVER_ENABLED="true"
+CADDY_CONFIG_PATH="/etc/caddy/conf.d/testapp.caddy"
+VALID_UNITS=(testapp-worker@.service testapp-worker@1.service testapp-worker@2.service testapp.service)
+
+REGULAR_UNITS=(testapp.service testapp-worker@1.service testapp-worker@2.service)
+
+
+
+log() {
+    echo "==> $1"
+}
+
+log "Uninstalling application..."
+
+log "Stopping and disabling services..."
+
+    sudo systemctl disable --now "${REGULAR_UNITS[@]}" --quiet || true
+
+
+
+
+log "Removing systemd unit files..."
+for UNIT in "${VALID_UNITS[@]}"; do
+    # Safety check
+    if [[ "$UNIT" != ${APP_NAME}* ]]; then
+            echo "Refusing to remove non-app unit: $UNIT" >&2
+            continue
+    fi
+    sudo rm -f "/etc/systemd/system/$UNIT"
 done
+
 sudo systemctl daemon-reload
 sudo systemctl reset-failed
-sudo rm -f /etc/caddy/conf.d/testapp.caddy
-sudo systemctl reload caddy
-echo '==> Uninstall completed.'\
+
+if [ "$WEBSERVER_ENABLED" = "true" ]; then
+    log "Removing Caddy configuration..."
+    sudo rm -f "$CADDY_CONFIG_PATH"
+    sudo systemctl reload caddy
+fi
+
+log "Uninstall completed."\
 """
     )
     assert (bundle_dir / "Caddyfile").read_text() == snapshot(
@@ -643,6 +614,281 @@ WantedBy=multi-user.target\
             'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mkdir -p /home/testuser/.local/share/fujin/testapp/.versions',
             "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && sha256sum /home/testuser/.local/share/fujin/testapp/.versions/testapp-0.1.0.tar.gz.uploading.1234567890 | awk '{print $1}'",
             'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mv /home/testuser/.local/share/fujin/testapp/.versions/testapp-0.1.0.tar.gz.uploading.1234567890 /home/testuser/.local/share/fujin/testapp/.versions/testapp-0.1.0.tar.gz',
-            "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && mkdir -p /tmp/testapp-0.1.0 && tar --overwrite -xzf /home/testuser/.local/share/fujin/testapp/.versions/testapp-0.1.0.tar.gz -C /tmp/testapp-0.1.0 && cd /tmp/testapp-0.1.0 && chmod +x install.sh && bash ./install.sh || (echo 'install.sh failed' >&2; exit 1) && cd / && rm -rf /tmp/testapp-0.1.0",
+            "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && mkdir -p /tmp/testapp-0.1.0 && tar --overwrite -xzf /home/testuser/.local/share/fujin/testapp/.versions/testapp-0.1.0.tar.gz -C /tmp/testapp-0.1.0 && cd /tmp/testapp-0.1.0 && chmod +x install.sh && bash ./install.sh || (echo 'install failed' >&2; exit 1) && cd / && rm -rf /tmp/testapp-0.1.0&& echo '==> Pruning old versions...' && cd /home/testuser/.local/share/fujin/testapp/.versions && ls -1t | tail -n +6 | xargs -r rm",
+        ]
+    )
+
+
+def test_deploy_binary_commands(
+    mock_config,
+    mock_connection,
+    get_commands,
+    setup_distfile,
+    mock_checksum_match,
+    capture_bundle,
+):
+    mock_config.installation_mode = InstallationMode.BINARY
+    mock_config.app_name = "myapp"
+
+    def run_side_effect(command, **kwargs):
+        if "sha256sum" in command:
+            return "checksum123\n", True
+        return "", True
+
+    mock_connection.run.side_effect = run_side_effect
+
+    # Mock subprocess to avoid actual build
+    with patch("subprocess.run"):
+        deploy = Deploy()
+        deploy()
+
+    bundle_dir = capture_bundle / "myapp-bundle"
+    assert (bundle_dir / "install.sh").read_text() == snapshot(
+        """\
+#!/usr/bin/env bash
+set -e
+
+APP_NAME="myapp"
+APP_DIR="/home/testuser/.local/share/fujin/myapp"
+VERSION="0.1.0"
+INSTALLATION_MODE="binary"
+PYTHON_VERSION="3.12"
+REQUIREMENTS="false"
+DISTFILE_NAME="testapp-0.1.0.whl"
+RELEASE_COMMAND=""
+WEBSERVER_ENABLED="true"
+CADDY_CONFIG_PATH="/etc/caddy/conf.d/myapp.caddy"
+APP_BIN="myapp"
+ACTIVE_UNITS=(myapp.service myapp-worker@1.service myapp-worker@2.service)
+VALID_UNITS=(myapp-worker@.service myapp-worker@1.service myapp-worker@2.service myapp.service)
+
+
+log() {
+    echo "==> $1"
+}
+
+contains_exact() {
+    local needle="$1"; shift
+    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
+    return 1
+}
+
+BUNDLE_DIR=$(pwd)
+
+log "Setting up directories..."
+mkdir -p "$APP_DIR"
+mv .env "$APP_DIR/.env"
+
+log "Installing application..."
+cd "$APP_DIR" || exit 1
+
+# trap to report failures
+trap 'echo "ERROR: install failed at $(date)" >&2; echo "Working dir: $BUNDLE_DIR" >&2; exit 1' ERR
+
+if [ "$INSTALLATION_MODE" = "python-package" ]; then
+    # Python package installation
+    log "Installing Python package..."
+    cat <<EOF > "$APP_DIR/.appenv"
+set -a
+source .env
+set +a
+export UV_COMPILE_BYTECODE=1
+export UV_PYTHON=python$PYTHON_VERSION
+export PATH=".venv/bin:\\$PATH"
+EOF
+    log "Syncing Python dependencies..."
+    uv python install "$PYTHON_VERSION"
+    test -d .venv || uv venv
+
+    if [ "$REQUIREMENTS" = "true" ]; then
+        uv pip install -r "$BUNDLE_DIR/requirements.txt"
+        uv pip install --no-deps "$BUNDLE_DIR/$DISTFILE_NAME"
+    else
+        uv pip install "$BUNDLE_DIR/$DISTFILE_NAME"
+    fi
+else
+    # Binary installation
+    log "Installing binary..."
+    cat <<EOF > "$APP_DIR/.appenv"
+set -a
+source .env
+set +a
+export PATH="$APP_DIR:\\$PATH"
+EOF
+    FULL_PATH_APP_BIN="$APP_DIR/$APP_BIN"
+    rm -f "$FULL_PATH_APP_BIN"
+    cp "$BUNDLE_DIR/$DISTFILE_NAME" "$FULL_PATH_APP_BIN"
+    chmod +x "$FULL_PATH_APP_BIN"
+fi
+
+if [ -n "$RELEASE_COMMAND" ]; then
+    log "Running release command"
+    bash -lc "cd $APP_DIR && source .appenv && $RELEASE_COMMAND"
+fi
+
+echo "$VERSION" > .version
+cd "$BUNDLE_DIR"
+
+log "Configuring systemd services..."
+
+
+
+log "Discovering installed unit files"
+mapfile -t INSTALLED_UNITS < <(
+    systemctl list-unit-files --type=service --no-legend --no-pager \\
+    | awk -v app="$APP_NAME" '$1 ~ "^"app {print $1}'
+)
+
+log "Disabling + stopping stale units"
+for UNIT in "${INSTALLED_UNITS[@]}"; do
+    if ! contains_exact "$UNIT" "${VALID_UNITS[@]}"; then
+        if [[ "$UNIT" == *@.service ]]; then
+            echo "→ Disabling template unit: $UNIT"
+            sudo systemctl disable "$UNIT" --quiet || true
+        else
+            echo "→ Stopping + disabling stale unit: $UNIT"
+            sudo systemctl stop "$UNIT" --quiet || true
+            sudo systemctl disable "$UNIT" --quiet || true
+        fi
+        sudo systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+    fi
+done
+
+log "Removing stale service files"
+SEARCH_DIRS=(
+    /etc/systemd/system/
+    /etc/systemd/system/multi-user.target.wants/
+)
+
+for DIR in "${SEARCH_DIRS[@]}"; do
+    [[ -d "$DIR" ]] || continue
+    while IFS= read -r -d '' FILE; do
+        BASENAME=$(basename "$FILE")
+        if ! contains_exact "$BASENAME" "${VALID_UNITS[@]}"; then
+            echo "→ Removing stale file: $FILE"
+            sudo rm -f -- "$FILE"
+        fi
+    done < <(find "$DIR" -maxdepth 1 -type f -name "${APP_NAME}*" -print0)
+done
+
+log "Installing new service files..."
+sudo cp units/* /etc/systemd/system/
+
+log "Restarting services..."
+
+sudo systemctl daemon-reload
+sudo systemctl enable "${ACTIVE_UNITS[@]}"
+sudo systemctl restart "${ACTIVE_UNITS[@]}"
+
+
+if [ "$WEBSERVER_ENABLED" = "true" ]; then
+    log "Configuring Caddy..."
+    sudo mkdir -p "$(dirname "$CADDY_CONFIG_PATH")"
+    if caddy validate --config Caddyfile >/dev/null 2>&1; then
+        sudo mv Caddyfile "$CADDY_CONFIG_PATH"
+        sudo chown caddy:caddy "$CADDY_CONFIG_PATH"
+        sudo systemctl reload caddy
+    else
+        echo 'Caddyfile validation failed, leaving local Caddyfile for inspection' >&2
+    fi
+fi
+
+log "Install script completed successfully."\
+"""
+    )
+    assert (bundle_dir / "uninstall.sh").read_text() == snapshot(
+        """\
+#!/usr/bin/env bash
+set -e
+
+APP_NAME="myapp"
+WEBSERVER_ENABLED="true"
+CADDY_CONFIG_PATH="/etc/caddy/conf.d/myapp.caddy"
+VALID_UNITS=(myapp-worker@.service myapp-worker@1.service myapp-worker@2.service myapp.service)
+
+REGULAR_UNITS=(myapp.service myapp-worker@1.service myapp-worker@2.service)
+
+
+
+log() {
+    echo "==> $1"
+}
+
+log "Uninstalling application..."
+
+log "Stopping and disabling services..."
+
+    sudo systemctl disable --now "${REGULAR_UNITS[@]}" --quiet || true
+
+
+
+
+log "Removing systemd unit files..."
+for UNIT in "${VALID_UNITS[@]}"; do
+    # Safety check
+    if [[ "$UNIT" != ${APP_NAME}* ]]; then
+            echo "Refusing to remove non-app unit: $UNIT" >&2
+            continue
+    fi
+    sudo rm -f "/etc/systemd/system/$UNIT"
+done
+
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+
+if [ "$WEBSERVER_ENABLED" = "true" ]; then
+    log "Removing Caddy configuration..."
+    sudo rm -f "$CADDY_CONFIG_PATH"
+    sudo systemctl reload caddy
+fi
+
+log "Uninstall completed."\
+"""
+    )
+    assert (bundle_dir / "Caddyfile").read_text() == snapshot(
+        """\
+example.com {
+	
+
+	reverse_proxy localhost:8000
+}\
+"""
+    )
+    assert (bundle_dir / "units" / "myapp.service").read_text() == snapshot(
+        """\
+# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
+# Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
+[Unit]
+Description=myapp
+
+After=network.target
+
+[Service]
+#Type=notify
+#NotifyAccess=main
+User=testuser
+Group=testuser
+RuntimeDirectory=myapp
+WorkingDirectory=/home/testuser/.local/share/fujin/myapp
+ExecStart=/home/testuser/.local/share/fujin/myapp/run web
+EnvironmentFile=/home/testuser/.local/share/fujin/myapp/.env
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=5
+PrivateTmp=true
+# if your app does not need administrative capabilities, let systemd know
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target\
+"""
+    )
+
+    assert get_commands(mock_connection.mock_calls) == snapshot(
+        [
+            'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mkdir -p /home/testuser/.local/share/fujin/myapp/.versions',
+            "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && sha256sum /home/testuser/.local/share/fujin/myapp/.versions/myapp-0.1.0.tar.gz.uploading.1234567890 | awk '{print $1}'",
+            'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mv /home/testuser/.local/share/fujin/myapp/.versions/myapp-0.1.0.tar.gz.uploading.1234567890 /home/testuser/.local/share/fujin/myapp/.versions/myapp-0.1.0.tar.gz',
+            "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && mkdir -p /tmp/myapp-0.1.0 && tar --overwrite -xzf /home/testuser/.local/share/fujin/myapp/.versions/myapp-0.1.0.tar.gz -C /tmp/myapp-0.1.0 && cd /tmp/myapp-0.1.0 && chmod +x install.sh && bash ./install.sh || (echo 'install failed' >&2; exit 1) && cd / && rm -rf /tmp/myapp-0.1.0&& echo '==> Pruning old versions...' && cd /home/testuser/.local/share/fujin/myapp/.versions && ls -1t | tail -n +6 | xargs -r rm",
         ]
     )

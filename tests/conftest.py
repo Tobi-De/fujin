@@ -1,7 +1,18 @@
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from contextlib import contextmanager
 from fujin.config import Config, HostConfig, Webserver, ProcessConfig, InstallationMode
+
+
+@pytest.fixture
+def capture_bundle(tmp_path):
+    @contextmanager
+    def _mock_temp_dir():
+        yield str(tmp_path)
+
+    with patch("tempfile.TemporaryDirectory", side_effect=_mock_temp_dir):
+        yield tmp_path
 
 
 @pytest.fixture

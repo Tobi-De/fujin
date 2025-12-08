@@ -217,8 +217,10 @@ class App(BaseCommand):
     ):
         with self.connection() as conn:
             names = self._resolve_active_systemd_units(name)
+
             if names:
                 units = " ".join(f"-u {n}" for n in names)
+                self.stdout.output(f"Showing logs for: [cyan]{', '.join(names)}[/cyan]")
                 conn.run(
                     f"sudo journalctl {units} -n {lines} {'-f' if follow else ''}",
                     warn=True,
@@ -227,12 +229,49 @@ class App(BaseCommand):
             else:
                 self.stdout.output("[yellow]No services found[/yellow]")
 
+    @cappa.command(help="Show the systemd unit file content for the specified service")
+    def cat(
+        self,
+        name: Annotated[str, cappa.Arg(help="Service name")],
+    ):
+        with self.connection() as conn:
+            names = self._resolve_active_systemd_units(name)
+
+            if not names:
+                self.stdout.output("[yellow]No services found[/yellow]")
+                return
+
+            conn.run(f"sudo systemctl cat {' '.join(names)}", pty=True)
+
     def _resolve_active_systemd_units(self, name: str | None) -> list[str]:
+        """
+        Resolve a user-provided name to a list of systemd unit names.
+
+        This method handles various ways to specify services:
+        - ``None``: Returns all active units defined in the configuration.
+        - Process name (e.g., "web"): Returns the service unit(s) for that process,
+          plus any associated socket or timer units.
+        - "socket": Returns the main application socket if enabled.
+        - "timer": Returns all timer units.
+        - Specific unit (e.g., "web.service", "web.socket", "worker.timer"):
+          Returns only that specific unit.
+
+        If the name cannot be resolved, it raises a ``cappa.Exit`` with a list of
+        available valid names.
+        """
         if not name:
             return self.config.active_systemd_units
 
         if name in self.config.processes:
-            return self.config.get_active_unit_names(name)
+            units = self.config.get_active_unit_names(name)
+            process_config = self.config.processes[name]
+            if process_config.socket:
+                units.append(f"{self.config.app_name}.socket")
+            if process_config.timer:
+                service_name = self.config.get_unit_template_name(name)
+                timer_name = f"{service_name.replace('.service', '')}.timer"
+                units.append(timer_name)
+            return units
 
         if name == "socket":
             has_socket = any(config.socket for config in self.config.processes.values())
@@ -242,4 +281,46 @@ class App(BaseCommand):
         if name == "timer":
             return [n for n in self.config.active_systemd_units if n.endswith(".timer")]
 
-        return [name]
+        if name.endswith(".socket"):
+            process_name = name[:-7]
+            if process_name in self.config.processes:
+                if self.config.processes[process_name].socket:
+                    return [f"{self.config.app_name}.socket"]
+                raise cappa.Exit(
+                    f"Process '{process_name}' does not have a socket enabled.", code=1
+                )
+
+        if name.endswith(".timer"):
+            process_name = name[:-6]
+            if process_name in self.config.processes:
+                if self.config.processes[process_name].timer:
+                    service_name = self.config.get_unit_template_name(process_name)
+                    timer_name = f"{service_name.replace('.service', '')}.timer"
+                    return [timer_name]
+                raise cappa.Exit(
+                    f"Process '{process_name}' does not have a timer enabled.", code=1
+                )
+
+        if name.endswith(".service"):
+            process_name = name[:-8]
+            if process_name in self.config.processes:
+                return self.config.get_active_unit_names(process_name)
+
+        options = []
+        if any(p.timer for p in self.config.processes.values()):
+            options.append("timer")
+        if any(p.socket for p in self.config.processes.values()):
+            options.append("socket")
+
+        for process_name, process_config in self.config.processes.items():
+            options.append(process_name)
+            options.append(f"{process_name}.service")
+            if process_config.socket:
+                options.append(f"{process_name}.socket")
+            if process_config.timer:
+                options.append(f"{process_name}.timer")
+
+        raise cappa.Exit(
+            f"Unknown service '{name}'. Available services: {', '.join(options)}",
+            code=1,
+        )

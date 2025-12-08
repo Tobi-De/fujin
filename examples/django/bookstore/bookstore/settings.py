@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "django_tasks",
     "django_tasks.backends.database",
+    "bookstore",
 ]
 
 TASKS = {"default": {"BACKEND": "django_tasks.backends.database.DatabaseBackend"}}

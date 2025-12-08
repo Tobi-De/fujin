@@ -91,7 +91,7 @@ def test_active_systemd_units_property(mock_config):
 
 
 def test_render_systemd_units_filenames(mock_config):
-    units = mock_config.render_systemd_units()
+    units, _ = mock_config.render_systemd_units()
     assert "testapp.service" in units
     assert "testapp-worker@.service" in units
 
@@ -100,14 +100,14 @@ def test_render_systemd_units_with_timer_filenames(mock_config):
     mock_config.processes["cleanup"] = ProcessConfig(
         command="cleanup", timer="OnCalendar=daily"
     )
-    units = mock_config.render_systemd_units()
+    units, _ = mock_config.render_systemd_units()
     assert "testapp-cleanup.timer" in units
     assert "testapp-cleanup.service" in units
 
 
 def test_render_systemd_units_with_socket_filenames(mock_config):
     mock_config.processes["api"] = ProcessConfig(command="api", socket=True)
-    units = mock_config.render_systemd_units()
+    units, _ = mock_config.render_systemd_units()
     assert "testapp.socket" in units
     assert "testapp-api.service" in units
 

@@ -1,9 +1,11 @@
 from unittest.mock import patch, MagicMock
 from fujin.commands.down import Down
+from fujin.commands.deploy import Deploy
 from inline_snapshot import snapshot
 from tests.script_runner import script_runner  # noqa: F401
 import tarfile
 import io
+import pytest
 
 
 def test_down_aborts_if_not_confirmed(mock_connection, get_commands):
@@ -20,43 +22,51 @@ def test_down_command_generation(mock_connection, get_commands):
 
         assert get_commands(mock_connection.mock_calls) == snapshot(
             [
-                """\
-export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && #!/usr/bin/env bash
-set -e
-APP_DIR=/home/testuser/.local/share/fujin/testapp
-APP_NAME=testapp
-if [ -f "$APP_DIR/.version" ]; then
-  CURRENT_VERSION=$(cat "$APP_DIR/.version")
-  CURRENT_BUNDLE="$APP_DIR/.versions/$APP_NAME-$CURRENT_VERSION.tar.gz"
-  if [ -f "$CURRENT_BUNDLE" ]; then
-    TMP_DIR="/tmp/uninstall-$APP_NAME-$CURRENT_VERSION"
-    mkdir -p "$TMP_DIR"
-    if tar -xzf "$CURRENT_BUNDLE" -C "$TMP_DIR"; then
-      if [ -f "$TMP_DIR/uninstall.sh" ]; then
-        echo "Running uninstall script for version $CURRENT_VERSION..."
-        chmod +x "$TMP_DIR/uninstall.sh"
-        bash "$TMP_DIR/uninstall.sh"
-      else
-        echo "Warning: uninstall.sh not found in bundle."
-        if [ -z "$FORCE" ]; then exit 1; fi
-      fi
-    else
-      echo "Warning: Failed to extract bundle."
-      if [ -z "$FORCE" ]; then exit 1; fi
-    fi
-    rm -rf "$TMP_DIR"
-  fi
-fi
-sudo systemctl disable --now testapp.service testapp-worker@1.service testapp-worker@2.service 2>/dev/null || true
-echo "Removing application directory..."
-rm -rf "$APP_DIR"\
-"""
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && cat /home/testuser/.local/share/fujin/testapp/.version',
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && test -f /home/testuser/.local/share/fujin/testapp/.versions/testapp-.tar.gz',
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mkdir -p /tmp/uninstall-testapp- && tar --overwrite -xzf /home/testuser/.local/share/fujin/testapp/.versions/testapp-.tar.gz -C /tmp/uninstall-testapp- && cd /tmp/uninstall-testapp- && chmod +x uninstall.sh && bash ./uninstall.sh && cd / && rm -rf /tmp/uninstall-testapp-rm -rf /home/testuser/.local/share/fujin/testapp',
             ]
         )
 
 
-def test_down_script_execution(mock_connection, script_runner, mock_config):
-    # Setup environment
+@pytest.fixture
+def setup_distfile(tmp_path, mock_config):
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    dist_file = dist_dir / f"testapp-{mock_config.version}.whl"
+    dist_file.touch()
+    mock_config.distfile = str(dist_dir / "testapp-{version}.whl")
+    return dist_file
+
+
+def test_down_script_execution(
+    mock_connection,
+    script_runner,
+    mock_config,
+    capture_bundle,
+    setup_distfile,
+):
+    # 1. Deploy first to generate the bundle
+    mock_config.app_name = "testapp"
+    mock_config.version = "0.1.0"
+
+    captured_command = []
+
+    def run_side_effect(cmd, **kwargs):
+        captured_command.append(cmd)
+        if "sha256sum" in cmd:
+            return "checksum123\n", True
+        return "", True
+
+    mock_connection.run.side_effect = run_side_effect
+
+    with patch("hashlib.file_digest") as mock_digest:
+        mock_digest.return_value.hexdigest.return_value = "checksum123"
+        with patch("subprocess.run"):
+            deploy = Deploy()
+            deploy()
+
+    # 2. Setup environment for Down
     app_dir = script_runner.root / "home/testuser/.local/share/fujin/testapp"
     app_dir.mkdir(parents=True)
     (app_dir / ".version").write_text("0.1.0")
@@ -64,54 +74,148 @@ def test_down_script_execution(mock_connection, script_runner, mock_config):
     versions_dir = app_dir / ".versions"
     versions_dir.mkdir()
 
-    # Create a fake bundle with uninstall script
-    bundle_path = versions_dir / "testapp-0.1.0.tar.gz"
+    # Copy the generated bundle to the "remote" location
+    bundle_name = f"testapp-0.1.0.tar.gz"
+    generated_bundle = capture_bundle / "deploy.tar.gz"
+    remote_bundle = versions_dir / bundle_name
+    remote_bundle.write_bytes(generated_bundle.read_bytes())
 
-    uninstall_script = """#!/bin/bash
-echo "Uninstalling..."
-# Create a marker to prove we ran
-touch uninstall_ran.marker
-"""
+    # Mock system commands
+    script_runner._create_mock("userdel", "echo userdel $@")
 
-    # Create tarball in memory
-    bio = io.BytesIO()
-    with tarfile.open(fileobj=bio, mode="w:gz") as tar:
-        info = tarfile.TarInfo("uninstall.sh")
-        info.size = len(uninstall_script)
-        tar.addfile(info, io.BytesIO(uninstall_script.encode()))
+    # Setup systemd units to be removed
+    systemd_dir = script_runner.root / "etc/systemd/system"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    (systemd_dir / "testapp.service").touch()
+    (systemd_dir / "testapp-worker@.service").touch()
 
-    bundle_path.write_bytes(bio.getvalue())
+    # Mock systemctl list-unit-files output for uninstall script
+    script_runner._create_mock(
+        "systemctl",
+        """
+if [[ "$1" == "list-unit-files" ]]; then
+    echo "testapp.service enabled"
+    echo "testapp-worker@.service enabled"
+else
+    echo "systemctl $@" >> """
+        + str(script_runner.logs / "systemctl.log")
+        + """
+fi
+""",
+    )
 
-    # Mock connection to capture the command
+    # 3. Run Down
+    with patch("rich.prompt.Confirm.ask", return_value=True):
+        down = Down(full=False)
+        down()
+
+    # 4. Verify uninstall script execution
+    # Extract and run the script manually as before
+    with tarfile.open(remote_bundle, "r:gz") as tar:
+        extracted_script = tar.extractfile("./uninstall.sh").read().decode()
+
+    result = script_runner.run(extracted_script)
+    result.assert_success()
+
+    # Verify systemd units were stopped/disabled
+    log = result.get_log("systemctl")
+    assert "disable --now testapp.service" in log
+    assert "testapp-worker@1.service" in log
+    assert "testapp-worker@2.service" in log
+
+    # Verify Caddy was NOT removed (full=False)
+    caddy_cmds = "sudo systemctl stop caddy"
+    assert not any(caddy_cmds in cmd for cmd in captured_command)
+
+
+def test_down_full_script_execution(
+    mock_connection,
+    script_runner,
+    mock_config,
+    capture_bundle,
+    setup_distfile,
+):
+    # 1. Deploy first to generate the bundle
+    mock_config.app_name = "testapp"
+    mock_config.version = "0.1.0"
+
     captured_command = []
 
     def run_side_effect(cmd, **kwargs):
         captured_command.append(cmd)
+        if "sha256sum" in cmd:
+            return "checksum123\n", True
         return "", True
 
     mock_connection.run.side_effect = run_side_effect
 
-    # Mock system commands that might be dangerous or fail
+    with patch("hashlib.file_digest") as mock_digest:
+        mock_digest.return_value.hexdigest.return_value = "checksum123"
+        with patch("subprocess.run"):
+            deploy = Deploy()
+            deploy()
+
+    # 2. Setup environment for Down
+    app_dir = script_runner.root / "home/testuser/.local/share/fujin/testapp"
+    app_dir.mkdir(parents=True)
+    (app_dir / ".version").write_text("0.1.0")
+
+    versions_dir = app_dir / ".versions"
+    versions_dir.mkdir()
+
+    # Copy the generated bundle to the "remote" location
+    bundle_name = f"testapp-0.1.0.tar.gz"
+    generated_bundle = capture_bundle / "deploy.tar.gz"
+    remote_bundle = versions_dir / bundle_name
+    remote_bundle.write_bytes(generated_bundle.read_bytes())
+
+    # Mock system commands
     script_runner._create_mock("userdel", "echo userdel $@")
 
-    # Run with full=True to test service stopping as well
+    # Setup systemd units
+    systemd_dir = script_runner.root / "etc/systemd/system"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    (systemd_dir / "testapp.service").touch()
+
+    # Mock systemctl
+    script_runner._create_mock(
+        "systemctl",
+        """
+if [[ "$1" == "list-unit-files" ]]; then
+    echo "testapp.service enabled"
+else
+    echo "systemctl $@" >> """
+        + str(script_runner.logs / "systemctl.log")
+        + """
+fi
+""",
+    )
+
+    # 3. Run Down with full=True
     with patch("rich.prompt.Confirm.ask", return_value=True):
         down = Down(full=True)
         down()
 
-    # Extract the script from the command
-    script_content = captured_command[0]
+    # 4. Verify uninstall script execution
+    with tarfile.open(remote_bundle, "r:gz") as tar:
+        extracted_script = tar.extractfile("./uninstall.sh").read().decode()
 
-    result = script_runner.run(script_content)
+    result = script_runner.run(extracted_script)
     result.assert_success()
 
-    # Verify app dir is removed
-    assert not app_dir.exists()
+    # Verify systemd units were stopped/disabled
+    log = result.get_log("systemctl")
+    assert "disable --now testapp.service" in log
 
-    # Verify uninstall script ran
-    assert (script_runner.root / "uninstall_ran.marker").exists()
-
-    # Verify system services were stopped (full=True behavior)
-    systemctl_log = result.get_log("systemctl")
-    assert "stop caddy" in systemctl_log
-    assert "disable caddy" in systemctl_log
+    # Verify Caddy WAS removed (full=True)
+    caddy_cmds = "&& ".join(
+        [
+            "sudo systemctl stop caddy",
+            "sudo systemctl disable caddy",
+            "sudo rm -f /usr/bin/caddy",
+            "sudo rm -f /etc/systemd/system/caddy.service",
+            "sudo userdel caddy",
+            "sudo rm -rf /etc/caddy",
+        ]
+    )
+    assert any(caddy_cmds in cmd for cmd in captured_command)
