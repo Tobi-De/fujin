@@ -1,7 +1,18 @@
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from contextlib import contextmanager
 from fujin.config import Config, HostConfig, Webserver, ProcessConfig, InstallationMode
+
+
+@pytest.fixture
+def capture_bundle(tmp_path):
+    @contextmanager
+    def _mock_temp_dir():
+        yield str(tmp_path)
+
+    with patch("tempfile.TemporaryDirectory", side_effect=_mock_temp_dir):
+        yield tmp_path
 
 
 @pytest.fixture
@@ -29,17 +40,16 @@ def mock_config():
 
 @pytest.fixture
 def mock_connection():
-    with patch("fujin.commands._base.host_connection") as mock:
-        conn = MagicMock()
-        # Setup context manager behavior for the connection itself
-        mock.return_value.__enter__.return_value = conn
+    conn = MagicMock()
+    conn.run.return_value = ("", True)
+    return conn
 
-        # Setup context manager behavior for conn.cd() and conn.prefix()
-        # These methods return context managers that yield the connection (or None)
-        conn.cd.return_value.__enter__.return_value = conn
-        conn.prefix.return_value.__enter__.return_value = conn
 
-        yield conn
+@pytest.fixture(autouse=True)
+def patch_host_connection(mock_connection):
+    with patch("fujin.commands.BaseCommand.connection") as mock_ctx:
+        mock_ctx.return_value.__enter__.return_value = mock_connection
+        yield
 
 
 @pytest.fixture
@@ -59,12 +69,26 @@ def get_commands():
     def _get(mock_calls):
         commands = []
         for c in mock_calls:
-            name = c[0]
-            if name == "run":
-                if c.args:
-                    commands.append(str(c.args[0]))
-                elif "command" in c.kwargs:
-                    commands.append(str(c.kwargs["command"]))
+            # Filter out non-run calls if using mock_connection.mock_calls
+            if c[0] and c[0] != "run":
+                continue
+
+            if c.args:
+                cmd = str(c.args[0])
+            elif "command" in c.kwargs:
+                cmd = str(c.kwargs["command"])
+            else:
+                continue
+
+            env_prefix = "/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"
+            full_command = f'export PATH="{env_prefix}" && {cmd}'
+            commands.append(full_command)
         return commands
 
     return _get
+
+
+@pytest.fixture(autouse=True)
+def silence_command_output():
+    with patch("fujin.commands.BaseCommand.stdout"):
+        yield

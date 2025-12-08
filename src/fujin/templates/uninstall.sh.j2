@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -e
+
+APP_NAME="{{ app_name }}"
+WEBSERVER_ENABLED="{{ webserver_enabled | lower }}"
+CADDY_CONFIG_PATH="{{ caddy_config_path }}"
+VALID_UNITS={{ units.valid }}
+{% if units.regular_len > 0 %}
+REGULAR_UNITS={{ units.regular }}
+{% endif %}
+{% if units.template_len > 0 %}
+TEMPLATE_UNITS={{ units.template }}
+{% endif %}
+
+log() {
+    echo "==> $1"
+}
+
+log "Uninstalling application..."
+
+log "Stopping and disabling services..."
+{% if units.regular_len > 0 %}
+    sudo systemctl disable --now "${REGULAR_UNITS[@]}" --quiet || true
+{% endif %}
+
+{% if units.template_len > 0 %}
+    sudo systemctl disable "${TEMPLATE_UNITS[@]}" --quiet || true
+{% endif %}
+
+log "Removing systemd unit files..."
+for UNIT in "${VALID_UNITS[@]}"; do
+    # Safety check
+    if [[ "$UNIT" != ${APP_NAME}* ]]; then
+            echo "Refusing to remove non-app unit: $UNIT" >&2
+            continue
+    fi
+    sudo rm -f "/etc/systemd/system/$UNIT"
+done
+
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+
+if [ "$WEBSERVER_ENABLED" = "true" ]; then
+    log "Removing Caddy configuration..."
+    sudo rm -f "$CADDY_CONFIG_PATH"
+    sudo systemctl reload caddy
+fi
+
+log "Uninstall completed."

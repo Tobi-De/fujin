@@ -3,10 +3,11 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import shlex
 from pathlib import Path
 
 import msgspec
-from jinja2 import Environment, FileSystemLoader, TemplateNotFound
+from jinja2 import Environment, FileSystemLoader, Template, TemplateNotFound
 
 from .errors import ImproperlyConfiguredError
 
@@ -46,6 +47,7 @@ class ProcessConfig(msgspec.Struct):
     replicas: int = 1
     socket: bool = False
     timer: str | None = None
+    context: dict[str, str] = msgspec.field(default_factory=dict)
 
     def __post_init__(self):
         if self.socket and self.timer:
@@ -56,6 +58,9 @@ class ProcessConfig(msgspec.Struct):
             raise ImproperlyConfiguredError(
                 "A process cannot have replicas > 1 and either 'socket' or 'timer' enabled."
             )
+
+        if self.replicas < 1:
+            raise ImproperlyConfiguredError("A process must have at least 1 replica.")
 
 
 class Config(msgspec.Struct, kw_only=True):
@@ -85,6 +90,12 @@ class Config(msgspec.Struct, kw_only=True):
 
         if len(self.processes) == 0:
             raise ImproperlyConfiguredError("At least one process must be defined")
+
+        for process_name in self.processes:
+            if process_name.strip() == "":
+                raise ImproperlyConfiguredError("Process names cannot be empty strings")
+            elif process_name.count(" ") > 0:
+                raise ImproperlyConfiguredError("Process names cannot contain spaces")
 
         if "web" not in self.processes and self.webserver.enabled:
             raise ImproperlyConfiguredError(
@@ -148,12 +159,17 @@ class Config(msgspec.Struct, kw_only=True):
                 services.append(f"{service_name.replace('.service', '')}.timer")
         return services
 
-    def render_systemd_units(self) -> dict[str, str]:
-        package_templates = (
-            Path(importlib.util.find_spec("fujin").origin).parent / "templates"
-        )
+    def _template_env(self) -> Environment:
+        package_templates = self._package_templates_path()
         search_paths = [self.local_config_dir, package_templates]
-        env = Environment(loader=FileSystemLoader(search_paths))
+        return Environment(loader=FileSystemLoader(search_paths))
+
+    def _package_templates_path(self) -> Path:
+        return Path(importlib.util.find_spec("fujin").origin).parent / "templates"
+
+    def render_systemd_units(self) -> tuple[dict[str, str], list[str]]:
+        env = self._template_env()
+        package_templates = self._package_templates_path()
 
         context = {
             "app_name": self.app_name,
@@ -162,19 +178,31 @@ class Config(msgspec.Struct, kw_only=True):
         }
 
         files = {}
+        user_template_units = []
+
+        def _get_template(name: str, default: str) -> tuple[Template, bool]:
+            try:
+                template = env.get_template(name)
+                is_user_template = Path(template.filename).parent != package_templates
+                return template, is_user_template
+            except TemplateNotFound:
+                template = env.get_template(default)
+                return template, False
+
         for name, config in self.processes.items():
             service_name = self.get_unit_template_name(name)
             process_name = service_name.replace(".service", "")
             command = config.command
             process_config = config
 
-            # Try to find a specific template for the process, otherwise use default
-            try:
-                template = env.get_template(f"{name}.service.j2")
-            except TemplateNotFound:
-                template = env.get_template("default.service.j2")
+            template, is_user_template = _get_template(
+                f"{name}.service.j2", "default.service.j2"
+            )
+            if is_user_template:
+                user_template_units.append(service_name)
 
             body = template.render(
+                context=process_config.context,
                 **context,
                 command=command,
                 process_name=process_name,
@@ -184,40 +212,93 @@ class Config(msgspec.Struct, kw_only=True):
 
             if process_config.socket:
                 socket_name = f"{self.app_name}.socket"
-                try:
-                    template = env.get_template(f"{name}.socket.j2")
-                except TemplateNotFound:
-                    template = env.get_template("default.socket.j2")
-                body = template.render(**context)
+                template, is_user_template = _get_template(
+                    f"{name}.socket.j2", "default.socket.j2"
+                )
+                if is_user_template:
+                    user_template_units.append(socket_name)
+
+                body = template.render(context=process_config.context, **context)
                 files[socket_name] = body
 
             if process_config.timer:
                 timer_name = f"{service_name.replace('.service', '')}.timer"
-                try:
-                    template = env.get_template(f"{name}.timer.j2")
-                except TemplateNotFound:
-                    template = env.get_template("default.timer.j2")
+                template, is_user_template = _get_template(
+                    f"{name}.timer.j2", "default.timer.j2"
+                )
+                if is_user_template:
+                    user_template_units.append(timer_name)
+
                 body = template.render(
+                    context=process_config.context,
                     **context,
                     process_name=process_name,
                     process=process_config,
                 )
                 files[timer_name] = body
 
-        return files
+        return files, user_template_units
 
     def render_caddyfile(self) -> str:
-        package_templates = (
-            Path(importlib.util.find_spec("fujin").origin).parent / "templates"
-        )
-        search_paths = [self.local_config_dir, package_templates]
-        env = Environment(loader=FileSystemLoader(search_paths))
+        env = self._template_env()
         template = env.get_template("Caddyfile.j2")
         return template.render(
             domain_name=self.host.domain_name,
             upstream=self.webserver.upstream,
             statics=self.webserver.statics,
         )
+
+    def build_context(
+        self,
+        *,
+        distfile_name: str,
+        user_units: list[str],
+        new_units: dict[str, str],
+    ) -> dict:
+        units_valid = sorted(set(self.active_systemd_units) | set(new_units.keys()))
+        regular_units = [
+            u for u in self.active_systemd_units if not u.endswith("@.service")
+        ]
+        template_units = [
+            u for u in self.active_systemd_units if u.endswith("@.service")
+        ]
+
+        def to_bash_array(values: list[str]) -> str:
+            return "(" + " ".join(shlex.quote(v) for v in values) + ")"
+
+        return {
+            "app_name": self.app_name,
+            "app_dir": self.app_dir,
+            "version": self.version,
+            "installation_mode": self.installation_mode.value,
+            "python_version": self.python_version,
+            "requirements": bool(self.requirements),
+            "distfile_name": distfile_name,
+            "release_command": self.release_command,
+            "webserver_enabled": self.webserver.enabled,
+            "caddy_config_path": self.caddy_config_path,
+            "app_bin": self.app_bin,
+            "units": {
+                "active": to_bash_array(self.active_systemd_units),
+                "valid": to_bash_array(units_valid),
+                "regular": to_bash_array(regular_units),
+                "regular_len": len(regular_units),
+                "template": to_bash_array(template_units),
+                "template_len": len(template_units),
+                "user": to_bash_array(user_units),
+                "user_len": len(user_units),
+            },
+        }
+
+    def render_install_script(self, *, context: dict) -> str:
+        env = self._template_env()
+        template = env.get_template("install.sh.j2")
+        return template.render(**context)
+
+    def render_uninstall_script(self, *, context: dict) -> str:
+        env = self._template_env()
+        template = env.get_template("uninstall.sh.j2")
+        return template.render(**context)
 
     @property
     def caddy_config_path(self) -> str:
@@ -234,6 +315,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
     password_env: str | None = None
     ssh_port: int = 22
     _key_filename: str | None = msgspec.field(name="key_filename", default=None)
+    key_passphrase_env: str | None = None
 
     def __post_init__(self):
         if self._env_file and self.env_content:
@@ -259,10 +341,21 @@ class HostConfig(msgspec.Struct, kw_only=True):
         if not self.password_env:
             return
         password = os.getenv(self.password_env)
-        if not password:
+        if password is None:
             msg = f"Env {self.password_env} can not be found"
             raise ImproperlyConfiguredError(msg)
         return password
+
+    @property
+    def key_passphrase(self) -> str | None:
+        if not self.key_passphrase_env:
+            return None
+        value = os.getenv(self.key_passphrase_env)
+        if value is None:
+            raise ImproperlyConfiguredError(
+                f"Env {self.key_passphrase_env} can not be found"
+            )
+        return value
 
 
 class Webserver(msgspec.Struct):

@@ -1,6 +1,8 @@
 import shlex
 import sys
+import logging
 from pathlib import Path
+from typing import Annotated
 
 import cappa
 import fujin
@@ -23,6 +25,19 @@ else:
     import tomli as tomllib
 
 
+def _setup_logging(verbose):
+    verbose = int(verbose)
+    if verbose == 0:
+        level = logging.WARN
+    elif verbose == 1:
+        level = logging.INFO
+    else:
+        level = logging.DEBUG
+    logging.basicConfig(level=level, format="%(message)s")
+    logging.getLogger("markdown_it").setLevel(logging.WARNING)
+    return verbose
+
+
 @cappa.command(help="Deployment of python web apps in a breeze :)")
 class Fujin:
     subcommands: cappa.Subcommands[
@@ -38,6 +53,16 @@ class Fujin:
         | Prune
         | Printenv
     ]
+    verbose: Annotated[
+        int,
+        cappa.Arg(
+            short=None,
+            long="--verbose",
+            help="Enable verbose logging",
+            action=_setup_logging,
+            choices=[0, 1, 2],
+        ),
+    ] = 0
 
 
 def main():
