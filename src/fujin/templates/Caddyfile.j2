@@ -1,10 +1,9 @@
 {{ domain_name }} {
-	{% for path, directory in statics.items() %}
+	{%- for path, directory in statics.items() %}
 	handle_path {{ path }} {
 		root * {{ directory }}
 		file_server
 	}
-	{% endfor %}
-
+	{%- endfor %}
 	reverse_proxy {{ upstream }}
 }
