@@ -585,12 +585,9 @@ example.com {
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
 [Unit]
 Description=testapp
-
 After=network.target
 
 [Service]
-#Type=notify
-#NotifyAccess=main
 User=testuser
 Group=testuser
 RuntimeDirectory=testapp
@@ -860,12 +857,9 @@ example.com {
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
 [Unit]
 Description=myapp
-
 After=network.target
 
 [Service]
-#Type=notify
-#NotifyAccess=main
 User=testuser
 Group=testuser
 RuntimeDirectory=myapp
