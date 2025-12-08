@@ -8,7 +8,7 @@ Group={{ user }}
 WorkingDirectory={{ app_dir }}
 ExecStart={{ app_dir }}/{{ command }}
 EnvironmentFile={{ app_dir }}/.env
-Restart=always
+Restart={% if process.timer %}no{% else %}always{% endif %}
 
 [Install]
 WantedBy=multi-user.target

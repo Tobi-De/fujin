@@ -5,14 +5,14 @@ from inline_snapshot import snapshot
 
 def test_rollback(mock_connection, get_commands):
     def run_side_effect(command, **kwargs):
-        mock = MagicMock()
-        if "sed -n '2,$p' .versions" in command:
-            mock.stdout = "0.0.9\n0.0.8"
-        elif "head -n 1 .versions" in command:
-            mock.stdout = "0.1.0"
-        else:
-            mock.stdout = ""
-        return mock
+        stdout = ""
+        if "ls -1t" in command:
+            stdout = "testapp-0.1.0.tar.gz\ntestapp-0.0.9.tar.gz\ntestapp-0.0.8.tar.gz"
+        elif "cat" in command and ".version" in command:
+            stdout = "0.1.0"
+        elif "test -f" in command:
+            return "", True
+        return stdout, True
 
     mock_connection.run.side_effect = run_side_effect
 
@@ -25,25 +25,10 @@ def test_rollback(mock_connection, get_commands):
 
         assert get_commands(mock_connection.mock_calls) == snapshot(
             [
-                "sed -n '2,$p' .versions",
-                "head -n 1 .versions",
-                "mkdir -p /home/testuser/.local/share/fujin/testapp/v0.0.9",
-                """\
-echo 'set -a  # Automatically export all variables
-source .env
-set +a  # Stop automatic export
-export UV_COMPILE_BYTECODE=1
-export UV_PYTHON=python3.12
-export PATH=".venv/bin:$PATH"' > /home/testuser/.local/share/fujin/testapp/.appenv\
-""",
-                "sudo rm -rf .venv",
-                "uv python install 3.12",
-                "uv venv",
-                "uv pip install /home/testuser/.local/share/fujin/testapp/v0.0.9/testapp-0.0.9.whl",
-                "head -n 1 .versions",
-                "sed -i '1i 0.0.9' .versions",
-                "sudo systemctl restart testapp.service testapp-worker@1.service testapp-worker@2.service",
-                "rm -r v0.1.0",
-                "sed -i '1,/0.0.9/{/0.0.9/!d}' .versions",
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && ls -1t /home/testuser/.local/share/fujin/testapp/.versions',
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && cat /home/testuser/.local/share/fujin/testapp/.version',
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && test -f /home/testuser/.local/share/fujin/testapp/.versions/testapp-0.1.0.tar.gz',
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mkdir -p /tmp/uninstall-testapp-0.1.0 && tar --overwrite -xzf /home/testuser/.local/share/fujin/testapp/.versions/testapp-0.1.0.tar.gz -C /tmp/uninstall-testapp-0.1.0 && cd /tmp/uninstall-testapp-0.1.0 && chmod +x uninstall.sh && bash ./uninstall.sh && cd / && rm -rf /tmp/uninstall-testapp-0.1.0',
+                "export PATH=\"/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH\" && mkdir -p /tmp/testapp-0.0.9 && tar --overwrite -xzf /home/testuser/.local/share/fujin/testapp/.versions/testapp-0.0.9.tar.gz -C /tmp/testapp-0.0.9 && cd /tmp/testapp-0.0.9 && chmod +x install.sh && bash ./install.sh || (echo 'install failed' >&2; exit 1) && cd / && rm -rf /tmp/testapp-0.0.9 && echo '==> Cleaning up newer versions...' && cd /home/testuser/.local/share/fujin/testapp/.versions && ls -1t | awk '/testapp-0.0.9\\.tar\\.gz/{exit} {print}' | xargs -r rm",
             ]
         )

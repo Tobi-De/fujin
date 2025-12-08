@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import secrets
-from functools import partial
 from typing import Annotated
 
 import cappa
@@ -15,41 +14,58 @@ class Server(BaseCommand):
     @cappa.command(help="Display information about the host system")
     def info(self):
         with self.connection() as conn:
-            result = conn.run(f"command -v fastfetch", warn=True, hide=True)
-            if result.ok:
+            _, result_ok = conn.run(f"command -v fastfetch", warn=True, hide=True)
+            if result_ok:
                 conn.run("fastfetch", pty=True)
             else:
-                self.stdout.output(conn.run("cat /etc/os-release", hide=True).stdout)
+                self.stdout.output(conn.run("cat /etc/os-release", hide=True)[0])
 
     @cappa.command(help="Setup uv, web proxy, and install necessary dependencies")
     def bootstrap(self):
         with self.connection() as conn:
-            conn.run("sudo apt update && sudo apt upgrade -y", pty=True)
-            conn.run("sudo apt install -y sqlite3 curl rsync", pty=True)
-            result = conn.run("command -v uv", warn=True)
-            if not result.ok:
-                conn.run("curl -LsSf https://astral.sh/uv/install.sh | sh")
-                conn.run("uv tool update-shell")
+            self.stdout.output("[blue]Bootstrapping server...[/blue]")
+            _, server_update_ok = conn.run(
+                "sudo apt update && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y && sudo apt install -y sqlite3 curl rsync",
+                pty=True,
+                warn=True,
+            )
+            if not server_update_ok:
+                self.stdout.output(
+                    "[red]Warning: Failed to update and upgrade the server packages.[/red]"
+                )
+            _, result_ok = conn.run("command -v uv", warn=True)
+            if not result_ok:
+                self.output.output("[blue]Installing uv tool...[/blue]")
+                conn.run(
+                    "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool update-shell"
+                )
             conn.run("uv tool install fastfetch-bin-edge")
             if self.config.webserver.enabled:
-                installed = caddy.install(conn)
-                if not installed:
+                self.stdout.output("[blue]Setting up Caddy web server...[/blue]")
+
+                _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
+                if result_ok:
                     self.stdout.output("[yellow]Caddy is already installed.[/yellow]")
                     self.stdout.output(
                         "Please ensure your Caddyfile includes the following line to load Fujin configurations:"
                     )
                     self.stdout.output("[bold]import conf.d/*.caddy[/bold]")
+                else:
+                    version = caddy.get_latest_gh_tag()
+                    self.stdout.output(
+                        f"[blue]Installing Caddy version {version}...[/blue]"
+                    )
+                    commands = caddy.get_install_commands(version)
+                    conn.run(" && ".join(commands), pty=True)
+
             self.stdout.output(
                 "[green]Server bootstrap completed successfully![/green]"
             )
 
-    @cappa.command(
-        help="Execute an arbitrary command on the server, optionally in interactive mode"
-    )
+    @cappa.command(help="Execute an arbitrary command on the server")
     def exec(
         self,
         command: str,
-        interactive: Annotated[bool, cappa.Arg(default=False, short="-i")],
         appenv: Annotated[
             bool,
             cappa.Arg(
@@ -59,12 +75,13 @@ class Server(BaseCommand):
             ),
         ],
     ):
-        context = self.app_environment() if appenv else self.connection()
-        with context as conn:
-            if interactive:
-                conn.run(command, pty=interactive, warn=True)
-            else:
-                self.stdout.output(conn.run(command, hide=True).stdout)
+        with self.connection() as conn:
+            command = (
+                f"cd {self.config.app_dir} && source .appenv && {command}"
+                if appenv
+                else command
+            )
+            conn.run(command, pty=True)
 
     @cappa.command(
         name="create-user", help="Create a new user with sudo and ssh access"
@@ -72,21 +89,27 @@ class Server(BaseCommand):
     def create_user(
         self,
         name: str,
-        with_password: Annotated[bool, cappa.Arg(long="--with-password")] = False,
+        with_password: Annotated[
+            bool, cappa.Arg(long="--with-password")
+        ] = False,  # no short arg to force explicitness
     ):
         with self.connection() as conn:
-            run_pty = partial(conn.run, pty=True)
-            run_pty(
+            commands = [
                 f"sudo adduser --disabled-password --gecos '' {name}",
-            )
-            run_pty(f"sudo mkdir -p /home/{name}/.ssh")
-            run_pty(f"sudo cp ~/.ssh/authorized_keys /home/{name}/.ssh/")
-            run_pty(f"sudo chown -R {name}:{name} /home/{name}/.ssh")
+                f"sudo mkdir -p /home/{name}/.ssh",
+                f"sudo cp ~/.ssh/authorized_keys /home/{name}/.ssh/",
+                f"sudo chown -R {name}:{name} /home/{name}/.ssh",
+            ]
             if with_password:
                 password = secrets.token_hex(8)
-                run_pty(f"echo '{name}:{password}' | sudo chpasswd")
+                commands.append(f"echo '{name}:{password}' | sudo chpasswd")
                 self.stdout.output(f"[green]Generated password: [/green]{password}")
-            run_pty(f"sudo chmod 700 /home/{name}/.ssh")
-            run_pty(f"sudo chmod 600 /home/{name}/.ssh/authorized_keys")
-            run_pty(f"echo '{name} ALL=(ALL) NOPASSWD:ALL' | sudo tee -a /etc/sudoers")
+            commands.extend(
+                [
+                    f"sudo chmod 700 /home/{name}/.ssh",
+                    f"sudo chmod 600 /home/{name}/.ssh/authorized_keys",
+                    f"echo '{name} ALL=(ALL) NOPASSWD:ALL' | sudo tee -a /etc/sudoers",
+                ]
+            )
+            conn.run(" && ".join(commands), pty=True)
             self.stdout.output(f"[green]New user {name} created successfully![/green]")

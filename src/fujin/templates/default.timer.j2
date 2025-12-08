@@ -4,6 +4,7 @@ Description=Timer for {{ process_name }}
 [Timer]
 OnCalendar={{ process.timer }}
 Unit={{ process_name }}.service
+Persistent=true
 
 [Install]
 WantedBy=timers.target

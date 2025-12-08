@@ -19,6 +19,7 @@ shell = "server exec --appenv -i bash"
 [processes]
 web = { command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -" }
 worker = { command = ".venv/bin/bookstore db_worker", replicas = 2 }
+health = { command = ".venv/bin/bookstore health", timer = "*:*:00" }
 
 # [host]
 # domain_name = "localhost"
@@ -28,7 +29,7 @@ worker = { command = ".venv/bin/bookstore db_worker", replicas = 2 }
 # ssh_port = 2222
 
 [host]
-domain_name = "test.oluwatobi.dev"
+domain_name = "book.13.204.64.39.nip.io"
 envfile = ".env.prod"
 user = "ubuntu"
 key_filename = "/var/home/tobi/bluefin.pem"

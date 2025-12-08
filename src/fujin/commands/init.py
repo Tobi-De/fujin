@@ -11,7 +11,7 @@ import tomli_w
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
-from fujin.config import tomllib, Config
+from fujin.config import tomllib
 
 
 @cappa.command(help="Generate a sample configuration file")
@@ -96,7 +96,7 @@ def simple_config(app_name) -> dict:
                 "socket": True,
             }
         },
-        "aliases": {"shell": "server exec --appenv -i bash"},
+        "aliases": {"shell": "app shell"},
         "host": {
             "user": "root",
             "domain_name": f"{app_name}.com",
@@ -140,19 +140,19 @@ def falco_config(app_name: str) -> dict:
     config = simple_config(app_name)
     config.update(
         {
-            "release_command": f"{config['app']} setup",
+            "release_command": f"{app_name} setup",
             "processes": {
-                "web": {"command": f".venv/bin/{config['app']} prodserver"},
-                "worker": {"command": f".venv/bin/{config['app']} db_worker"},
+                "web": {"command": f".venv/bin/{app_name} prodserver"},
+                "worker": {"command": f".venv/bin/{app_name} db_worker"},
             },
             "webserver": {
                 "upstream": "localhost:8000",
             },
             "aliases": {
-                "console": "app exec -i shell_plus",
-                "dbconsole": "app exec -i dbshell",
+                "console": f"app shell '{app_name} shell'",
+                "dbconsole": f"app shell '{app_name} dbshell'",
                 "print_settings": "app exec print_settings --format=pprint",
-                "shell": "server exec --appenv -i bash",
+                "shell": "app shell",
             },
             "host": {
                 "user": "root",
@@ -176,7 +176,7 @@ def binary_config(app_name: str) -> dict:
         "release_command": f"{app_name} migrate",
         "installation_mode": InstallationMode.BINARY,
         "processes": {"web": {"command": f"{app_name} prodserver"}},
-        "aliases": {"shell": "server exec --appenv -i bash"},
+        "aliases": {"shell": "app shell"},
         "host": {
             "user": "root",
             "domain_name": f"{app_name}.com",

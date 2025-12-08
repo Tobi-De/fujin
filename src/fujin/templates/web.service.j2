@@ -2,14 +2,16 @@
 # Inspiration was taken from here https://docs.gunicorn.org/en/stable/deploy.html#systemd
 [Unit]
 Description={{ process_name }}
-{% if process.socket %}
+{%- if process.socket %}
 Requires={{ app_name }}.socket
-{% endif %}
+{%- endif %}
 After=network.target
 
 [Service]
-#Type=notify
-#NotifyAccess=main
+{%- if context.notify %}
+Type=notify
+NotifyAccess=main
+{%- endif %}
 User={{ user }}
 Group={{ user }}
 RuntimeDirectory={{ app_name }}

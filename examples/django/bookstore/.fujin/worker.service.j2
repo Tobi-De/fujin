@@ -1,0 +1,14 @@
+# All options are documented here https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
+[Unit]
+Description={{ process_name }} -  custom worker process for {{ app_name }}
+
+[Service]
+User={{ user }}
+Group={{ user }}
+WorkingDirectory={{ app_dir }}
+ExecStart={{ app_dir }}/{{ command }}
+EnvironmentFile={{ app_dir }}/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

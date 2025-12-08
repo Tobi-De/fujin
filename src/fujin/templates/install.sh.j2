@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -e
+
+APP_NAME="{{ app_name }}"
+APP_DIR="{{ app_dir }}"
+VERSION="{{ version }}"
+INSTALLATION_MODE="{{ installation_mode }}"
+PYTHON_VERSION="{{ python_version }}"
+REQUIREMENTS="{{ requirements | lower }}"
+DISTFILE_NAME="{{ distfile_name }}"
+RELEASE_COMMAND="{{ release_command or '' }}"
+WEBSERVER_ENABLED="{{ webserver_enabled | lower }}"
+CADDY_CONFIG_PATH="{{ caddy_config_path }}"
+APP_BIN="{{ app_bin }}"
+ACTIVE_UNITS={{ units.active }}
+VALID_UNITS={{ units.valid }}
+{% if units.user_len > 0 %}
+USER_UNITS={{ units.user }}
+{% endif %}
+
+log() {
+    echo "==> $1"
+}
+
+contains_exact() {
+    local needle="$1"; shift
+    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
+    return 1
+}
+
+BUNDLE_DIR=$(pwd)
+
+log "Setting up directories..."
+mkdir -p "$APP_DIR"
+mv .env "$APP_DIR/.env"
+
+log "Installing application..."
+cd "$APP_DIR" || exit 1
+
+# trap to report failures
+trap 'echo "ERROR: install failed at $(date)" >&2; echo "Working dir: $BUNDLE_DIR" >&2; exit 1' ERR
+
+if [ "$INSTALLATION_MODE" = "python-package" ]; then
+    # Python package installation
+    log "Installing Python package..."
+    cat <<EOF > "$APP_DIR/.appenv"
+set -a
+source .env
+set +a
+export UV_COMPILE_BYTECODE=1
+export UV_PYTHON=python$PYTHON_VERSION
+export PATH=".venv/bin:\$PATH"
+EOF
+    log "Syncing Python dependencies..."
+    uv python install "$PYTHON_VERSION"
+    test -d .venv || uv venv
+
+    if [ "$REQUIREMENTS" = "true" ]; then
+        uv pip install -r "$BUNDLE_DIR/requirements.txt"
+        uv pip install --no-deps "$BUNDLE_DIR/$DISTFILE_NAME"
+    else
+        uv pip install "$BUNDLE_DIR/$DISTFILE_NAME"
+    fi
+else
+    # Binary installation
+    log "Installing binary..."
+    cat <<EOF > "$APP_DIR/.appenv"
+set -a
+source .env
+set +a
+export PATH="$APP_DIR:\$PATH"
+EOF
+    FULL_PATH_APP_BIN="$APP_DIR/$APP_BIN"
+    rm -f "$FULL_PATH_APP_BIN"
+    cp "$BUNDLE_DIR/$DISTFILE_NAME" "$FULL_PATH_APP_BIN"
+    chmod +x "$FULL_PATH_APP_BIN"
+fi
+
+if [ -n "$RELEASE_COMMAND" ]; then
+    log "Running release command"
+    bash -lc "cd $APP_DIR && source .appenv && $RELEASE_COMMAND"
+fi
+
+echo "$VERSION" > .version
+cd "$BUNDLE_DIR"
+
+log "Configuring systemd services..."
+
+{% if units.user_len > 0 %}
+    log "Verifying user-provided systemd units..."
+    for unit in "${USER_UNITS[@]}"; do
+        systemd-analyze verify "units/$unit"
+    done
+{% endif %}
+
+log "Discovering installed unit files"
+mapfile -t INSTALLED_UNITS < <(
+    systemctl list-unit-files --type=service --no-legend --no-pager \
+    | awk -v app="$APP_NAME" '$1 ~ "^"app {print $1}'
+)
+
+log "Disabling + stopping stale units"
+for UNIT in "${INSTALLED_UNITS[@]}"; do
+    if ! contains_exact "$UNIT" "${VALID_UNITS[@]}"; then
+        if [[ "$UNIT" == *@.service ]]; then
+            echo "→ Disabling template unit: $UNIT"
+            sudo systemctl disable "$UNIT" --quiet || true
+        else
+            echo "→ Stopping + disabling stale unit: $UNIT"
+            sudo systemctl stop "$UNIT" --quiet || true
+            sudo systemctl disable "$UNIT" --quiet || true
+        fi
+        sudo systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+    fi
+done
+
+log "Removing stale service files"
+SEARCH_DIRS=(
+    /etc/systemd/system/
+    /etc/systemd/system/multi-user.target.wants/
+)
+
+for DIR in "${SEARCH_DIRS[@]}"; do
+    [[ -d "$DIR" ]] || continue
+    while IFS= read -r -d '' FILE; do
+        BASENAME=$(basename "$FILE")
+        if ! contains_exact "$BASENAME" "${VALID_UNITS[@]}"; then
+            echo "→ Removing stale file: $FILE"
+            sudo rm -f -- "$FILE"
+        fi
+    done < <(find "$DIR" -maxdepth 1 -type f -name "${APP_NAME}*" -print0)
+done
+
+log "Installing new service files..."
+sudo cp units/* /etc/systemd/system/
+
+log "Restarting services..."
+
+sudo systemctl daemon-reload
+sudo systemctl enable "${ACTIVE_UNITS[@]}"
+sudo systemctl restart "${ACTIVE_UNITS[@]}"
+
+
+if [ "$WEBSERVER_ENABLED" = "true" ]; then
+    log "Configuring Caddy..."
+    sudo mkdir -p "$(dirname "$CADDY_CONFIG_PATH")"
+    if caddy validate --config Caddyfile >/dev/null 2>&1; then
+        sudo mv Caddyfile "$CADDY_CONFIG_PATH"
+        sudo chown caddy:caddy "$CADDY_CONFIG_PATH"
+        sudo systemctl reload caddy
+    else
+        echo 'Caddyfile validation failed, leaving local Caddyfile for inspection' >&2
+    fi
+fi
+
+log "Install script completed successfully."
