@@ -8,7 +8,9 @@ from rich.prompt import Prompt
 from fujin.commands import BaseCommand
 
 
-@cappa.command(help="Rollback application to a previous version")
+@cappa.command(
+    help="Roll back application to a previous version",
+)
 @dataclass
 class Rollback(BaseCommand):
     def __call__(self):
@@ -16,7 +18,7 @@ class Rollback(BaseCommand):
             app_dir = shlex.quote(self.config.app_dir)
             result, _ = conn.run(f"ls -1t {app_dir}/.versions", warn=True, hide=True)
             if not result:
-                self.stdout.output("[blue]No rollback targets available")
+                self.output.info("No rollback targets available")
                 return
 
             filenames = result.strip().splitlines()
@@ -28,7 +30,7 @@ class Rollback(BaseCommand):
                     versions.append(v)
 
             if not versions:
-                self.stdout.output("[blue]No rollback targets available")
+                self.output.info("No rollback targets available")
                 return
 
             try:
@@ -46,8 +48,8 @@ class Rollback(BaseCommand):
             current_version = current_version.strip()
 
             if current_version == version:
-                self.stdout.output(
-                    f"[yellow]Version {version} is already the current version.[/yellow]"
+                self.output.warning(
+                    f"Version {version} is already the current version."
                 )
                 return
 
@@ -59,9 +61,7 @@ class Rollback(BaseCommand):
 
             # Uninstall current
             if current_version:
-                self.stdout.output(
-                    f"[blue]Uninstalling current version {current_version}...[/blue]"
-                )
+                self.output.info(f"Uninstalling current version {current_version}...")
                 current_bundle = (
                     f"{app_dir}/.versions/{self.config.app_name}-{current_version}.pyz"
                 )
@@ -71,16 +71,16 @@ class Rollback(BaseCommand):
                     uninstall_cmd = f"python3 {current_bundle} uninstall"
                     _, ok = conn.run(uninstall_cmd, warn=True)
                     if not ok:
-                        self.stdout.output(
-                            f"[yellow]Warning: uninstall failed for version {current_version}.[/yellow]"
+                        self.output.warning(
+                            f"Warning: uninstall failed for version {current_version}."
                         )
                 else:
-                    self.stdout.output(
-                        f"[yellow]Bundle for current version {current_version} not found. Skipping uninstall.[/yellow]"
+                    self.output.warning(
+                        f"Bundle for current version {current_version} not found. Skipping uninstall."
                     )
 
             # Install target
-            self.stdout.output(f"[blue]Installing version {version}...[/blue]")
+            self.output.info(f"Installing version {version}...")
             target_bundle = f"{app_dir}/.versions/{self.config.app_name}-{version}.pyz"
             install_cmd = f"python3 {target_bundle} install || (echo 'install failed' >&2; exit 1)"
 
@@ -94,6 +94,6 @@ class Rollback(BaseCommand):
                 f" && echo '==> Cleaning up newer versions...' && {cleanup_cmd}"
             )
             conn.run(full_cmd, pty=True)
-            self.stdout.output(
-                f"[green]Rollback to version {version} completed successfully![/green]"
+            self.output.success(
+                f"Rollback to version {version} completed successfully!"
             )

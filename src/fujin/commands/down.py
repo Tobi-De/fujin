@@ -47,7 +47,7 @@ class Down(BaseCommand):
             return
 
         with self.connection() as conn:
-            self.stdout.output("[blue]Tearing down project...[/blue]")
+            self.output.info("Tearing down project...")
 
             app_dir = shlex.quote(self.config.app_dir)
             res, ok = conn.run(f"cat {app_dir}/.version", warn=True, hide=True)
@@ -63,11 +63,11 @@ class Down(BaseCommand):
 
             if not uninstall_ok:
                 if not self.force:
-                    self.stdout.output("[red]Teardown failed[/red]")
+                    self.output.error("Teardown failed")
                     raise cappa.Exit(code=1)
 
-                self.stdout.output(
-                    "[yellow]Teardown encountered errors but continuing due to --force[/yellow]"
+                self.output.warning(
+                    "Teardown encountered errors but continuing due to --force"
                 )
                 # Force cleanup - just remove app directory
                 conn.run(f"rm -rf {app_dir}", warn=True, pty=True)
@@ -77,6 +77,4 @@ class Down(BaseCommand):
                     "&& ".join(caddy.get_uninstall_commands()), pty=True, warn=True
                 )
 
-            self.stdout.output(
-                "[green]Project teardown completed successfully![/green]"
-            )
+            self.output.success("Project teardown completed successfully!")

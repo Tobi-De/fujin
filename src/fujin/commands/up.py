@@ -5,11 +5,13 @@ from .server import Server
 from fujin.commands import BaseCommand
 
 
-@cappa.command(help="Run everything required to deploy an application to a fresh host.")
+@cappa.command(
+    help="Bootstrap server and deploy application (one-command setup)",
+)
 class Up(BaseCommand):
     def __call__(self):
         Server().bootstrap()
         Deploy()()
-        self.stdout.output(
-            "[green]Server bootstrapped and application deployed successfully![/green]"
+        self.output.success(
+            "Server bootstrapped and application deployed successfully!"
         )

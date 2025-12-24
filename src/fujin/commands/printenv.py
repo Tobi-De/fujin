@@ -15,4 +15,4 @@ class Printenv(BaseCommand):
             )
         else:
             result = self.config.host.env_content
-        self.stdout.output(result)
+        self.output.output(result)
