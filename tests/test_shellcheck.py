@@ -27,9 +27,9 @@ def test_install_script_shellcheck(mock_config, tmp_path):
     except FileNotFoundError:
         pytest.skip("shellcheck not found")
 
-    assert (
-        result.returncode == 0
-    ), f"ShellCheck failed:\n{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"ShellCheck failed:\n{result.stdout}\n{result.stderr}"
+    )
 
 
 def test_uninstall_script_shellcheck(mock_config, tmp_path):
@@ -56,9 +56,9 @@ def test_uninstall_script_shellcheck(mock_config, tmp_path):
     except FileNotFoundError:
         pytest.skip("shellcheck not found")
 
-    assert (
-        result.returncode == 0
-    ), f"ShellCheck failed:\n{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"ShellCheck failed:\n{result.stdout}\n{result.stderr}"
+    )
 
 
 def test_install_script_shellcheck_binary_mode(mock_config, tmp_path):
@@ -85,6 +85,6 @@ def test_install_script_shellcheck_binary_mode(mock_config, tmp_path):
     except FileNotFoundError:
         pytest.skip("shellcheck not found")
 
-    assert (
-        result.returncode == 0
-    ), f"ShellCheck failed:\n{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"ShellCheck failed:\n{result.stdout}\n{result.stderr}"
+    )

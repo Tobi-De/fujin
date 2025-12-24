@@ -8,7 +8,7 @@ import cappa
 from rich.prompt import Confirm
 
 from fujin import caddy
-from fujin.commands import BaseCommand, uninstall_archive_script
+from fujin.commands import BaseCommand
 
 
 @cappa.command(
@@ -49,47 +49,28 @@ class Down(BaseCommand):
         with self.connection() as conn:
             self.stdout.output("[blue]Tearing down project...[/blue]")
 
-            # Try remote script first
             app_dir = shlex.quote(self.config.app_dir)
             res, ok = conn.run(f"cat {app_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
-            bundle_path = f"{app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
+            bundle_path = f"{app_dir}/.versions/{self.config.app_name}-{version}.pyz"
 
-            uninstall_ok = False
             _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
 
+            uninstall_ok = False
             if bundle_exists:
-                uninstall_cmd = (
-                    uninstall_archive_script(bundle_path, self.config.app_name, version)
-                    + f"rm -rf {app_dir}"
-                )
+                uninstall_cmd = f"python3 {bundle_path} uninstall && rm -rf {app_dir}"
                 _, uninstall_ok = conn.run(uninstall_cmd, warn=True, pty=True)
 
             if not uninstall_ok:
                 if not self.force:
                     self.stdout.output("[red]Teardown failed[/red]")
-                    self.stdout.output(
-                        "[yellow]Use --force to ignore errors and continue teardown.[/yellow]"
-                    )
                     raise cappa.Exit(code=1)
 
                 self.stdout.output(
                     "[yellow]Teardown encountered errors but continuing due to --force[/yellow]"
                 )
-
-                # Local fallback
-                new_units, user_units = self.config.render_systemd_units()
-                context = self.config.build_context(
-                    distfile_name=f"{self.config.app_name}-{version}.tar.gz",
-                    user_units=user_units,
-                    new_units=new_units,
-                )
-                uninstall_script = self.config.render_uninstall_script(context=context)
-                combined = uninstall_script + f"\nrm -rf {app_dir}"
-                conn.run(
-                    f"bash -s <<'FUJIN_UNINSTALL'\n{combined}\nFUJIN_UNINSTALL",
-                    pty=True,
-                )
+                # Force cleanup - just remove app directory
+                conn.run(f"rm -rf {app_dir}", warn=True, pty=True)
 
             if self.full:
                 conn.run(

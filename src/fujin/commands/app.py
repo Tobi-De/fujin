@@ -39,7 +39,7 @@ class App(BaseCommand):
             rollback_files = parts[1].strip().splitlines()
             rollback_versions = []
             prefix = f"{self.config.app_name}-"
-            suffix = ".tar.gz"
+            suffix = ".pyz"
             for fname in rollback_files:
                 fname = fname.strip()
                 if fname.startswith(prefix) and fname.endswith(suffix):

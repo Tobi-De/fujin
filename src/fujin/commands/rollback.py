@@ -5,7 +5,7 @@ import cappa
 from rich.prompt import Confirm
 from rich.prompt import Prompt
 
-from fujin.commands import BaseCommand, install_archive_script, uninstall_archive_script
+from fujin.commands import BaseCommand
 
 
 @cappa.command(help="Rollback application to a previous version")
@@ -22,10 +22,9 @@ class Rollback(BaseCommand):
             filenames = result.strip().splitlines()
             versions = []
             prefix = f"{self.config.app_name}-"
-            suffix = ".tar.gz"
             for fname in filenames:
-                if fname.startswith(prefix) and fname.endswith(suffix):
-                    v = fname[len(prefix) : -len(suffix)]
+                if fname.startswith(prefix) and fname.endswith(".pyz"):
+                    v = fname[len(prefix) : -4]
                     versions.append(v)
 
             if not versions:
@@ -63,14 +62,13 @@ class Rollback(BaseCommand):
                 self.stdout.output(
                     f"[blue]Uninstalling current version {current_version}...[/blue]"
                 )
-                current_bundle = f"{app_dir}/.versions/{self.config.app_name}-{current_version}.tar.gz"
-
-                # Check if bundle exists
+                current_bundle = (
+                    f"{app_dir}/.versions/{self.config.app_name}-{current_version}.pyz"
+                )
                 _, exists = conn.run(f"test -f {current_bundle}", warn=True, hide=True)
+
                 if exists:
-                    uninstall_cmd = uninstall_archive_script(
-                        current_bundle, self.config.app_name, current_version
-                    )
+                    uninstall_cmd = f"python3 {current_bundle} uninstall"
                     _, ok = conn.run(uninstall_cmd, warn=True)
                     if not ok:
                         self.stdout.output(
@@ -83,16 +81,13 @@ class Rollback(BaseCommand):
 
             # Install target
             self.stdout.output(f"[blue]Installing version {version}...[/blue]")
-            target_bundle = (
-                f"{app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
-            )
-            install_cmd = install_archive_script(
-                target_bundle, self.config.app_name, version
-            )
+            target_bundle = f"{app_dir}/.versions/{self.config.app_name}-{version}.pyz"
+            install_cmd = f"python3 {target_bundle} install || (echo 'install failed' >&2; exit 1)"
+
             # delete all versions after new target
             cleanup_cmd = (
                 f"cd {app_dir}/.versions && ls -1t | "
-                f"awk '/{self.config.app_name}-{version}\\.tar\\.gz/{{exit}} {{print}}' | "
+                f"awk '/{self.config.app_name}-{version}\\.pyz/{{exit}} {{print}}' | "
                 "xargs -r rm"
             )
             full_cmd = install_cmd + (

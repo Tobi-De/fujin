@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### 🚀 Features
+
+- Migrate to zipapp
+
 ## [0.14.1] - 2025-12-08
 
 ### 🚀 Features

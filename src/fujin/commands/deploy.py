@@ -3,19 +3,20 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
-import tarfile
 import tempfile
 import shutil
 import hashlib
+import zipapp
+import json
 from typing import Annotated
 from pathlib import Path
 import time
 
+import importlib.util
 import cappa
 from rich.prompt import Confirm
 
 from fujin.commands import BaseCommand
-from fujin.commands._base import install_archive_script
 from fujin.secrets import resolve_secrets
 
 logger = logging.getLogger(__name__)
@@ -81,40 +82,67 @@ class Deploy(BaseCommand):
             if self.config.webserver.enabled:
                 (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
 
-            context = self.config.build_context(
-                distfile_name=distfile_path.name,
-                user_units=user_units,
-                new_units=new_units,
+            # Create installer config
+            installer_config = {
+                "app_name": self.config.app_name,
+                "app_dir": self.config.app_dir,
+                "version": version,
+                "installation_mode": self.config.installation_mode.value,
+                "python_version": self.config.python_version,
+                "requirements": bool(self.config.requirements),
+                "distfile_name": distfile_path.name,
+                "release_command": self.config.release_command,
+                "webserver_enabled": self.config.webserver.enabled,
+                "caddy_config_path": self.config.caddy_config_path,
+                "app_bin": self.config.app_bin,
+                "active_units": self.config.active_systemd_units,
+                "valid_units": sorted(
+                    set(self.config.active_systemd_units) | set(new_units.keys())
+                ),
+                "user_units": user_units,
+            }
+
+            # Create zipapp
+            logger.info("Creating Python zipapp installer")
+            zipapp_dir = Path(tmpdir) / "zipapp_source"
+            zipapp_dir.mkdir()
+
+            # Copy installer __main__.py
+            installer_dir = (
+                Path(importlib.util.find_spec("fujin").origin).parent / "_installer"
+            )
+            installer_src = installer_dir / "__main__.py"
+            shutil.copy(installer_src, zipapp_dir / "__main__.py")
+
+            # Copy bundle artifacts into zipapp
+            for item in bundle_dir.iterdir():
+                dest = zipapp_dir / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dest)
+                else:
+                    shutil.copy(item, dest)
+
+            # Write config.json
+            (zipapp_dir / "config.json").write_text(
+                json.dumps(installer_config, indent=2)
             )
 
-            install_script = self.config.render_install_script(
-                context=context,
+            # Create the zipapp
+            zipapp_path = Path(tmpdir) / "installer.pyz"
+            zipapp.create_archive(
+                zipapp_dir,
+                zipapp_path,
+                interpreter="/usr/bin/env python3",
             )
-
-            (bundle_dir / "install.sh").write_text(install_script)
-            logger.debug("Generated install script:\n%s", install_script)
-
-            uninstall_script = self.config.render_uninstall_script(
-                context=context,
-            )
-            (bundle_dir / "uninstall.sh").write_text(uninstall_script)
-            logger.debug("Generated uninstall script:\n%s", uninstall_script)
-
-            # Create tarball
-            logger.info("Creating gzip-compressed deployment bundle")
-            tar_ext = "tar.gz"
-            tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
-            with tarfile.open(tar_path, "w:gz", format=tarfile.PAX_FORMAT) as tar:
-                tar.add(bundle_dir, arcname=".")
 
             # Calculate local checksum
             logger.info("Calculating local bundle checksum")
-            with open(tar_path, "rb") as f:
+            with open(zipapp_path, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
             remote_bundle_dir = Path(self.config.app_dir) / ".versions"
             remote_bundle_path = (
-                f"{remote_bundle_dir}/{self.config.app_name}-{version}.{tar_ext}"
+                f"{remote_bundle_dir}/{self.config.app_name}-{version}.pyz"
             )
 
             # Quote remote paths for shell usage (safe insertion into remote commands)
@@ -134,7 +162,7 @@ class Deploy(BaseCommand):
 
                     # Upload to a temporary filename first, then move into place
                     tmp_remote = f"{remote_bundle_path}.uploading.{int(time.time())}"
-                    conn.put(str(tar_path), tmp_remote)
+                    conn.put(str(zipapp_path), tmp_remote)
 
                     logger.info("Verifying uploaded bundle checksum")
                     remote_checksum_out, _ = conn.run(
@@ -166,11 +194,7 @@ class Deploy(BaseCommand):
                     raise cappa.Exit("Upload failed after retries.", code=1)
 
                 self.stdout.output("[blue]Executing remote installation...[/blue]")
-                deploy_script = install_archive_script(
-                    remote_bundle_path_q,
-                    app_name=self.config.app_name,
-                    version=version,
-                )
+                deploy_script = f"python3 {remote_bundle_path_q} install || (echo 'install failed' >&2; exit 1)"
                 if self.config.versions_to_keep:
                     deploy_script += (
                         "&& echo '==> Pruning old versions...' && "
