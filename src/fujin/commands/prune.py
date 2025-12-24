@@ -43,7 +43,7 @@ class Prune(BaseCommand):
 
             filenames = result.strip().splitlines()
             prefix = f"{self.config.app_name}-"
-            suffix = ".tar.gz"
+            suffix = ".pyz"
 
             valid_bundles = []
             for fname in filenames:
