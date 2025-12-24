@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
-import shlex
 from pathlib import Path
 
 import msgspec
@@ -247,58 +246,6 @@ class Config(msgspec.Struct, kw_only=True):
             upstream=self.webserver.upstream,
             statics=self.webserver.statics,
         )
-
-    def build_context(
-        self,
-        *,
-        distfile_name: str,
-        user_units: list[str],
-        new_units: dict[str, str],
-    ) -> dict:
-        units_valid = sorted(set(self.active_systemd_units) | set(new_units.keys()))
-        regular_units = [
-            u for u in self.active_systemd_units if not u.endswith("@.service")
-        ]
-        template_units = [
-            u for u in self.active_systemd_units if u.endswith("@.service")
-        ]
-
-        def to_bash_array(values: list[str]) -> str:
-            return "(" + " ".join(shlex.quote(v) for v in values) + ")"
-
-        return {
-            "app_name": self.app_name,
-            "app_dir": self.app_dir,
-            "version": self.version,
-            "installation_mode": self.installation_mode.value,
-            "python_version": self.python_version,
-            "requirements": bool(self.requirements),
-            "distfile_name": distfile_name,
-            "release_command": self.release_command,
-            "webserver_enabled": self.webserver.enabled,
-            "caddy_config_path": self.caddy_config_path,
-            "app_bin": self.app_bin,
-            "units": {
-                "active": to_bash_array(self.active_systemd_units),
-                "valid": to_bash_array(units_valid),
-                "regular": to_bash_array(regular_units),
-                "regular_len": len(regular_units),
-                "template": to_bash_array(template_units),
-                "template_len": len(template_units),
-                "user": to_bash_array(user_units),
-                "user_len": len(user_units),
-            },
-        }
-
-    def render_install_script(self, *, context: dict) -> str:
-        env = self._template_env()
-        template = env.get_template("install.sh.j2")
-        return template.render(**context)
-
-    def render_uninstall_script(self, *, context: dict) -> str:
-        env = self._template_env()
-        template = env.get_template("uninstall.sh.j2")
-        return template.render(**context)
 
     @property
     def caddy_config_path(self) -> str:
