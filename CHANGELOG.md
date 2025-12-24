@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Migrate to zipapp
 
+### 🐛 Bug Fixes
+
+- Failed auth when key not in agent
+
 ## [0.14.1] - 2025-12-08
 
 ### 🚀 Features
