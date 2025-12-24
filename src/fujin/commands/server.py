@@ -9,8 +9,17 @@ from fujin import caddy
 from fujin.commands import BaseCommand
 
 
-@cappa.command(help="Manage server operations")
+@cappa.command(
+    help="Manage server operations",
+)
 class Server(BaseCommand):
+    """
+    Examples:
+      fujin server bootstrap      Setup server with dependencies and Caddy
+      fujin server info           Show server system information
+      fujin server exec ls        Run command on server
+    """
+
     @cappa.command(help="Display information about the host system")
     def info(self):
         with self.connection() as conn:
@@ -18,49 +27,45 @@ class Server(BaseCommand):
             if result_ok:
                 conn.run("fastfetch", pty=True)
             else:
-                self.stdout.output(conn.run("cat /etc/os-release", hide=True)[0])
+                self.output.output(conn.run("cat /etc/os-release", hide=True)[0])
 
     @cappa.command(help="Setup uv, web proxy, and install necessary dependencies")
     def bootstrap(self):
         with self.connection() as conn:
-            self.stdout.output("[blue]Bootstrapping server...[/blue]")
+            self.output.info("Bootstrapping server...")
             _, server_update_ok = conn.run(
                 "sudo apt update && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y && sudo apt install -y sqlite3 curl rsync",
                 pty=True,
                 warn=True,
             )
             if not server_update_ok:
-                self.stdout.output(
-                    "[red]Warning: Failed to update and upgrade the server packages.[/red]"
+                self.output.warning(
+                    "Warning: Failed to update and upgrade the server packages."
                 )
             _, result_ok = conn.run("command -v uv", warn=True)
             if not result_ok:
-                self.output.output("[blue]Installing uv tool...[/blue]")
+                self.output.info("Installing uv tool...")
                 conn.run(
                     "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool update-shell"
                 )
             conn.run("uv tool install fastfetch-bin-edge")
             if self.config.webserver.enabled:
-                self.stdout.output("[blue]Setting up Caddy web server...[/blue]")
+                self.output.info("Setting up Caddy web server...")
 
                 _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
                 if result_ok:
-                    self.stdout.output("[yellow]Caddy is already installed.[/yellow]")
-                    self.stdout.output(
+                    self.output.warning("Caddy is already installed.")
+                    self.output.output(
                         "Please ensure your Caddyfile includes the following line to load Fujin configurations:"
                     )
-                    self.stdout.output("[bold]import conf.d/*.caddy[/bold]")
+                    self.output.output("[bold]import conf.d/*.caddy[/bold]")
                 else:
                     version = caddy.get_latest_gh_tag()
-                    self.stdout.output(
-                        f"[blue]Installing Caddy version {version}...[/blue]"
-                    )
+                    self.output.info(f"Installing Caddy version {version}...")
                     commands = caddy.get_install_commands(version)
                     conn.run(" && ".join(commands), pty=True)
 
-            self.stdout.output(
-                "[green]Server bootstrap completed successfully![/green]"
-            )
+            self.output.success("Server bootstrap completed successfully!")
 
     @cappa.command(help="Execute an arbitrary command on the server")
     def exec(
@@ -103,7 +108,7 @@ class Server(BaseCommand):
             if with_password:
                 password = secrets.token_hex(8)
                 commands.append(f"echo '{name}:{password}' | sudo chpasswd")
-                self.stdout.output(f"[green]Generated password: [/green]{password}")
+                self.output.success(f"Generated password: {password}")
             commands.extend(
                 [
                     f"sudo chmod 700 /home/{name}/.ssh",
@@ -112,4 +117,4 @@ class Server(BaseCommand):
                 ]
             )
             conn.run(" && ".join(commands), pty=True)
-            self.stdout.output(f"[green]New user {name} created successfully![/green]")
+            self.output.success(f"New user {name} created successfully!")

@@ -12,9 +12,19 @@ from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 
 
-@cappa.command(help="Run application-related tasks")
+@cappa.command(
+    help="Manage your application",
+)
 class App(BaseCommand):
-    @cappa.command(help="Display information about the application")
+    """
+    Examples:
+      fujin app info              Show application info and status
+      fujin app logs web          Stream logs for web process
+      fujin app restart           Restart all application processes
+      fujin app exec manage.py    Run Django management command
+    """
+
+    @cappa.command(help="Display application information and process status")
     def info(self):
         with self.connection() as conn:
             app_dir = shlex.quote(self.config.app_dir)
@@ -94,7 +104,15 @@ class App(BaseCommand):
             if socket_name in services_status:
                 services["socket"] = services_status[socket_name]
 
-        infos_text = "\n".join(f"{key}: {value}" for key, value in infos.items())
+        # Format info text with clickable URL
+        info_lines = []
+        for key, value in infos.items():
+            if key == "running_at" and value.startswith("http"):
+                # Make URL clickable
+                info_lines.append(f"{key}: [link={value}]{value}[/link]")
+            else:
+                info_lines.append(f"{key}: {value}")
+        infos_text = "\n".join(info_lines)
 
         table = Table(title="", header_style="bold cyan")
         table.add_column("Process", style="")
@@ -119,8 +137,8 @@ class App(BaseCommand):
 
             table.add_row(service, status_str)
 
-        self.stdout.output(infos_text)
-        self.stdout.output(table)
+        self.output.output(infos_text)
+        self.output.output(table)
 
     @cappa.command(help="Run an arbitrary command via the application binary")
     def exec(
@@ -192,10 +210,10 @@ class App(BaseCommand):
         with self.connection() as conn:
             names = self._resolve_active_systemd_units(name)
             if not names:
-                self.stdout.output("[yellow]No services found[/yellow]")
+                self.output.warning("No services found")
                 return
 
-            self.stdout.output(
+            self.output.output(
                 f"Running [cyan]{command}[/cyan] on: [cyan]{', '.join(names)}[/cyan]"
             )
             conn.run(f"sudo systemctl {command} {' '.join(names)}", pty=True)
@@ -206,7 +224,7 @@ class App(BaseCommand):
             "restart": "restarted",
             "stop": "stopped",
         }.get(command, command)
-        self.stdout.output(f"[green]{msg} {past_tense} successfully![/green]")
+        self.output.success(f"{msg} {past_tense} successfully!")
 
     @cappa.command(help="Show logs for the specified service")
     def logs(
@@ -220,14 +238,14 @@ class App(BaseCommand):
 
             if names:
                 units = " ".join(f"-u {n}" for n in names)
-                self.stdout.output(f"Showing logs for: [cyan]{', '.join(names)}[/cyan]")
+                self.output.output(f"Showing logs for: [cyan]{', '.join(names)}[/cyan]")
                 conn.run(
                     f"sudo journalctl {units} -n {lines} {'-f' if follow else ''}",
                     warn=True,
                     pty=True,
                 )
             else:
-                self.stdout.output("[yellow]No services found[/yellow]")
+                self.output.warning("No services found")
 
     @cappa.command(help="Show the systemd unit file content for the specified service")
     def cat(
@@ -237,7 +255,7 @@ class App(BaseCommand):
         with self.connection() as conn:
             if name == "caddy" and self.config.webserver.enabled:
                 # Special case for Caddy
-                self.stdout.output(
+                self.output.output(
                     f"Showing Caddy configuration at: [cyan]{self.config.caddy_config_path}[/cyan]"
                 )
                 print()
@@ -247,7 +265,7 @@ class App(BaseCommand):
             names = self._resolve_active_systemd_units(name)
 
             if not names:
-                self.stdout.output("[yellow]No services found[/yellow]")
+                self.output.warning("No services found")
                 return
 
             conn.run(f"sudo systemctl cat {' '.join(names)}", pty=True)

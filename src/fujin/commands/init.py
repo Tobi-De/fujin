@@ -14,9 +14,16 @@ from fujin.config import InstallationMode
 from fujin.config import tomllib
 
 
-@cappa.command(help="Generate a sample configuration file")
+@cappa.command(help="Initialize a new fujin.toml configuration file")
 @dataclass
 class Init(BaseCommand):
+    """
+    Examples:
+      fujin init                        Create config with simple profile
+      fujin init --profile django       Create config for Django project
+      fujin init --templates            Generate config with default templates
+    """
+
     profile: Annotated[
         str,
         cappa.Arg(
@@ -38,9 +45,7 @@ class Init(BaseCommand):
     def __call__(self):
         fujin_toml = Path("fujin.toml")
         if fujin_toml.exists():
-            self.stdout.output(
-                "[yellow]fujin.toml file already exists, skipping generation[/yellow]"
-            )
+            self.output.warning("fujin.toml file already exists, skipping generation")
         else:
             profile_to_func = {
                 "simple": simple_config,
@@ -60,9 +65,7 @@ class Init(BaseCommand):
                         # fujin will read the version itself from the pyproject
                         config.pop("version")
             fujin_toml.write_text(tomli_w.dumps(config, multiline_strings=True))
-            self.stdout.output(
-                "[green]Sample configuration file generated successfully![/green]"
-            )
+            self.output.success("Sample configuration file generated successfully!")
 
         if self.templates:
             config_dir = Path(".fujin")
@@ -73,9 +76,7 @@ class Init(BaseCommand):
             )
             for file in templates_folder.iterdir():
                 shutil.copy(file, config_dir / file.name)
-            self.stdout.output(
-                "[green]Templates generated successfully in .fujin folder![/green]"
-            )
+            self.output.success("Templates generated successfully in .fujin folder!")
 
 
 def simple_config(app_name) -> dict:
@@ -96,7 +97,12 @@ def simple_config(app_name) -> dict:
                 "socket": True,
             }
         },
-        "aliases": {"shell": "app shell"},
+        "aliases": {
+            "shell": "app shell",
+            "status": "app info",
+            "logs": "app logs",
+            "restart": "app restart",
+        },
         "host": {
             "user": "root",
             "domain_name": f"{app_name}.com",

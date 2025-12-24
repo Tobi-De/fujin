@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 @cappa.command(
-    help="Deploy the project by building, transferring files, installing, and configuring services"
+    help="Deploy your application to the server",
 )
 class Deploy(BaseCommand):
     no_input: Annotated[
@@ -37,7 +37,7 @@ class Deploy(BaseCommand):
     def __call__(self):
         logger.info("Starting deployment process")
         if self.config.secret_config:
-            self.stdout.output("[blue]Resolving secrets from configuration...[/blue]")
+            self.output.info("Resolving secrets from configuration...")
             parsed_env = resolve_secrets(
                 self.config.host.env_content, self.config.secret_config
             )
@@ -48,9 +48,7 @@ class Deploy(BaseCommand):
             logger.debug(
                 f"Building application with command: {self.config.build_command}"
             )
-            self.stdout.output(
-                f"[blue]Building application v{self.config.version}...[/blue]"
-            )
+            self.output.info(f"Building application v{self.config.version}...")
             subprocess.run(self.config.build_command, check=True, shell=True)
         except subprocess.CalledProcessError as e:
             raise cappa.Exit(f"build command failed: {e}", code=1) from e
@@ -62,7 +60,7 @@ class Deploy(BaseCommand):
         distfile_path = self.config.get_distfile_path(version)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            self.stdout.output("[blue]Preparing deployment bundle...[/blue]")
+            self.output.info("Preparing deployment bundle...")
             bundle_dir = Path(tmpdir) / f"{self.config.app_name}-bundle"
             bundle_dir.mkdir()
 
@@ -156,8 +154,8 @@ class Deploy(BaseCommand):
                 max_upload_retries = 3
                 upload_ok = False
                 for attempt in range(1, max_upload_retries + 1):
-                    self.stdout.output(
-                        f"[blue]Uploading deployment bundle (attempt {attempt}/{max_upload_retries})...[/blue]"
+                    self.output.info(
+                        f"Uploading deployment bundle (attempt {attempt}/{max_upload_retries})..."
                     )
 
                     # Upload to a temporary filename first, then move into place
@@ -174,14 +172,14 @@ class Deploy(BaseCommand):
                     if local_checksum == remote_checksum:
                         conn.run(f"mv {tmp_remote} {remote_bundle_path_q}")
                         upload_ok = True
-                        self.stdout.output(
-                            "[green]Bundle uploaded and verified successfully.[/green]"
+                        self.output.success(
+                            "Bundle uploaded and verified successfully."
                         )
                         break
 
                     conn.run(f"rm -f {tmp_remote}")
-                    self.stdout.output(
-                        f"[red]Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}[/red]"
+                    self.output.error(
+                        f"Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}"
                     )
 
                     if self.no_input or (
@@ -193,7 +191,7 @@ class Deploy(BaseCommand):
                 if not upload_ok:
                     raise cappa.Exit("Upload failed after retries.", code=1)
 
-                self.stdout.output("[blue]Executing remote installation...[/blue]")
+                self.output.info("Executing remote installation...")
                 deploy_script = f"python3 {remote_bundle_path_q} install || (echo 'install failed' >&2; exit 1)"
                 if self.config.versions_to_keep:
                     deploy_script += (
@@ -203,8 +201,7 @@ class Deploy(BaseCommand):
                     )
                 conn.run(deploy_script, pty=True)
 
-        self.stdout.output("[green]Deployment completed successfully![/green]")
+        self.output.success("Deployment completed successfully!")
         if self.config.webserver.enabled:
-            self.stdout.output(
-                f"[blue]Application is available at: https://{self.config.host.domain_name}[/blue]"
-            )
+            url = f"https://{self.config.host.domain_name}"
+            self.output.info(f"Application is available at: {self.output.link(url)}")
