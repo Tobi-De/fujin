@@ -252,28 +252,98 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         raise cappa.Exit("SSH Handshake failed") from e
 
     logger.info("Authenticating...")
-    try:
-        if host.key_filename:
-            logger.debug(
-                "Authenticating with public key from file %s", host.key_filename
-            )
+    auth_methods_tried = []
+    authenticated = False
+    auth_method_used = None
+
+    # Method 1: Explicit key file (if specified)
+    if host.key_filename:
+        try:
+            key_path = Path(host.key_filename).expanduser()
+            logger.debug(f"Trying explicit key: {key_path}")
             passphrase = host.key_passphrase or ""
-            session.userauth_publickey_fromfile(
-                host.user, str(host.key_filename), passphrase
-            )
-        elif host.password:
-            logger.debug("Authenticating with password")
-            session.userauth_password(host.user, host.password)
-        else:
-            logger.debug("Authenticating with SSH agent...")
+            session.userauth_publickey_fromfile(host.user, str(key_path), passphrase)
+            authenticated = session.userauth_authenticated()
+            if authenticated:
+                auth_method_used = f"key file: {key_path}"
+                logger.info(f"✓ Authenticated using {key_path}")
+            auth_methods_tried.append(f"key file: {key_path}")
+        except Exception as e:
+            logger.debug(f"Key file auth failed: {e}")
+            auth_methods_tried.append(f"key file: {key_path} (failed)")
+
+    # Method 2: SSH agent (loaded keys)
+    if not authenticated:
+        try:
+            logger.debug("Trying ssh-agent...")
             session.agent_auth(host.user)
+            authenticated = session.userauth_authenticated()
+            if authenticated:
+                logger.info("✓ Authenticated using ssh-agent")
+            auth_methods_tried.append("ssh-agent")
+        except Exception as e:
+            logger.debug(f"Agent auth failed: {e}")
+            auth_methods_tried.append("ssh-agent (failed)")
 
-    except Exception as e:
+    # Method 3: Common key locations (fallback)
+    if not authenticated:
+        common_keys = [
+            "~/.ssh/id_ed25519",
+            "~/.ssh/id_rsa",
+            "~/.ssh/id_ecdsa",
+            "~/.ssh/id_dsa",
+        ]
+
+        for key_path_str in common_keys:
+            if authenticated:
+                break
+
+            key_path = Path(key_path_str).expanduser()
+            if not key_path.exists():
+                continue
+
+            try:
+                logger.debug(f"Trying default key: {key_path}")
+                # Try with empty passphrase (most common case)
+                session.userauth_publickey_fromfile(host.user, str(key_path), "")
+                authenticated = session.userauth_authenticated()
+
+                if authenticated:
+                    logger.info(f"✓ Authenticated using {key_path}")
+                    auth_methods_tried.append(f"default key: {key_path}")
+                    break
+
+            except Exception as e:
+                logger.debug(f"Key {key_path} failed: {e}")
+
+    # Method 4: Password (if configured)
+    if not authenticated and host.password:
+        try:
+            logger.debug("Trying password authentication...")
+            session.userauth_password(host.user, host.password)
+            authenticated = session.userauth_authenticated()
+            if authenticated:
+                logger.info("✓ Authenticated using password")
+            auth_methods_tried.append("password")
+        except Exception as e:
+            logger.debug(f"Password auth failed: {e}")
+            auth_methods_tried.append("password (failed)")
+
+    if not authenticated:
         sock.close()
-        raise cappa.Exit(f"Authentication failed for {host.user}") from e
+        methods_str = ", ".join(auth_methods_tried) if auth_methods_tried else "none"
+        host_str = f"{host.user}@{host.domain_name or host.ip}"
 
-    if not session.userauth_authenticated():
-        raise cappa.Exit("Authentication failed")
+        error_msg = (
+            f"Authentication failed for {host_str}\n"
+            f"Tried: {methods_str}\n\n"
+            f"Solutions:\n"
+            f"  1. Ensure your SSH key is authorized on the server\n"
+            f"  2. Add your key to ssh-agent: ssh-add ~/.ssh/id_ed25519\n"
+            f'  3. Specify key in fujin.toml: key_filename = "~/.ssh/id_ed25519"\n'
+            f"  4. Set password in fujin.toml or .env file"
+        )
+        raise cappa.Exit(error_msg)
 
     conn = SSH2Connection(session, host, sock=sock)
     try:
