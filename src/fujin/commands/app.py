@@ -134,15 +134,6 @@ class App(BaseCommand):
         self.output.output(infos_text)
         self.output.output(table)
 
-    @cappa.command(help="Run an arbitrary command via the application binary")
-    def exec(
-        self,
-        command: str,
-    ):
-        with self.connection() as conn:
-            with conn.cd(self.config.app_dir(self.selected_host)):
-                conn.run(f"source .appenv && {self.config.app_bin} {command}", pty=True)
-
     @cappa.command(
         help="Start an interactive shell session using the system SSH client"
     )

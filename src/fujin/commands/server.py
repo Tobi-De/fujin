@@ -25,7 +25,6 @@ class Server(BaseCommand):
       fujin server setup-ssh      Interactive SSH key setup
       fujin server bootstrap      Setup server with dependencies and Caddy
       fujin server info           Show server system information
-      fujin server exec ls        Run command on server
     """
 
     @cappa.command(help="Display information about the host system")
@@ -74,27 +73,6 @@ class Server(BaseCommand):
                     conn.run(" && ".join(commands), pty=True)
 
             self.output.success("Server bootstrap completed successfully!")
-
-    @cappa.command(help="Execute an arbitrary command on the server")
-    def exec(
-        self,
-        command: str,
-        appenv: Annotated[
-            bool,
-            cappa.Arg(
-                default=False,
-                long="--appenv",
-                help="Change to app directory and enable app environment",
-            ),
-        ],
-    ):
-        with self.connection() as conn:
-            command = (
-                f"cd {self.config.app_dir(self.selected_host)} && source .appenv && {command}"
-                if appenv
-                else command
-            )
-            conn.run(command, pty=True)
 
     @cappa.command(
         name="create-user", help="Create a new user with sudo and ssh access"
