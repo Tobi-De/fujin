@@ -83,7 +83,7 @@ def simple_config(app_name) -> dict:
     config = {
         "app": app_name,
         "version": "0.0.1",
-        "build_command": "uv build && uv pip compile pyproject.toml -o requirements.txt",
+        "build_command": "uv build && uv pip compile pyproject.toml -o requirements.txt > /dev/null",
         "distfile": f"dist/{app_name}-{{version}}-py3-none-any.whl",
         "requirements": "requirements.txt",
         "python_version": "3.12",
