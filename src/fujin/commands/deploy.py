@@ -11,10 +11,14 @@ import json
 from typing import Annotated
 from pathlib import Path
 import time
+from dataclasses import dataclass
 
 import importlib.util
 import cappa
 from rich.prompt import Confirm
+from rich.panel import Panel
+from rich.table import Table
+from rich.console import Console
 
 from fujin.commands import BaseCommand
 from fujin.secrets import resolve_secrets
@@ -26,6 +30,7 @@ logger = logging.getLogger(__name__)
 @cappa.command(
     help="Deploy your application to the server",
 )
+@dataclass
 class Deploy(BaseCommand):
     no_input: Annotated[
         bool,
@@ -37,6 +42,7 @@ class Deploy(BaseCommand):
 
     def __call__(self):
         logger.info("Starting deployment process")
+
         if self.config.secret_config:
             self.output.info("Resolving secrets from configuration...")
             parsed_env = resolve_secrets(
@@ -49,15 +55,15 @@ class Deploy(BaseCommand):
             logger.debug(
                 f"Building application with command: {self.config.build_command}"
             )
-            self.output.info(f"Building application v{self.config.version}...")
+            self.output.info(f"Building application ...")
             subprocess.run(self.config.build_command, check=True, shell=True)
         except subprocess.CalledProcessError as e:
             self.output.error(f"Build command failed with exit code {e.returncode}")
-            self.output.info(f"Command: {self.config.build_command}")
-            self.output.info("\nTroubleshooting:")
-            self.output.info("  - Check that all build dependencies are installed")
-            self.output.info("  - Verify your build_command in fujin.toml is correct")
             self.output.info(
+                f"Command: {self.config.build_command}\n\n"
+                "Troubleshooting:\n"
+                "  - Check that all build dependencies are installed\n"
+                "  - Verify your build_command in fujin.toml is correct\n"
                 "  - Try running the build command manually to see full error output"
             )
             raise BuildError("Build failed", command=self.config.build_command) from e
@@ -66,14 +72,10 @@ class Deploy(BaseCommand):
             self.output.error(
                 f"Requirements file not found: {self.config.requirements}"
             )
-            self.output.info("\nTroubleshooting:")
             self.output.info(
-                "  - Ensure your build_command generates the requirements file"
-            )
-            self.output.info(
-                "  - Check that the 'requirements' path in fujin.toml is correct"
-            )
-            self.output.info(
+                "\nTroubleshooting:\n"
+                "  - Ensure your build_command generates the requirements file\n"
+                "  - Check that the 'requirements' path in fujin.toml is correct\n"
                 f"  - Try running: uv pip compile pyproject.toml -o {self.config.requirements}"
             )
             raise BuildError(f"Requirements file not found: {self.config.requirements}")
@@ -160,6 +162,8 @@ class Deploy(BaseCommand):
             with open(zipapp_path, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
+            self._show_deployment_summary(zipapp_path)
+
             remote_bundle_dir = (
                 Path(self.config.app_dir(self.selected_host)) / ".versions"
             )
@@ -206,23 +210,23 @@ class Deploy(BaseCommand):
                         f"Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}"
                     )
                     self.output.warning(
-                        "The uploaded file doesn't match the local file. This could indicate:"
+                        "The uploaded file doesn't match the local file. This could indicate:\n"
+                        "  - Network corruption during transfer\n"
+                        "  - Storage issues on the remote server\n"
+                        "  - Interrupted upload"
                     )
-                    self.output.info("  - Network corruption during transfer")
-                    self.output.info("  - Storage issues on the remote server")
-                    self.output.info("  - Interrupted upload")
 
                     if self.no_input or (
                         attempt == max_upload_retries
                         or not Confirm.ask("Upload failed. Retry?")
                     ):
                         self.output.error("Upload verification failed")
-                        self.output.info("\nTroubleshooting:")
-                        self.output.info("  - Check your network connection stability")
                         self.output.info(
-                            "  - Verify the remote server has sufficient disk space: df -h"
+                            "\nTroubleshooting:\n"
+                            "  - Check your network connection stability\n"
+                            "  - Verify the remote server has sufficient disk space: df -h\n"
+                            "  - Try deploying again with: fujin deploy"
                         )
-                        self.output.info("  - Try deploying again with: fujin deploy")
                         raise UploadError(
                             "Upload verification failed", checksum_mismatch=True
                         )
@@ -245,3 +249,52 @@ class Deploy(BaseCommand):
         if self.config.webserver.enabled:
             url = f"https://{self.selected_host.domain_name}"
             self.output.info(f"Application is available at: {url}")
+
+    def _show_deployment_summary(self, bundle_path: Path):
+        console = Console()
+
+        bundle_size = bundle_path.stat().st_size
+        if bundle_size < 1024:
+            size_str = f"{bundle_size} B"
+        elif bundle_size < 1024 * 1024:
+            size_str = f"{bundle_size / 1024:.1f} KB"
+        else:
+            size_str = f"{bundle_size / (1024 * 1024):.1f} MB"
+
+        # Build summary table
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column("Key", style="bold cyan", width=12)
+        table.add_column("Value")
+
+        table.add_row("App", self.config.app_name)
+        table.add_row("Version", self.config.version)
+        host_display = self.selected_host.name if self.selected_host.name else "default"
+        table.add_row("Host", f"{host_display} ({self.selected_host.domain_name})")
+        processes_summary = []
+        for name, proc in self.config.processes.items():
+            if proc.replicas > 1:
+                processes_summary.append(f"{name} ({proc.replicas})")
+            else:
+                processes_summary.append(name)
+        table.add_row("Processes", ", ".join(processes_summary))
+        table.add_row("Bundle", size_str)
+
+        # Display in a panel
+        panel = Panel(
+            table,
+            title="[bold]Deployment Summary[/bold]",
+            border_style="blue",
+            padding=(1, 1),
+            width=60,
+        )
+        console.print(panel)
+
+        # Confirm unless --no-input is set
+        if not self.no_input:
+            try:
+                if not Confirm.ask(
+                    "\n[bold]Proceed with deployment?[/bold]", default=True
+                ):
+                    raise cappa.Exit("Deployment cancelled", code=0)
+            except KeyboardInterrupt:
+                raise cappa.Exit("\nDeployment cancelled", code=0)

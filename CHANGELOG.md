@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Added multi server support
 - Added show command in favor or printenv
 - Improved error messages
 - Added ssh-setup helper
