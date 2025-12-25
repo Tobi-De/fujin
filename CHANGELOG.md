@@ -14,6 +14,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Failed auth when key not in agent
 
+### 🚜 Refactor
+
+- Consistent styling and help messages improvements
+
 ## [0.14.1] - 2025-12-08
 
 ### 🚀 Features
