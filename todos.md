@@ -290,33 +290,6 @@ Complete type hints in connection.py and other modules:
 - [x] Fix mypy errors in connection.py (pass_response None check)
 - [x] Document complex types with improved docstrings
 
-### 7. Consolidate Small Commands
-**Status:** Code Cleanup
-**Effort:** Medium
-**Impact:** Low
-
-Consolidate very small commands into logical groups:
-
-```python
-# Instead of separate files for tiny commands, group related ones:
-@cappa.command
-class Config(BaseCommand):
-    @cappa.command
-    def show(self): ...
-
-    @cappa.command
-    def print_env(self): ...
-
-    @cappa.command
-    def validate(self): ...
-```
-
-**Tasks:**
-- [ ] Identify commands under 20 lines
-- [ ] Group by domain (config, server, app)
-- [ ] Update imports and command structure
-- [ ] Test command invocations still work
-
 ---
 
 ## 🔮 Low Priority / Future Consideration

@@ -3,11 +3,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Generator
+from typing import Annotated, Generator
 
 import cappa
 
-from fujin.config import Config
+from fujin.config import Config, HostConfig
 from fujin.connection import SSH2Connection
 from fujin.connection import connection as host_connection
 
@@ -19,9 +19,23 @@ class BaseCommand:
     including configuring the web proxy and managing systemd services.
     """
 
+    host: Annotated[
+        str | None,
+        cappa.Arg(
+            short="-H",
+            long="--host",
+            help="Target host (for multi-host setups). Defaults to first host.",
+        ),
+    ] = None
+
     @cached_property
     def config(self) -> Config:
         return Config.read()
+
+    @cached_property
+    def selected_host(self) -> HostConfig:
+        """Get the selected host based on --host flag or default."""
+        return self.config.select_host(self.host)
 
     @cached_property
     def output(self) -> MessageFormatter:
@@ -29,7 +43,7 @@ class BaseCommand:
 
     @contextmanager
     def connection(self) -> Generator[SSH2Connection, None, None]:
-        with host_connection(host=self.config.host) as conn:
+        with host_connection(host=self.selected_host) as conn:
             yield conn
 
 
