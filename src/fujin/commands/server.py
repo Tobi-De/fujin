@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import shutil
 import secrets
+import subprocess
+from pathlib import Path
 from typing import Annotated
 
 import cappa
+from rich.prompt import Prompt
+import tomli_w
 
 from fujin import caddy
 from fujin.commands import BaseCommand
+from fujin.config import tomllib
 
 
 @cappa.command(
@@ -15,6 +21,7 @@ from fujin.commands import BaseCommand
 class Server(BaseCommand):
     """
     Examples:
+      fujin server setup-ssh      Interactive SSH key setup
       fujin server bootstrap      Setup server with dependencies and Caddy
       fujin server info           Show server system information
       fujin server exec ls        Run command on server
@@ -118,3 +125,102 @@ class Server(BaseCommand):
             )
             conn.run(" && ".join(commands), pty=True)
             self.output.success(f"New user {name} created successfully!")
+
+    @cappa.command(
+        name="setup-ssh", help="Interactive SSH key setup and fujin.toml configuration"
+    )
+    def setup_ssh(self):
+        """Set up SSH key authentication and update fujin.toml."""
+        self.output.info("SSH Setup Helper")
+        self.output.output("")
+
+        # Prompt for server details
+        try:
+            ip = Prompt.ask("Enter server IP or hostname")
+            username = Prompt.ask("Enter username", default="root")
+            password = Prompt.ask(
+                "Enter password (or press Enter to use existing SSH key)",
+                password=True,
+                default="",
+            )
+        except KeyboardInterrupt:
+            raise cappa.Exit("Setup cancelled", code=0)
+
+        # Check for existing SSH key
+        ssh_dir = Path.home() / ".ssh"
+        ssh_dir.mkdir(mode=0o700, exist_ok=True)
+
+        # Check for common key types
+        key_paths = [
+            ssh_dir / "id_ed25519",
+            ssh_dir / "id_rsa",
+        ]
+
+        existing_key = None
+        for key_path in key_paths:
+            if key_path.exists():
+                existing_key = key_path
+                break
+
+        if not existing_key:
+            self.output.info("No SSH key found. Generating new ed25519 key...")
+            key_path = ssh_dir / "id_ed25519"
+            try:
+                subprocess.run(
+                    ["ssh-keygen", "-t", "ed25519", "-f", str(key_path), "-N", ""],
+                    check=True,
+                    capture_output=True,
+                )
+                self.output.success(f"Generated SSH key: {key_path}")
+                existing_key = key_path
+            except subprocess.CalledProcessError as e:
+                raise cappa.Exit(f"Failed to generate SSH key: {e}", code=1)
+        else:
+            self.output.info(f"Using existing SSH key: {existing_key}")
+
+        # Copy SSH key to server
+        self.output.info(f"Copying SSH key to {username}@{ip}...")
+
+        ssh_copy_cmd = ["ssh-copy-id", "-i", str(existing_key)]
+        if password:
+            # Use sshpass if available for password authentication
+            sshpass_available = bool(shutil.which("sshpass"))
+            if sshpass_available:
+                ssh_copy_cmd = ["sshpass", "-p", password] + ssh_copy_cmd
+            else:
+                self.output.warning(
+                    "sshpass not found. You'll need to enter the password manually."
+                )
+
+        ssh_copy_cmd.append(f"{username}@{ip}")
+
+        try:
+            result = subprocess.run(ssh_copy_cmd, capture_output=False)
+            if result.returncode != 0:
+                raise cappa.Exit("Failed to copy SSH key to server", code=1)
+            self.output.success("SSH key copied to server successfully!")
+        except FileNotFoundError:
+            raise cappa.Exit(
+                "ssh-copy-id not found. Please install OpenSSH client.", code=1
+            )
+
+        # Update fujin.toml
+        fujin_toml = Path("fujin.toml")
+
+        if fujin_toml.exists():
+            self.output.info("Updating existing fujin.toml...")
+            config_data = tomllib.loads(fujin_toml.read_text())
+        else:
+            self.output.info("Creating new fujin.toml...")
+            config_data = {}
+
+        # Override host configuration
+        config_data["host"] = {"domain_name": f"{ip}.nip.io", "user": username}
+
+        # Write back to fujin.toml
+        fujin_toml.write_text(tomli_w.dumps(config_data, multiline_strings=True))
+        self.output.success(f"Updated fujin.toml with connection details!")
+
+        self.output.output("")
+        self.output.success("SSH setup completed successfully!")
+        self.output.info(f"You can now connect to {username}@{ip} without a password.")
