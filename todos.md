@@ -8,8 +8,8 @@ This document tracks approved features and improvements. All open questions from
 
 ## 🎯 High Priority (Next Sprint)
 
-### 1. Default Aliases System
-**Status:** New Feature
+### 1. Default Aliases System ✅
+**Status:** ✅ Completed
 **Effort:** Low
 **Impact:** High
 
@@ -23,12 +23,12 @@ up = "server bootstrap && deploy"
 ```
 
 **Tasks:**
-- [ ] Create default aliases configuration
-- [ ] Document alias system
-- [ ] Add `fujin aliases list` command to show available aliases
+- [x] Create default aliases configuration (added to init command)
+- [x] Document alias system
+- [x] Add `fujin aliases list` command to show available aliases
 
-### 2. Better Error Messages
-**Status:** Enhancement
+### 2. Better Error Messages ✅
+**Status:** ✅ Completed
 **Effort:** Low
 **Impact:** High
 
@@ -45,12 +45,12 @@ Run 'fujin init' to create one, or cd to your project directory.
 ```
 
 **Files to update:**
-- `src/fujin/config.py` - Config loading errors
-- `src/fujin/commands/*.py` - Command-specific errors
-- Create error message formatting utilities
+- [x] `src/fujin/config.py` - Config loading errors
+- [x] `src/fujin/commands/*.py` - Command-specific errors
+- [x] Create error message formatting utilities (MessageFormatter in _base.py)
 
-### 3. Clickable URLs in Output
-**Status:** Enhancement
+### 3. Clickable URLs in Output ✅
+**Status:** ✅ Completed
 **Effort:** Low
 **Impact:** Medium
 
@@ -64,11 +64,11 @@ self.stdout.output(
 ```
 
 **Files to update:**
-- `src/fujin/commands/deploy.py`
-- Any other commands that output URLs
+- [x] `src/fujin/commands/deploy.py` (clickable URLs added)
+- [x] Any other commands that output URLs (app.py info command)
 
-### 4. Progress Indicators
-**Status:** Enhancement
+### 4. Progress Indicators ⏸️
+**Status:** ⏸️ Paused (Tried but not satisfied with results)
 **Effort:** Medium
 **Impact:** High
 
@@ -87,14 +87,17 @@ with Progress(
     # ... etc
 ```
 
-**Tasks:**
-- [ ] Add progress indicators to deploy command
-- [ ] Add progress to build, upload, install phases
-- [ ] Show upload progress with size information
-- [ ] Ensure progress works with `--no-input` flag
+**Note:** Implemented basic spinners for build and upload phases, but results were not satisfactory. Left out for now - may revisit with better approach later.
 
-### 5. Better Command Descriptions & Examples
-**Status:** Enhancement
+**Tasks:**
+- [x] Add progress indicators to deploy command (attempted)
+- [x] Add progress to build, upload, install phases (attempted)
+- [x] Show upload progress with size information (attempted)
+- [ ] Ensure progress works with `--no-input` flag
+- [ ] Find better approach for progress tracking
+
+### 5. Better Command Descriptions & Examples ✅
+**Status:** ✅ Completed
 **Effort:** Low
 **Impact:** Medium
 
@@ -112,13 +115,13 @@ Examples:
 ```
 
 **Tasks:**
-- [ ] Audit all command descriptions
-- [ ] Add examples to commonly used commands
-- [ ] Ensure consistent tone and style
+- [x] Audit all command descriptions
+- [x] Add examples to commonly used commands (deploy, app, init, server, rollback, up)
+- [x] Ensure consistent tone and style
 - [ ] Add usage examples to documentation
 
-### 6. Consistent Color Coding
-**Status:** Enhancement
+### 6. Consistent Color Coding ✅
+**Status:** ✅ Completed
 **Effort:** Low
 **Impact:** Low
 
@@ -131,16 +134,16 @@ Standardize color usage across all commands:
 - **Critical:** Red + Bold
 
 **Tasks:**
-- [ ] Audit all stdout.output() calls
-- [ ] Create color constants or helpers
-- [ ] Document color scheme for contributors
+- [x] Audit all stdout.output() calls
+- [x] Create color constants or helpers (MessageFormatter in _base.py)
+- [x] Document color scheme for contributors
 
 ---
 
 ## 💎 Medium Priority (Next Quarter)
 
-### 1. Better Log Streaming
-**Status:** New Feature
+### 1. Better Log Streaming ✅
+**Status:** ✅ Completed
 **Effort:** Medium
 **Impact:** High
 
@@ -148,18 +151,18 @@ Enhance the `fujin app logs` command:
 
 ```bash
 # Enhanced syntax
-fujin app logs web --follow --tail 100
-fujin app logs --level error
+fujin app logs web --follow --lines 100
+fujin app logs --level err
 fujin app logs --since "2 hours ago"
 fujin app logs --grep "ValueError"
 ```
 
 **Tasks:**
-- [ ] Add `--tail` flag (default 50)
-- [ ] Add `--level` filtering (error, warning, info)
-- [ ] Add `--since` time filtering
-- [ ] Add `--grep` pattern matching
-- [ ] Document journalctl mapping
+- [x] Add `--lines` flag (default 50, was already present as -n/--lines)
+- [x] Add `--level` filtering (emerg, alert, crit, err, warning, notice, info, debug)
+- [x] Add `--since` time filtering
+- [x] Add `--grep` pattern matching (-g/--grep)
+- [x] Document journalctl mapping (help text shows options)
 
 ### 2. Resource Monitoring (`fujin server stats`)
 **Status:** New Feature
@@ -558,11 +561,12 @@ The following suggestions were duplicates and have been consolidated:
 ## 📊 Progress Tracking
 
 ### Current Sprint Focus
-- [ ] Implement default aliases system
-- [ ] Better error messages
-- [ ] Clickable URLs
-- [ ] Progress indicators
-- [ ] Better command descriptions & examples
+- [x] Implement default aliases system ✅
+- [x] Better error messages ✅
+- [x] Clickable URLs ✅
+- [x] Progress indicators ⏸️ (Paused - not satisfied with results)
+- [x] Better command descriptions & examples ✅
+- [x] Consistent color coding ✅
 
 ### Next Sprint Candidates
 - Better log streaming

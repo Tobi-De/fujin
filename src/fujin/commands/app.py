@@ -16,14 +16,6 @@ from fujin.config import InstallationMode
     help="Manage your application",
 )
 class App(BaseCommand):
-    """
-    Examples:
-      fujin app info              Show application info and status
-      fujin app logs web          Stream logs for web process
-      fujin app restart           Restart all application processes
-      fujin app exec manage.py    Run Django management command
-    """
-
     @cappa.command(help="Display application information and process status")
     def info(self):
         with self.connection() as conn:
@@ -230,20 +222,87 @@ class App(BaseCommand):
     def logs(
         self,
         name: Annotated[str | None, cappa.Arg(help="Service name")] = None,
-        follow: Annotated[bool, cappa.Arg(short="-f")] = False,
-        lines: Annotated[int, cappa.Arg(short="-n", long="--lines")] = 50,
+        follow: Annotated[
+            bool, cappa.Arg(short="-f", long="--follow", help="Follow log output")
+        ] = False,
+        lines: Annotated[
+            int,
+            cappa.Arg(short="-n", long="--lines", help="Number of log lines to show"),
+        ] = 50,
+        level: Annotated[
+            str | None,
+            cappa.Arg(
+                long="--level",
+                help="Filter by log level",
+                choices=[
+                    "emerg",
+                    "alert",
+                    "crit",
+                    "err",
+                    "warning",
+                    "notice",
+                    "info",
+                    "debug",
+                ],
+            ),
+        ] = None,
+        since: Annotated[
+            str | None,
+            cappa.Arg(
+                long="--since",
+                help="Show logs since specified time (e.g., '2 hours ago', '2024-01-01', 'yesterday')",
+            ),
+        ] = None,
+        grep: Annotated[
+            str | None,
+            cappa.Arg(
+                short="-g",
+                long="--grep",
+                help="Filter logs by pattern (case-insensitive)",
+            ),
+        ] = None,
     ):
+        """
+                # Show last 50 lines for web process (default)
+        fujin app logs web
+
+        # Follow logs in real-time
+        fujin app logs web --follow
+
+        # Show only error-level logs
+        fujin app logs web --level err
+
+        # Show logs from last 2 hours
+        fujin app logs --since "2 hours ago"
+
+        # Filter logs by pattern
+        fujin app logs --grep "ValueError"
+
+        # Combine multiple filters
+        fujin app logs web -n 100 --level warning --since "1 hour ago"
+        """
         with self.connection() as conn:
             names = self._resolve_active_systemd_units(name)
 
             if names:
                 units = " ".join(f"-u {n}" for n in names)
+
+                cmd_parts = ["sudo journalctl", units]
+                if not follow:
+                    cmd_parts.append(f"-n {lines}")
+                if level:
+                    cmd_parts.append(f"-p {level}")
+                if since:
+                    cmd_parts.append(f"--since {shlex.quote(since)}")
+                if grep:
+                    cmd_parts.append(f"-g {shlex.quote(grep)}")
+                if follow:
+                    cmd_parts.append("-f")
+
+                journalctl_cmd = " ".join(cmd_parts)
+
                 self.output.output(f"Showing logs for: [cyan]{', '.join(names)}[/cyan]")
-                conn.run(
-                    f"sudo journalctl {units} -n {lines} {'-f' if follow else ''}",
-                    warn=True,
-                    pty=True,
-                )
+                conn.run(journalctl_cmd, warn=True, pty=True)
             else:
                 self.output.warning("No services found")
 
