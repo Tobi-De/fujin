@@ -212,8 +212,8 @@ fujin server setup-ssh
 - [x] Update fujin.toml automatically
 - [x] Handles both password and existing SSH key authentication
 
-### 4. Multi-Server / Environment Support
-**Status:** New Feature
+### 4. Multi-Server / Environment Support ✅
+**Status:** ✅ Completed
 **Effort:** High
 **Impact:** High
 
@@ -240,11 +240,11 @@ fujin app logs --host production
 **Default host behavior:** First host in the list is the default (no `--host` flag required for single/first host).
 
 **Tasks:**
-- [ ] Design config schema for multiple hosts
-- [ ] Add `--host` flag to all relevant commands
-- [ ] Implement host selection logic (first host is default)
-- [ ] Update documentation
-- [ ] Handle default host selection properly
+- [x] Design config schema for multiple hosts (hosts array in config.py)
+- [x] Add `--host` flag to all relevant commands (added to BaseCommand)
+- [x] Implement host selection logic (select_host() method in Config)
+- [x] Update documentation (README updated)
+- [x] Handle default host selection properly (first host is default)
 
 ### 5. Better Error Types ✅
 **Status:** ✅ Completed
@@ -335,27 +335,31 @@ health_check_url = "https://app.example.com/health"
 verify = false
 ```
 
-### 2. Deployment Confirmation with Summary
-**Status:** New Feature
+### 2. Deployment Confirmation with Summary ✅
+**Status:** ✅ Completed
 **Effort:** Medium
 **Impact:** Medium
-**Note:** Interesting but low priority.
 
 Show summary before deploying:
 
 ```
 ┌─ Deployment Summary ─────────────────┐
 │ App:         bookstore               │
-│ Version:     0.14.1 → 0.15.0         │
-│ Host:        book.example.com        │
-│ Processes:   web (1), worker (2)     │
+│ Version:     0.15.0                  │
+│ Host:        production (book.com)   │
+│ Processes:   web, worker (2)         │
 │ Bundle:      23.4 KB                 │
 └──────────────────────────────────────┘
 
-Deploy to production? [y/N]:
+Proceed with deployment? [Y/n]:
 ```
 
-Add `--yes` flag to skip for CI/CD.
+**Tasks:**
+- [x] Add deployment summary panel (Rich Panel with table)
+- [x] Show summary after build, before upload
+- [x] Include bundle size in summary
+- [x] Add confirmation prompt
+- [x] Use `--no-input` flag to skip for CI/CD
 
 ### 3. Pre/Post Deploy Hooks System
 **Status:** New Feature
@@ -404,34 +408,37 @@ fujin templates eject web
 - [ ] Create template customization guide
 - [ ] Add examples for common customizations
 
-### 5. Deployment History Tracking
-**Status:** New Feature
+### 5. Deployment History Tracking ✅
+**Status:** ✅ Completed
 **Effort:** Medium
 **Impact:** Low
-**Note:** Low priority. Wait for user demand before implementing.
 
 **Approach:** Store JSON file on server at `{app_dir}/.deployments.json` with deployment records (version, timestamp, user, git commit, etc.). Add `fujin app history` command to read and display it.
 
-### 6. Audit Logging
-**Status:** New Feature
+**Tasks:**
+- [x] Create deployment history record structure (version, timestamp, user, host, git_commit)
+- [x] Save deployment record to server after successful deploy
+- [x] Add `fujin app history` command to display deployment history
+- [x] Keep last 50 deployments on server
+
+### 6. Audit Logging ✅
+**Status:** ✅ Completed
 **Effort:** Low
 **Impact:** Low
-**Note:** Interesting for compliance/debugging.
 
-Log all remote commands:
+Log deployment operations to local audit file:
 
 ```
 ~/.fujin/audit.log:
-2024-12-24 12:30:15 deploy v0.15.0 to book.example.com
-2024-12-24 12:31:02 server exec "systemctl restart app"
+{"timestamp": "2025-12-25T12:30:15", "operation": "deploy", "user": "tobi", "host": "production", "success": true, "details": {"version": "0.15.0", "app_name": "bookstore"}}
+{"timestamp": "2025-12-25T14:22:33", "operation": "rollback", "user": "tobi", "host": "production", "success": true, "details": {"from_version": "0.15.0", "to_version": "0.14.1", "app_name": "bookstore"}}
 ```
 
 **Tasks:**
-- [ ] Create audit log writer
-- [ ] Log all SSH commands
-- [ ] Add timestamps and user info
-- [ ] Consider log rotation
-- [ ] Add `fujin audit show` command
+- [x] Create audit log writer (AuditLogger in audit.py)
+- [x] Log deploy/rollback/down operations (added to deploy.py, rollback.py, down.py)
+- [x] Add timestamps and user info (included in log records)
+- [x] Add `fujin audit show` command (displays audit log in table format)
 
 ### 7. Secrets Plugin System
 **Status:** Architecture

@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Added operation logging and deployment history
 - Added multi server support
 - Added show command in favor or printenv
 - Improved error messages
@@ -22,6 +23,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### 🚜 Refactor
 
 - Consistent styling and help messages improvements
+
+### 🎨 Styling
+
+- Deployment summary
 
 ## [0.14.1] - 2025-12-08
 
