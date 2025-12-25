@@ -8,6 +8,7 @@ import cappa
 import fujin
 
 from fujin.commands.app import App
+from fujin.commands.audit import Audit
 from fujin.commands.deploy import Deploy
 from fujin.commands.docs import Docs
 from fujin.commands.down import Down
@@ -40,7 +41,17 @@ def _setup_logging(verbose):
 @cappa.command(help="Deployment of python web apps in a breeze :)")
 class Fujin:
     subcommands: cappa.Subcommands[
-        Init | Up | Deploy | App | Server | Show | Docs | Down | Rollback | Prune
+        Init
+        | Up
+        | Deploy
+        | App
+        | Server
+        | Show
+        | Audit
+        | Docs
+        | Down
+        | Rollback
+        | Prune
     ]
     verbose: Annotated[
         int,
