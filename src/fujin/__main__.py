@@ -12,6 +12,7 @@ from fujin.commands.audit import Audit
 from fujin.commands.deploy import Deploy
 from fujin.commands.docs import Docs
 from fujin.commands.down import Down
+from fujin.commands.exec import Exec
 from fujin.commands.init import Init
 from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
@@ -48,6 +49,7 @@ class Fujin:
         | Server
         | Show
         | Audit
+        | Exec
         | Docs
         | Down
         | Rollback
