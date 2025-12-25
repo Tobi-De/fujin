@@ -13,6 +13,7 @@ import tomli_w
 from fujin import caddy
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
+from fujin.errors import SSHKeyError
 
 
 @cappa.command(
@@ -174,7 +175,7 @@ class Server(BaseCommand):
                 self.output.success(f"Generated SSH key: {key_path}")
                 existing_key = key_path
             except subprocess.CalledProcessError as e:
-                raise cappa.Exit(f"Failed to generate SSH key: {e}", code=1)
+                raise SSHKeyError(f"Failed to generate SSH key: {e}") from e
         else:
             self.output.info(f"Using existing SSH key: {existing_key}")
 
@@ -197,12 +198,12 @@ class Server(BaseCommand):
         try:
             result = subprocess.run(ssh_copy_cmd, capture_output=False)
             if result.returncode != 0:
-                raise cappa.Exit("Failed to copy SSH key to server", code=1)
+                raise SSHKeyError("Failed to copy SSH key to server")
             self.output.success("SSH key copied to server successfully!")
-        except FileNotFoundError:
-            raise cappa.Exit(
-                "ssh-copy-id not found. Please install OpenSSH client.", code=1
-            )
+        except FileNotFoundError as e:
+            raise SSHKeyError(
+                "ssh-copy-id not found. Please install OpenSSH client."
+            ) from e
 
         # Update fujin.toml
         fujin_toml = Path("fujin.toml")

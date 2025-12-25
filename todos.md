@@ -187,8 +187,8 @@ fujin server stats
 - [ ] Add optional `--watch` mode for continuous monitoring
 - [ ] Consider per-process stats
 
-### 3. SSH Setup Helper
-**Status:** New Feature
+### 3. SSH Setup Helper ✅
+**Status:** ✅ Completed
 **Effort:** Medium
 **Impact:** Medium
 
@@ -196,9 +196,9 @@ Interactive SSH key setup:
 
 ```bash
 fujin server setup-ssh
-> Enter server IP: 1.2.3.4
-> Enter username: ubuntu
-> Enter password (or press Enter for key): ***
+> Enter server IP or hostname: 1.2.3.4
+> Enter username [root]: ubuntu
+> Enter password (or press Enter to use existing SSH key): ***
 ✓ SSH key copied to server
 ✓ Updated fujin.toml with connection details
 ```
@@ -206,11 +206,11 @@ fujin server setup-ssh
 **Scope:** Just SSH key setup - does NOT handle server bootstrapping (Python, uv, etc.). Single focused purpose.
 
 **Tasks:**
-- [ ] Implement `fujin server setup-ssh` command
-- [ ] Use `ssh-copy-id` or equivalent
-- [ ] Generate SSH key if needed
-- [ ] Update fujin.toml automatically
-- [ ] Test with different SSH configurations
+- [x] Implement `fujin server setup-ssh` command
+- [x] Use `ssh-copy-id` or equivalent (with optional sshpass for password auth)
+- [x] Generate SSH key if needed (ed25519 by default)
+- [x] Update fujin.toml automatically
+- [x] Handles both password and existing SSH key authentication
 
 ### 4. Multi-Server / Environment Support
 **Status:** New Feature
@@ -246,15 +246,18 @@ fujin app logs --host production
 - [ ] Update documentation
 - [ ] Handle default host selection properly
 
-### 5. Better Error Types
-**Status:** Code Quality
+### 5. Better Error Types ✅
+**Status:** ✅ Completed
 **Effort:** Medium
 **Impact:** Medium
 
 Create specific exception hierarchy:
 
 ```python
-class DeploymentError(Exception):
+class FujinError(Exception):
+    """Base class for all Fujin errors"""
+
+class DeploymentError(FujinError):
     """Base class for deployment errors"""
 
 class BuildError(DeploymentError):
@@ -268,24 +271,24 @@ class InstallError(DeploymentError):
 ```
 
 **Tasks:**
-- [ ] Create `src/fujin/errors.py` module
-- [ ] Define error hierarchy
-- [ ] Update commands to use specific errors
-- [ ] Improve error messages with context
-- [ ] Add error recovery suggestions
+- [x] Create `src/fujin/errors.py` module
+- [x] Define error hierarchy (FujinError, DeploymentError, BuildError, UploadError, InstallError, RollbackError, SecretResolutionError, ServiceError, SSHKeyError, ConfigurationError, ConnectionError)
+- [x] Update commands to use specific errors (updated deploy.py with better error handling)
+- [x] Improve error messages with context (added detailed error messages with context)
+- [x] Add error recovery suggestions (added troubleshooting tips for build and upload errors)
 
-### 6. Type Hints Completion
-**Status:** Code Quality
+### 6. Type Hints Completion ✅
+**Status:** ✅ Completed
 **Effort:** Low
 **Impact:** Low
 
 Complete type hints in connection.py and other modules:
 
 **Tasks:**
-- [ ] Audit connection.py for missing type hints
-- [ ] Add return type annotations
-- [ ] Ensure mypy passes with no errors
-- [ ] Document complex types
+- [x] Audit connection.py for missing type hints
+- [x] Add return type annotations (cd, run, put methods)
+- [x] Fix mypy errors in connection.py (pass_response None check)
+- [x] Document complex types with improved docstrings
 
 ### 7. Consolidate Small Commands
 **Status:** Code Cleanup

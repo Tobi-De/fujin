@@ -63,8 +63,7 @@ class Down(BaseCommand):
 
             if not uninstall_ok:
                 if not self.force:
-                    self.output.error("Teardown failed")
-                    raise cappa.Exit(code=1)
+                    raise cappa.Exit("Teardown failed", code=1)
 
                 self.output.warning(
                     "Teardown encountered errors but continuing due to --force"
