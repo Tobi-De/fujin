@@ -8,7 +8,6 @@ import cappa
 import fujin
 
 from fujin.commands.app import App
-from fujin.commands.config import ConfigCMD
 from fujin.commands.deploy import Deploy
 from fujin.commands.docs import Docs
 from fujin.commands.down import Down
@@ -16,8 +15,8 @@ from fujin.commands.init import Init
 from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
 from fujin.commands.server import Server
+from fujin.commands.show import Show
 from fujin.commands.up import Up
-from fujin.commands.printenv import Printenv
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -41,17 +40,7 @@ def _setup_logging(verbose):
 @cappa.command(help="Deployment of python web apps in a breeze :)")
 class Fujin:
     subcommands: cappa.Subcommands[
-        Init
-        | Up
-        | Deploy
-        | App
-        | Server
-        | ConfigCMD
-        | Docs
-        | Down
-        | Rollback
-        | Prune
-        | Printenv
+        Init | Up | Deploy | App | Server | Show | Docs | Down | Rollback | Prune
     ]
     verbose: Annotated[
         int,
