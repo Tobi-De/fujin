@@ -99,13 +99,7 @@ class App(BaseCommand):
                 services["socket"] = services_status[socket_name]
 
         # Format info text with clickable URL
-        info_lines = []
-        for key, value in infos.items():
-            if key == "running_at" and value.startswith("http"):
-                # Make URL clickable
-                info_lines.append(f"{key}: [link={value}]{value}[/link]")
-            else:
-                info_lines.append(f"{key}: {value}")
+        info_lines = [f"{key}: {value}" for key, value in infos.items()]
         infos_text = "\n".join(info_lines)
 
         table = Table(title="", header_style="bold cyan")
@@ -146,7 +140,7 @@ class App(BaseCommand):
             ),
         ] = "$SHELL",
     ):
-        host = self.config.host
+        host = self.selected_host
         ssh_target = f"{host.user}@{host.ip or host.domain_name}"
         ssh_cmd = ["ssh", "-t"]
         if host.ssh_port:

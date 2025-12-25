@@ -22,6 +22,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚜 Refactor
 
+- Merge app exec and server exec into exec command
 - Consistent styling and help messages improvements
 
 ### 🎨 Styling
