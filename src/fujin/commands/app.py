@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import json
 from typing import Annotated
+from datetime import datetime
 
 import cappa
 from rich.table import Table
-
+from rich.console import Console
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
@@ -328,6 +330,68 @@ class App(BaseCommand):
                 return
 
             conn.run(f"sudo systemctl cat {' '.join(names)}", pty=True)
+
+    @cappa.command(help="Show deployment history")
+    def history(
+        self,
+        limit: Annotated[
+            int,
+            cappa.Arg(
+                short="-n",
+                long="--limit",
+                help="Number of deployments to show",
+            ),
+        ] = 10,
+    ):
+        """Display deployment history from the server."""
+        with self.connection() as conn:
+            app_dir = shlex.quote(self.config.app_dir(self.selected_host))
+            history_file = f"{app_dir}/.deployments.json"
+
+            stdout, success = conn.run(
+                f"cat {history_file} 2>/dev/null", hide=True, warn=True
+            )
+
+            if not success or not stdout.strip():
+                self.output.warning("No deployment history found")
+                return
+
+            try:
+                history = json.loads(stdout)
+            except json.JSONDecodeError:
+                self.output.error("Failed to parse deployment history")
+                return
+
+            if not history:
+                self.output.warning("No deployments recorded")
+                return
+
+            history = history[:limit]
+
+            console = Console()
+            table = Table(title="Deployment History", show_header=True)
+            table.add_column("Version", style="cyan")
+            table.add_column("When", style="green")
+            table.add_column("User", style="yellow")
+            table.add_column("Host")
+            table.add_column("Git Commit", style="dim")
+
+            for record in history:
+                try:
+                    ts = datetime.fromisoformat(record["timestamp"])
+                    when = ts.strftime("%Y-%m-%d %H:%M")
+                except (ValueError, KeyError):
+                    when = record.get("timestamp", "unknown")
+
+                table.add_row(
+                    record.get("version", "unknown"),
+                    when,
+                    record.get("user", "unknown"),
+                    record.get("host", "unknown"),
+                    record.get("git_commit") or "-",
+                )
+
+            console.print(table)
 
     def _resolve_active_systemd_units(self, name: str | None) -> list[str]:
         """

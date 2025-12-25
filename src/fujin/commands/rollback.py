@@ -6,6 +6,7 @@ from rich.prompt import Confirm
 from rich.prompt import Prompt
 
 from fujin.commands import BaseCommand
+from fujin.audit import log_operation
 
 
 @cappa.command(
@@ -94,6 +95,15 @@ class Rollback(BaseCommand):
                 f" && echo '==> Cleaning up newer versions...' && {cleanup_cmd}"
             )
             conn.run(full_cmd, pty=True)
-            self.output.success(
-                f"Rollback to version {version} completed successfully!"
-            )
+
+        log_operation(
+            operation="rollback",
+            host=self.selected_host.name or self.selected_host.domain_name,
+            details={
+                "from_version": current_version,
+                "to_version": version,
+                "app_name": self.config.app_name,
+            },
+        )
+
+        self.output.success(f"Rollback to version {version} completed successfully!")
