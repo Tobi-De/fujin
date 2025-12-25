@@ -16,7 +16,7 @@ class Show(BaseCommand):
     @cappa.command(help="Show rendered systemd units")
     def units(self):
         """Display all systemd unit files that will be deployed."""
-        units, user_units = self.config.render_systemd_units()
+        units, user_units = self.config.render_systemd_units(self.selected_host)
 
         if not units and not user_units:
             self.output.warning("No systemd units configured")
@@ -39,9 +39,9 @@ class Show(BaseCommand):
             self.output.warning("Webserver is not enabled in configuration")
             return
 
-        caddyfile = self.config.render_caddyfile()
+        caddyfile = self.config.render_caddyfile(self.selected_host)
         self.output.info(
-            f"[bold cyan]# Caddyfile for {self.config.host.domain_name}[/bold cyan]"
+            f"[bold cyan]# Caddyfile for {self.selected_host.domain_name}[/bold cyan]"
         )
         self.output.output(caddyfile)
 
@@ -57,16 +57,16 @@ class Show(BaseCommand):
         ] = False,
     ):
         """Display environment variables, optionally with secrets redacted."""
-        if not self.config.host.env_content:
+        if not self.selected_host.env_content:
             self.output.warning("No environment file configured")
             return
 
         if self.config.secret_config:
             resolved_env = resolve_secrets(
-                self.config.host.env_content, self.config.secret_config
+                self.selected_host.env_content, self.config.secret_config
             )
         else:
-            resolved_env = self.config.host.env_content
+            resolved_env = self.selected_host.env_content
 
         if not plain:
             resolved_env = _redact_secrets(resolved_env)
