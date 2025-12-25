@@ -103,11 +103,13 @@ def simple_config(app_name) -> dict:
             "logs": "app logs",
             "restart": "app restart",
         },
-        "host": {
-            "user": "root",
-            "domain_name": f"{app_name}.com",
-            "envfile": ".env.prod",
-        },
+        "hosts": [
+            {
+                "user": "root",
+                "domain_name": f"{app_name}.com",
+                "envfile": ".env.prod",
+            }
+        ],
     }
     return config
 
@@ -116,7 +118,7 @@ def django_config(app_name) -> dict:
     config = {
         "app": app_name,
         "version": "0.0.1",
-        "build_command": "uv build && uv pip compile pyproject.toml -o requirements.txt",
+        "build_command": "uv build && uv pip compile pyproject.toml -o requirements.txt > /dev/null",
         "distfile": f"dist/{app_name}-{{version}}-py3-none-any.whl",
         "requirements": "requirements.txt",
         "python_version": "3.12",
@@ -132,12 +134,17 @@ def django_config(app_name) -> dict:
                 "socket": True,
             }
         },
-        "aliases": {"shell": "server exec --appenv -i bash"},
-        "host": {
-            "user": "root",
-            "domain_name": f"{app_name}.com",
-            "envfile": ".env.prod",
+        "aliases": {
+            "shell": "server exec --appenv -i bash",
+            "status": "app info",
         },
+        "hosts": [
+            {
+                "user": "root",
+                "domain_name": f"{app_name}.com",
+                "envfile": ".env.prod",
+            }
+        ],
     }
     return config
 
@@ -159,12 +166,15 @@ def falco_config(app_name: str) -> dict:
                 "dbconsole": f"app shell '{app_name} dbshell'",
                 "print_settings": "app exec print_settings --format=pprint",
                 "shell": "app shell",
+                "status": "app info",
             },
-            "host": {
-                "user": "root",
-                "domain_name": f"{app_name}.com",
-                "envfile": ".env.prod",
-            },
+            "hosts": [
+                {
+                    "user": "root",
+                    "domain_name": f"{app_name}.com",
+                    "envfile": ".env.prod",
+                }
+            ],
         }
     )
     return config
@@ -182,10 +192,15 @@ def binary_config(app_name: str) -> dict:
         "release_command": f"{app_name} migrate",
         "installation_mode": InstallationMode.BINARY,
         "processes": {"web": {"command": f"{app_name} prodserver"}},
-        "aliases": {"shell": "app shell"},
-        "host": {
-            "user": "root",
-            "domain_name": f"{app_name}.com",
-            "envfile": ".env.prod",
+        "aliases": {
+            "shell": "app shell",
+            "status": "app info",
         },
+        "hosts": [
+            {
+                "user": "root",
+                "domain_name": f"{app_name}.com",
+                "envfile": ".env.prod",
+            }
+        ],
     }
