@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Logs filtering options
 - Migrate to zipapp
 
 ### 🐛 Bug Fixes

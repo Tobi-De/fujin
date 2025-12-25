@@ -164,8 +164,8 @@ fujin app logs --grep "ValueError"
 - [x] Add `--grep` pattern matching (-g/--grep)
 - [x] Document journalctl mapping (help text shows options)
 
-### 2. Resource Monitoring (`fujin server stats`)
-**Status:** New Feature
+### 2. Resource Monitoring (`fujin server stats`) ✅
+**Status:** ✅ Completed
 **Effort:** Medium
 **Impact:** High
 
@@ -176,16 +176,17 @@ fujin server stats
 
 # Output:
 # CPU: 15%
-# Memory: 2.1 GB / 4 GB (52%)
-# Disk: 12 GB / 50 GB (24%)
-# Network: ↓ 1.2 MB/s  ↑ 0.3 MB/s
+# Memory: 2048 MB / 4096 MB (50.0%)
+# Disk (/): 12G / 50G (24%)
+# Network: eth0: ↓ 1234.5 MB  ↑ 567.8 MB (total)
 ```
 
 **Tasks:**
-- [ ] Implement `fujin server stats` command
-- [ ] Parse `/proc` or use `top`/`htop` output
-- [ ] Add optional `--watch` mode for continuous monitoring
-- [ ] Consider per-process stats
+- [x] Implement `fujin server stats` command
+- [x] Parse `/proc` or use `top`/`htop` output (uses top, free, df, /proc/net/dev)
+- [x] Add optional `--watch` mode for continuous monitoring (-w/--watch with -i/--interval)
+- [x] Color-coded output (green < 70%, yellow < 90%, red >= 90%)
+- [ ] Consider per-process stats (deferred for future consideration)
 
 ### 3. SSH Setup Helper
 **Status:** New Feature
