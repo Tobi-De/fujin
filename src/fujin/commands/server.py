@@ -90,7 +90,7 @@ class Server(BaseCommand):
     ):
         with self.connection() as conn:
             command = (
-                f"cd {self.config.app_dir} && source .appenv && {command}"
+                f"cd {self.config.app_dir(self.selected_host)} && source .appenv && {command}"
                 if appenv
                 else command
             )

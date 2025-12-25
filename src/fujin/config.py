@@ -72,7 +72,7 @@ class Config(msgspec.Struct, kw_only=True):
     installation_mode: InstallationMode
     distfile: str
     aliases: dict[str, str] = msgspec.field(default_factory=dict)
-    host: HostConfig
+    hosts: list[HostConfig]
     processes: dict[str, ProcessConfig] = msgspec.field(default_factory=dict)
     webserver: Webserver
     requirements: str | None = None
@@ -83,6 +83,22 @@ class Config(msgspec.Struct, kw_only=True):
     )
 
     def __post_init__(self):
+        # Validate hosts configuration
+        if not self.hosts or len(self.hosts) == 0:
+            raise ImproperlyConfiguredError(
+                "At least one host must be defined in 'hosts' array"
+            )
+
+        # Validate host names in multi-host setup
+        if len(self.hosts) > 1:
+            names = [h.name for h in self.hosts if h.name]
+            if not names or len(names) != len(self.hosts):
+                raise ImproperlyConfiguredError(
+                    "All hosts must have a 'name' field when using multiple hosts"
+                )
+            if len(names) != len(set(names)):
+                raise ImproperlyConfiguredError("Host names must be unique")
+
         if self.installation_mode == InstallationMode.PY_PACKAGE:
             if not self.python_version:
                 self.python_version = find_python_version()
@@ -101,18 +117,56 @@ class Config(msgspec.Struct, kw_only=True):
                 "Missing web process or set the proxy enabled to False to disable the use of a proxy"
             )
 
+    def select_host(self, host_name: str | None = None) -> HostConfig:
+        """
+        Select a host by name, or return the default (first) host.
+
+        Args:
+            host_name: Optional host name to select. If None, returns first host.
+
+        Returns:
+            Selected HostConfig
+
+        Raises:
+            ImproperlyConfiguredError: If host_name is not found
+        """
+        # Return first host if no name specified (default behavior)
+        if not host_name:
+            return self.hosts[0]
+
+        # Find host by name
+        for host in self.hosts:
+            if host.name == host_name:
+                return host
+
+        # Host not found - show helpful error
+        available_names = [h.name for h in self.hosts if h.name]
+        if available_names:
+            available = ", ".join(available_names)
+            raise ImproperlyConfiguredError(
+                f"Host '{host_name}' not found. Available hosts: {available}"
+            )
+        else:
+            raise ImproperlyConfiguredError(
+                f"Host '{host_name}' not found. No named hosts configured."
+            )
+
     @property
     def app_bin(self) -> str:
         if self.installation_mode == InstallationMode.PY_PACKAGE:
             return f".venv/bin/{self.app_name}"
         return self.app_name
 
-    @property
-    def app_dir(self) -> str:
-        return f"{self.host.apps_dir}/{self.app_name}"
+    def app_dir(self, host: HostConfig | None = None) -> str:
+        """Get app directory for the given host (or default host)."""
+        host = host or self.select_host()
+        return f"{host.apps_dir}/{self.app_name}"
 
-    def get_release_dir(self, version: str | None = None) -> str:
-        return f"{self.app_dir}/v{version or self.version}"
+    def get_release_dir(
+        self, version: str | None = None, host: HostConfig | None = None
+    ) -> str:
+        """Get release directory for the given version and host."""
+        return f"{self.app_dir(host)}/v{version or self.version}"
 
     def get_distfile_path(self, version: str | None = None) -> Path:
         version = version or self.version
@@ -166,14 +220,18 @@ class Config(msgspec.Struct, kw_only=True):
     def _package_templates_path(self) -> Path:
         return Path(importlib.util.find_spec("fujin").origin).parent / "templates"
 
-    def render_systemd_units(self) -> tuple[dict[str, str], list[str]]:
+    def render_systemd_units(
+        self, host: HostConfig | None = None
+    ) -> tuple[dict[str, str], list[str]]:
+        """Render systemd units for the given host (or default host)."""
+        host = host or self.select_host()
         env = self._template_env()
         package_templates = self._package_templates_path()
 
         context = {
             "app_name": self.app_name,
-            "user": self.host.user,
-            "app_dir": self.app_dir,
+            "user": host.user,
+            "app_dir": self.app_dir(host),
         }
 
         files = {}
@@ -238,11 +296,13 @@ class Config(msgspec.Struct, kw_only=True):
 
         return files, user_template_units
 
-    def render_caddyfile(self) -> str:
+    def render_caddyfile(self, host: HostConfig | None = None) -> str:
+        """Render Caddyfile for the given host (or default host)."""
+        host = host or self.select_host()
         env = self._template_env()
         template = env.get_template("Caddyfile.j2")
         return template.render(
-            domain_name=self.host.domain_name,
+            domain_name=host.domain_name,
             upstream=self.webserver.upstream,
             statics=self.webserver.statics,
         )
@@ -253,6 +313,7 @@ class Config(msgspec.Struct, kw_only=True):
 
 
 class HostConfig(msgspec.Struct, kw_only=True):
+    name: str | None = None
     ip: str | None = None
     domain_name: str
     user: str

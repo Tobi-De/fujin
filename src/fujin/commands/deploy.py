@@ -40,10 +40,10 @@ class Deploy(BaseCommand):
         if self.config.secret_config:
             self.output.info("Resolving secrets from configuration...")
             parsed_env = resolve_secrets(
-                self.config.host.env_content, self.config.secret_config
+                self.selected_host.env_content, self.config.secret_config
             )
         else:
-            parsed_env = self.config.host.env_content
+            parsed_env = self.selected_host.env_content
 
         try:
             logger.debug(
@@ -95,7 +95,7 @@ class Deploy(BaseCommand):
 
             units_dir = bundle_dir / "units"
             units_dir.mkdir()
-            new_units, user_units = self.config.render_systemd_units()
+            new_units, user_units = self.config.render_systemd_units(self.selected_host)
             for name, content in new_units.items():
                 (units_dir / name).write_text(content)
 
@@ -105,7 +105,7 @@ class Deploy(BaseCommand):
             # Create installer config
             installer_config = {
                 "app_name": self.config.app_name,
-                "app_dir": self.config.app_dir,
+                "app_dir": self.config.app_dir(self.selected_host),
                 "version": version,
                 "installation_mode": self.config.installation_mode.value,
                 "python_version": self.config.python_version,
@@ -160,7 +160,9 @@ class Deploy(BaseCommand):
             with open(zipapp_path, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
-            remote_bundle_dir = Path(self.config.app_dir) / ".versions"
+            remote_bundle_dir = (
+                Path(self.config.app_dir(self.selected_host)) / ".versions"
+            )
             remote_bundle_path = (
                 f"{remote_bundle_dir}/{self.config.app_name}-{version}.pyz"
             )
@@ -241,5 +243,5 @@ class Deploy(BaseCommand):
 
         self.output.success("Deployment completed successfully!")
         if self.config.webserver.enabled:
-            url = f"https://{self.config.host.domain_name}"
+            url = f"https://{self.selected_host.domain_name}"
             self.output.info(f"Application is available at: {url}")

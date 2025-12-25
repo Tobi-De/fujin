@@ -19,7 +19,7 @@ class App(BaseCommand):
     @cappa.command(help="Display application information and process status")
     def info(self):
         with self.connection() as conn:
-            app_dir = shlex.quote(self.config.app_dir)
+            app_dir = shlex.quote(self.config.app_dir(self.selected_host))
             names = self.config.active_systemd_units
             delimiter = "___FUJIN_DELIM___"
 
@@ -55,7 +55,7 @@ class App(BaseCommand):
 
             infos = {
                 "app_name": self.config.app_name,
-                "app_dir": self.config.app_dir,
+                "app_dir": self.config.app_dir(self.selected_host),
                 "app_bin": self.config.app_bin,
                 "local_version": self.config.version,
                 "remote_version": remote_version,
@@ -69,7 +69,7 @@ class App(BaseCommand):
                 infos["python_version"] = self.config.python_version
 
             if self.config.webserver.enabled:
-                infos["running_at"] = f"https://{self.config.host.domain_name}"
+                infos["running_at"] = f"https://{self.selected_host.domain_name}"
 
             services_status = {}
             statuses = parts[2].strip().split("\n")
@@ -138,7 +138,7 @@ class App(BaseCommand):
         command: str,
     ):
         with self.connection() as conn:
-            with conn.cd(self.config.app_dir):
+            with conn.cd(self.config.app_dir(self.selected_host)):
                 conn.run(f"source .appenv && {self.config.app_bin} {command}", pty=True)
 
     @cappa.command(
@@ -161,7 +161,7 @@ class App(BaseCommand):
         if host.key_filename:
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
-        full_remote_cmd = f"cd {self.config.app_dir} && source .appenv && {command}"
+        full_remote_cmd = f"cd {self.config.app_dir(self.selected_host)} && source .appenv && {command}"
         ssh_cmd.extend([ssh_target, full_remote_cmd])
         subprocess.run(ssh_cmd)
 

@@ -35,7 +35,7 @@ class Down(BaseCommand):
     def __call__(self):
         msg = (
             f"[red]You are about to delete all project files, stop all services,\n"
-            f"and remove all configurations on the host {self.config.host.ip} for the project {self.config.app_name}.\n"
+            f"and remove all configurations on the host {self.selected_host.ip} for the project {self.config.app_name}.\n"
             f"Any assets in your project folder will be lost.\n"
             f"Are you sure you want to proceed? This action is irreversible.[/red]"
         )
@@ -49,7 +49,7 @@ class Down(BaseCommand):
         with self.connection() as conn:
             self.output.info("Tearing down project...")
 
-            app_dir = shlex.quote(self.config.app_dir)
+            app_dir = shlex.quote(self.config.app_dir(self.selected_host))
             res, ok = conn.run(f"cat {app_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
             bundle_path = f"{app_dir}/.versions/{self.config.app_name}-{version}.pyz"
