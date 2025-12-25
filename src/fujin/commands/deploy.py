@@ -18,6 +18,7 @@ from rich.prompt import Confirm
 
 from fujin.commands import BaseCommand
 from fujin.secrets import resolve_secrets
+from fujin.errors import BuildError, UploadError
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +52,31 @@ class Deploy(BaseCommand):
             self.output.info(f"Building application v{self.config.version}...")
             subprocess.run(self.config.build_command, check=True, shell=True)
         except subprocess.CalledProcessError as e:
-            raise cappa.Exit(f"build command failed: {e}", code=1) from e
+            self.output.error(f"Build command failed with exit code {e.returncode}")
+            self.output.info(f"Command: {self.config.build_command}")
+            self.output.info("\nTroubleshooting:")
+            self.output.info("  - Check that all build dependencies are installed")
+            self.output.info("  - Verify your build_command in fujin.toml is correct")
+            self.output.info(
+                "  - Try running the build command manually to see full error output"
+            )
+            raise BuildError("Build failed", command=self.config.build_command) from e
         # the build commands might be responsible for creating the requirements file
         if self.config.requirements and not Path(self.config.requirements).exists():
-            raise cappa.Exit(f"{self.config.requirements} not found", code=1)
+            self.output.error(
+                f"Requirements file not found: {self.config.requirements}"
+            )
+            self.output.info("\nTroubleshooting:")
+            self.output.info(
+                "  - Ensure your build_command generates the requirements file"
+            )
+            self.output.info(
+                "  - Check that the 'requirements' path in fujin.toml is correct"
+            )
+            self.output.info(
+                f"  - Try running: uv pip compile pyproject.toml -o {self.config.requirements}"
+            )
+            raise BuildError(f"Requirements file not found: {self.config.requirements}")
 
         version = self.config.version
         distfile_path = self.config.get_distfile_path(version)
@@ -181,15 +203,31 @@ class Deploy(BaseCommand):
                     self.output.error(
                         f"Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}"
                     )
+                    self.output.warning(
+                        "The uploaded file doesn't match the local file. This could indicate:"
+                    )
+                    self.output.info("  - Network corruption during transfer")
+                    self.output.info("  - Storage issues on the remote server")
+                    self.output.info("  - Interrupted upload")
 
                     if self.no_input or (
                         attempt == max_upload_retries
                         or not Confirm.ask("Upload failed. Retry?")
                     ):
-                        raise cappa.Exit("Upload aborted by user.", code=1)
+                        self.output.error("Upload verification failed")
+                        self.output.info("\nTroubleshooting:")
+                        self.output.info("  - Check your network connection stability")
+                        self.output.info(
+                            "  - Verify the remote server has sufficient disk space: df -h"
+                        )
+                        self.output.info("  - Try deploying again with: fujin deploy")
+                        raise UploadError(
+                            "Upload verification failed", checksum_mismatch=True
+                        )
 
                 if not upload_ok:
-                    raise cappa.Exit("Upload failed after retries.", code=1)
+                    self.output.error("Upload failed after maximum retries")
+                    raise UploadError("Upload failed after maximum retries")
 
                 self.output.info("Executing remote installation...")
                 deploy_script = f"python3 {remote_bundle_path_q} install || (echo 'install failed' >&2; exit 1)"
@@ -204,4 +242,4 @@ class Deploy(BaseCommand):
         self.output.success("Deployment completed successfully!")
         if self.config.webserver.enabled:
             url = f"https://{self.config.host.domain_name}"
-            self.output.info(f"Application is available at: {self.output.link(url)}")
+            self.output.info(f"Application is available at: {url}")
