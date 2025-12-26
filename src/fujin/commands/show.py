@@ -18,20 +18,20 @@ class Show(BaseCommand):
         """Display all systemd unit files that will be deployed."""
         units, user_units = self.config.render_systemd_units(self.selected_host)
 
-        if not units and not user_units:
+        if not units:
             self.output.warning("No systemd units configured")
             return
 
-        if units:
-            for filename, content in units.items():
+        for filename, content in units.items():
+            if filename not in user_units:
                 self.output.info(f"\n[bold cyan]# {filename}[/bold cyan]")
                 self.output.output(content)
 
         if user_units:
             self.output.info("\n[bold cyan]# User Units[/bold cyan]")
-            for filename, content in user_units.items():
+            for filename in user_units:
                 self.output.info(f"\n[bold cyan]# {filename}[/bold cyan]")
-                self.output.output(content)
+                self.output.output(units[filename])
 
     @cappa.command(help="Show rendered Caddyfile")
     def caddy(self):
