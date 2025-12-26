@@ -4,7 +4,7 @@ version = "0.1.2"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["django>=5.1.2", "django-tasks>=0.5", "gunicorn>=23.0.0"]
+dependencies = ["django>=6", "django-tasks>=0.10", "gunicorn>=23.0.0"]
 
 [project.scripts]
 bookstore = "bookstore.__main__:main"

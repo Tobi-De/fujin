@@ -9,7 +9,7 @@ installation_mode = "python-package"
 
 [webserver]
 upstream = "unix//run/bookstore/bookstore.sock"
-statics = { "/static/*" = "/var/www/bookstore/static/" }
+statics = { "/static/*" = "{app_dir}/static/" }
 
 [aliases]
 console = "app exec -i shell"
@@ -21,15 +21,17 @@ web = { command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix:/ru
 worker = { command = ".venv/bin/bookstore db_worker", replicas = 2 }
 health = { command = ".venv/bin/bookstore health", timer = "*:*:00" }
 
-# [host]
-# domain_name = "localhost"
-# envfile = ".env.prod"
-# user = "vagrant"
-# key_filename = "../../../.vagrant/machines/default/virtualbox/private_key"
-# ssh_port = 2222
-
-[host]
+[[hosts]]
+name = "default"
 domain_name = "book.13.204.64.39.nip.io"
 envfile = ".env.prod"
 user = "ubuntu"
 key_filename = "/var/home/tobi/bluefin.pem"
+
+[[hosts]]
+name = "vagrant"
+domain_name = "localhost"
+envfile = ".env.prod"
+user = "vagrant"
+key_filename = "../../../.vagrant/machines/default/virtualbox/private_key"
+ssh_port = 2222

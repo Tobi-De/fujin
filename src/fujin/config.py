@@ -46,7 +46,6 @@ class ProcessConfig(msgspec.Struct):
     replicas: int = 1
     socket: bool = False
     timer: str | None = None
-    context: dict[str, str] = msgspec.field(default_factory=dict)
 
     def __post_init__(self):
         if self.socket and self.timer:
@@ -259,7 +258,7 @@ class Config(msgspec.Struct, kw_only=True):
                 user_template_units.append(service_name)
 
             body = template.render(
-                context=process_config.context,
+                context=host.context,
                 **context,
                 command=command,
                 process_name=process_name,
@@ -275,7 +274,7 @@ class Config(msgspec.Struct, kw_only=True):
                 if is_user_template:
                     user_template_units.append(socket_name)
 
-                body = template.render(context=process_config.context, **context)
+                body = template.render(context=host.context, **context)
                 files[socket_name] = body
 
             if process_config.timer:
@@ -287,7 +286,7 @@ class Config(msgspec.Struct, kw_only=True):
                     user_template_units.append(timer_name)
 
                 body = template.render(
-                    context=process_config.context,
+                    context=host.context,
                     **context,
                     process_name=process_name,
                     process=process_config,
@@ -301,10 +300,17 @@ class Config(msgspec.Struct, kw_only=True):
         host = host or self.select_host()
         env = self._template_env()
         template = env.get_template("Caddyfile.j2")
+        context = {"user": host.user, "app_dir": self.app_dir(host)}
+        statics = {
+            key: value.format(**context, **host.context)
+            for key, value in self.webserver.statics.items()
+        }
         return template.render(
             domain_name=host.domain_name,
             upstream=self.webserver.upstream,
-            statics=self.webserver.statics,
+            statics=statics,
+            **context,
+            context=host.context,
         )
 
     @property
@@ -317,6 +323,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
     ip: str | None = None
     domain_name: str
     user: str
+    context: dict[str, str] = msgspec.field(default_factory=dict)
     _env_file: str | None = msgspec.field(name="envfile", default=None)
     env_content: str | None = msgspec.field(name="env", default=None)
     apps_dir: str = ".local/share/fujin"
