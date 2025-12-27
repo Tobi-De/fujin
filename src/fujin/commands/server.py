@@ -193,8 +193,12 @@ class Server(BaseCommand):
             self.output.info("Creating new fujin.toml...")
             config_data = {}
 
-        # Override host configuration
-        config_data["host"] = {"domain_name": f"{ip}.nip.io", "user": username}
+        # Override first host configuration
+        hosts = config_data.get("hosts", [])
+        if len(hosts) == 0:
+            hosts = [{}]
+        hosts[0] = {"domain_name": f"{ip}.nip.io", "user": username}
+        config_data["hosts"] = hosts
 
         # Write back to fujin.toml
         fujin_toml.write_text(tomli_w.dumps(config_data, multiline_strings=True))
