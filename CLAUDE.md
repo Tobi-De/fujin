@@ -259,3 +259,62 @@ console = "app exec -i shell"
 ```
 
 Parsed in `__main__.py:_parse_aliases()` and expands before command invocation.
+
+## Testing Principles
+
+### Test Structure
+
+Tests are organized in `tests/` with clear separation:
+- `tests/unit/` - Fast unit tests with no external dependencies
+- `tests/installer/` - Zipapp installer tests
+- `tests/integration/` - Docker-based integration tests requiring SSH
+
+### Core Principles
+
+**Avoid Noise**
+- No docstrings that just repeat the function name
+- Remove comments that don't add information beyond what the code shows
+- Keep only meaningful inline comments that explain non-obvious behavior
+
+**Consolidate Related Tests**
+- Combine related single-assert tests into comprehensive tests
+- Group multiple assertions testing the same functionality
+- Example: Instead of `test_for_case_a()` and `test_for_case_b()`, write `test_handles_cases_a_and_b()`
+
+**Test Business Logic, Not Libraries**
+- Don't test framework/library functionality (e.g., msgspec type validation)
+- Focus on our code's behavior and validation logic
+- Test edge cases and error conditions in our code
+
+**Fixtures**
+- Add fixtures as needed, not upfront
+- Use descriptive names that indicate what they provide
+- Keep fixtures minimal and focused
+- Prefer function-scoped fixtures for isolation
+
+**Code Organization**
+- All imports at the top of the file (no inline imports)
+- Import constants from source instead of redefining them in tests
+- Use logical section headers to group related tests
+- Mark tests with appropriate pytest markers (`@pytest.mark.unit`, etc.)
+
+**Error Assertions**
+- Access error messages via `.message` attribute for `ImproperlyConfiguredError`
+- Check for meaningful error message content, not just exception type
+- Example: `assert "expected text" in exc_info.value.message.lower()`
+
+### Running Tests
+
+```bash
+# Run all tests (excludes integration by default)
+just test
+
+# Run integration tests (requires Docker)
+just test-integration
+
+# Run specific test file
+just test tests/unit/test_config.py
+
+# Run with specific marker
+pytest -m unit
+```
