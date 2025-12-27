@@ -300,7 +300,6 @@ class App(BaseCommand):
         self,
         name: Annotated[str | None, cappa.Arg(help="Service name")] = None,
     ):
-        # Show available options if no name provided
         if not name:
             self.output.info("Available options:")
             self.output.output(self._get_available_options())
@@ -317,7 +316,6 @@ class App(BaseCommand):
             if name == "units":
                 names = self.config.systemd_units
             else:
-                # Use templates for cat (shows unit files, not instances)
                 names = self._resolve_units(name, use_templates=True)
 
             if not names:
@@ -363,7 +361,6 @@ class App(BaseCommand):
 
             history = history[:limit]
 
-            # Group records by host
             grouped: dict[str, list[dict]] = defaultdict(list)
             for record in history:
                 host = record.get("host", "unknown")
@@ -371,7 +368,6 @@ class App(BaseCommand):
 
             console = Console()
 
-            # Print each host group
             first = True
             for host, host_records in grouped.items():
                 if not first:
@@ -380,7 +376,6 @@ class App(BaseCommand):
                 first = False
 
                 for record in host_records:
-                    # Format timestamp
                     try:
                         ts = datetime.fromisoformat(record["timestamp"])
                         timestamp = ts.strftime("%Y-%m-%d %H:%M")
@@ -391,12 +386,10 @@ class App(BaseCommand):
                     version = record.get("version", "unknown")
                     git_commit = record.get("git_commit", "")
 
-                    # Format message
                     message = f"Deployed version [blue]{version}[/blue]"
                     if git_commit:
                         message += f" [dim]({git_commit[:7]})[/dim]"
 
-                    # Print in compact log format: [timestamp] [user] message
                     console.print(
                         f"  [{escape(timestamp)}] [dim]\\[[/dim][yellow]{user}[/yellow][dim]][/dim] {message}",
                         highlight=False,

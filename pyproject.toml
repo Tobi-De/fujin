@@ -51,11 +51,7 @@ scripts.fujin = "fujin.__main__:main"
 
 [dependency-groups]
 dev = [
-  "django>=5.1.2",
-  "inline-snapshot>=0.13",
   "pytest>=9.0.1",
-  "pytest-subprocess>=1.5.3",
-  "shellcheck-py>=0.11.0.1",
 ]
 docs = [
   "myst-parser",
@@ -133,7 +129,15 @@ lint.isort.required-imports = [ "from __future__ import annotations" ]
 lint.pyupgrade.keep-runtime-typing = true
 
 [tool.pytest.ini_options]
-markers = [ "use_recorder: mark test to use the mock recorder" ]
+testpaths = [ "tests" ]
+markers = [
+  "unit: Fast unit tests with no external dependencies",
+  "integration: Integration tests requiring Docker",
+  "slow: Tests that take >5 seconds",
+  "ssh: Tests requiring SSH connection",
+  "installer: Tests for the zipapp installer",
+  "use_recorder: mark test to use the mock recorder",
+]
 
 [tool.bumpversion]
 current_version = "0.14.1"

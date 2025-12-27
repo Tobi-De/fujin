@@ -36,6 +36,10 @@ class SecretAdapter(StrEnum):
     SYSTEM = "system"
 
 
+# Reserved process names that cannot be used
+RESERVED_PROCESS_NAMES = {"env", "caddy", "units", "socket", "timer"}
+
+
 class SecretConfig(msgspec.Struct):
     adapter: SecretAdapter
     password_env: str | None = None
@@ -105,13 +109,12 @@ class Config(msgspec.Struct, kw_only=True):
         if len(self.processes) == 0:
             raise ImproperlyConfiguredError("At least one process must be defined")
 
-        reserved_names = {"env", "caddy", "units", "socket", "timer"}
         for process_name in self.processes:
             if process_name.strip() == "":
                 raise ImproperlyConfiguredError("Process names cannot be empty strings")
             elif process_name.count(" ") > 0:
                 raise ImproperlyConfiguredError("Process names cannot contain spaces")
-            elif process_name in reserved_names:
+            elif process_name in RESERVED_PROCESS_NAMES:
                 raise ImproperlyConfiguredError(
                     f"Process name '{process_name}' is reserved and cannot be used"
                 )
@@ -348,7 +351,9 @@ class HostConfig(msgspec.Struct, kw_only=True):
                 raise ImproperlyConfiguredError(f"{self._env_file} not found")
             self.env_content = envfile.read_text()
         self.env_content = self.env_content.strip() if self.env_content else ""
-        self.apps_dir = f"/home/{self.user}/{self.apps_dir}"
+        # Only prepend /home/{user} if apps_dir is a relative path
+        if not self.apps_dir.startswith("/"):
+            self.apps_dir = f"/home/{self.user}/{self.apps_dir}"
         self.ip = self.ip or self.domain_name
 
     @property

@@ -32,7 +32,6 @@ class Audit:
             console.print("[dim]No audit logs found[/dim]")
             return
 
-        # Group records by host
         grouped: dict[str, list[dict]] = defaultdict(list)
         for record in records:
             host = record.get("host", "unknown")
@@ -48,7 +47,6 @@ class Audit:
             first = False
 
             for record in host_records:
-                # Format timestamp
                 try:
                     ts = datetime.fromisoformat(record["timestamp"])
                     timestamp = ts.strftime("%Y-%m-%d %H:%M")
@@ -60,7 +58,6 @@ class Audit:
                 details = record.get("details", {})
                 app_name = details.get("app_name", "")
 
-                # Format message based on operation
                 if operation == "deploy":
                     version = details.get("version", "unknown")
                     message = f"Deployed {app_name} version [blue]{version}[/blue]"
@@ -78,7 +75,6 @@ class Audit:
                 else:
                     message = f"{operation}"
 
-                # Print in compact log format: [timestamp] [user] message
                 console.print(
                     f"  [{escape(timestamp)}] [dim]\\[[/dim][yellow]{user}[/yellow][dim]][/dim] {message}",
                     highlight=False,

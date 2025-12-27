@@ -21,6 +21,9 @@ RUN useradd -m -s /bin/bash fujin && \
     usermod -aG sudo fujin && \
     echo "fujin ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
+# 3.5. Install uv for the fujin user
+RUN su - fujin -c "curl -LsSf https://astral.sh/uv/install.sh | sh"
+
 # 4. Systemd cleanup (standard steps to make systemd work in docker)
 RUN systemctl enable ssh
 RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
@@ -35,6 +38,12 @@ RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
 CMD ["/lib/systemd/systemd"]
 
 # 6. Mock Caddy (so we don't need to install the full binary)
-RUN mkdir -p /etc/caddy/conf.d
-RUN echo '[Unit]\nDescription=Dummy Caddy\n[Service]\nExecStart=/bin/sleep infinity\nExecReload=/bin/true\n[Install]\nWantedBy=multi-user.target' > /etc/systemd/system/caddy.service
+RUN mkdir -p /etc/caddy/conf.d && \
+    useradd -r -s /bin/false caddy && \
+    chown -R caddy:caddy /etc/caddy
+RUN echo '[Unit]\nDescription=Dummy Caddy\n[Service]\nUser=caddy\nGroup=caddy\nExecStart=/bin/sleep infinity\nExecReload=/bin/true\n[Install]\nWantedBy=multi-user.target' > /etc/systemd/system/caddy.service
 RUN systemctl enable caddy
+
+# 7. Create a mock caddy binary that validates configs
+RUN echo '#!/bin/bash\nif [[ "$1" == "validate" ]]; then exit 0; fi\nif [[ "$1" == "reload" ]]; then exit 0; fi' > /usr/bin/caddy && \
+    chmod +x /usr/bin/caddy
