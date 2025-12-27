@@ -120,9 +120,9 @@ class Deploy(BaseCommand):
                 "webserver_enabled": self.config.webserver.enabled,
                 "caddy_config_path": self.config.caddy_config_path,
                 "app_bin": self.config.app_bin,
-                "active_units": self.config.active_systemd_units,
+                "active_units": self.config.systemd_units,
                 "valid_units": sorted(
-                    set(self.config.active_systemd_units) | set(new_units.keys())
+                    set(self.config.systemd_units) | set(new_units.keys())
                 ),
                 "user_units": user_units,
             }
