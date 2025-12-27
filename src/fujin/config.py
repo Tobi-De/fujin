@@ -105,11 +105,16 @@ class Config(msgspec.Struct, kw_only=True):
         if len(self.processes) == 0:
             raise ImproperlyConfiguredError("At least one process must be defined")
 
+        reserved_names = {"env", "caddy", "units", "socket", "timer"}
         for process_name in self.processes:
             if process_name.strip() == "":
                 raise ImproperlyConfiguredError("Process names cannot be empty strings")
             elif process_name.count(" ") > 0:
                 raise ImproperlyConfiguredError("Process names cannot contain spaces")
+            elif process_name in reserved_names:
+                raise ImproperlyConfiguredError(
+                    f"Process name '{process_name}' is reserved and cannot be used"
+                )
 
         if "web" not in self.processes and self.webserver.enabled:
             raise ImproperlyConfiguredError(
@@ -190,7 +195,7 @@ class Config(msgspec.Struct, kw_only=True):
             return f"{self.app_name}{suffix}"
         return f"{self.app_name}-{process_name}{suffix}"
 
-    def get_active_unit_names(self, process_name: str) -> list[str]:
+    def get_unit_names(self, process_name: str) -> list[str]:
         config = self.processes[process_name]
         service_name = self.get_unit_template_name(process_name)
         if config.replicas > 1:
@@ -199,10 +204,10 @@ class Config(msgspec.Struct, kw_only=True):
         return [service_name]
 
     @property
-    def active_systemd_units(self) -> list[str]:
+    def systemd_units(self) -> list[str]:
         services = []
         for name in self.processes:
-            services.extend(self.get_active_unit_names(name))
+            services.extend(self.get_unit_names(name))
         for name, config in self.processes.items():
             if config.socket:
                 services.append(f"{self.app_name}.socket")
