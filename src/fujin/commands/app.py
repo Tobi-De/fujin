@@ -5,10 +5,12 @@ import subprocess
 import json
 from typing import Annotated
 from datetime import datetime
+from collections import defaultdict
 
 import cappa
 from rich.table import Table
 from rich.console import Console
+from rich.markup import escape
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
@@ -361,27 +363,41 @@ class App(BaseCommand):
 
             history = history[:limit]
 
-            console = Console()
-            table = Table(title="Deployment History", show_header=True)
-            table.add_column("Version", style="cyan")
-            table.add_column("When", style="green")
-            table.add_column("User", style="yellow")
-            table.add_column("Host")
-            table.add_column("Git Commit", style="dim")
-
+            # Group records by host
+            grouped: dict[str, list[dict]] = defaultdict(list)
             for record in history:
-                try:
-                    ts = datetime.fromisoformat(record["timestamp"])
-                    when = ts.strftime("%Y-%m-%d %H:%M")
-                except (ValueError, KeyError):
-                    when = record.get("timestamp", "unknown")
+                host = record.get("host", "unknown")
+                grouped[host].append(record)
 
-                table.add_row(
-                    record.get("version", "unknown"),
-                    when,
-                    record.get("user", "unknown"),
-                    record.get("host", "unknown"),
-                    record.get("git_commit") or "-",
-                )
+            console = Console()
 
-            console.print(table)
+            # Print each host group
+            first = True
+            for host, host_records in grouped.items():
+                if not first:
+                    console.print()
+                console.print(f"[green]{host}[/green]:")
+                first = False
+
+                for record in host_records:
+                    # Format timestamp
+                    try:
+                        ts = datetime.fromisoformat(record["timestamp"])
+                        timestamp = ts.strftime("%Y-%m-%d %H:%M")
+                    except (ValueError, KeyError):
+                        timestamp = record.get("timestamp", "unknown")
+
+                    user = record.get("user", "unknown")
+                    version = record.get("version", "unknown")
+                    git_commit = record.get("git_commit", "")
+
+                    # Format message
+                    message = f"Deployed version [blue]{version}[/blue]"
+                    if git_commit:
+                        message += f" [dim]({git_commit[:7]})[/dim]"
+
+                    # Print in compact log format: [timestamp] [user] message
+                    console.print(
+                        f"  [{escape(timestamp)}] [dim]\\[[/dim][yellow]{user}[/yellow][dim]][/dim] {message}",
+                        highlight=False,
+                    )

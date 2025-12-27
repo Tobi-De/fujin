@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Annotated
 from datetime import datetime
+from collections import defaultdict
 
 import cappa
-from rich.table import Table
 from rich.console import Console
+from rich.markup import escape
 
 from fujin.audit import read_logs
 
@@ -31,44 +32,54 @@ class Audit:
             console.print("[dim]No audit logs found[/dim]")
             return
 
-        # Display in a table
-        console = Console()
-        table = Table(title="Local Audit Log", show_header=True)
-        table.add_column("When", style="green", width=16)
-        table.add_column("Operation", style="cyan", width=12)
-        table.add_column("Host", style="yellow")
-        table.add_column("User", width=12)
-        table.add_column("Details", style="dim")
-
+        # Group records by host
+        grouped: dict[str, list[dict]] = defaultdict(list)
         for record in records:
-            # Format timestamp
-            try:
-                ts = datetime.fromisoformat(record["timestamp"])
-                when = ts.strftime("%Y-%m-%d %H:%M")
-            except (ValueError, KeyError):
-                when = record.get("timestamp", "unknown")
-
-            operation = record.get("operation", "unknown")
             host = record.get("host", "unknown")
-            user = record.get("user", "unknown")
-            details = record.get("details", {})
+            grouped[host].append(record)
 
-            # Format details based on operation
-            details_str = ""
-            if operation == "deploy":
-                version = details.get("version", "")
-                details_str = f"v{version}"
-            elif operation == "rollback":
-                from_v = details.get("from_version", "")
-                to_v = details.get("to_version", "")
-                details_str = f"{from_v} → {to_v}"
-            elif operation == "down":
-                version = details.get("version", "")
-                full = details.get("full", False)
-                details_str = f"v{version}"
-                if full:
-                    details_str += " (full)"
+        console = Console()
 
-            table.add_row(when, operation, host, user, details_str)
+        first = True
+        for host, host_records in grouped.items():
+            if not first:
+                console.print()
+            console.print(f"[green]{host}[/green]:")
+            first = False
 
-        console.print(table)
+            for record in host_records:
+                # Format timestamp
+                try:
+                    ts = datetime.fromisoformat(record["timestamp"])
+                    timestamp = ts.strftime("%Y-%m-%d %H:%M")
+                except (ValueError, KeyError):
+                    timestamp = record.get("timestamp", "unknown")
+
+                user = record.get("user", "unknown")
+                operation = record.get("operation", "unknown")
+                details = record.get("details", {})
+                app_name = details.get("app_name", "")
+
+                # Format message based on operation
+                if operation == "deploy":
+                    version = details.get("version", "unknown")
+                    message = f"Deployed {app_name} version [blue]{version}[/blue]"
+                elif operation == "rollback":
+                    from_v = details.get("from_version", "unknown")
+                    to_v = details.get("to_version", "unknown")
+                    message = f"Rolled back {app_name} from [blue]{from_v}[/blue] to [blue]{to_v}[/blue]"
+                elif operation == "down":
+                    version = details.get("version", "unknown")
+                    full = details.get("full", False)
+                    full_str = " (full cleanup)" if full else ""
+                    message = (
+                        f"Stopped {app_name} version [blue]{version}[/blue]{full_str}"
+                    )
+                else:
+                    message = f"{operation}"
+
+                # Print in compact log format: [timestamp] [user] message
+                console.print(
+                    f"  [{escape(timestamp)}] [dim]\\[[/dim][yellow]{user}[/yellow][dim]][/dim] {message}",
+                    highlight=False,
+                )
