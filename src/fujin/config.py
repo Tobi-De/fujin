@@ -36,7 +36,6 @@ class SecretAdapter(StrEnum):
     SYSTEM = "system"
 
 
-# Reserved process names that cannot be used
 RESERVED_PROCESS_NAMES = {"env", "caddy", "units", "socket", "timer"}
 
 
@@ -61,7 +60,6 @@ class TimerConfig(msgspec.Struct):
     accuracy_sec: str | None = None
 
     def __post_init__(self):
-        # At least one trigger must be specified
         triggers = [
             self.on_calendar,
             self.on_boot_sec,
@@ -116,7 +114,6 @@ class Config(msgspec.Struct, kw_only=True):
     )
 
     def __post_init__(self):
-        # Validate hosts configuration
         if not self.hosts or len(self.hosts) == 0:
             raise ImproperlyConfiguredError(
                 "At least one host must be defined in 'hosts' array"
@@ -157,21 +154,10 @@ class Config(msgspec.Struct, kw_only=True):
     def select_host(self, host_name: str | None = None) -> HostConfig:
         """
         Select a host by name, or return the default (first) host.
-
-        Args:
-            host_name: Optional host name to select. If None, returns first host.
-
-        Returns:
-            Selected HostConfig
-
-        Raises:
-            ImproperlyConfiguredError: If host_name is not found
         """
-        # Return first host if no name specified (default behavior)
         if not host_name:
             return self.hosts[0]
 
-        # Find host by name
         for host in self.hosts:
             if host.name == host_name:
                 return host

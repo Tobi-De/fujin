@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Rework timer config with more options
 - Added operation logging and deployment history
 - Added multi server support
 - Added show command in favor or printenv
@@ -25,6 +26,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Move custom context from process to host
 - Merge app exec and server exec into exec command
 - Consistent styling and help messages improvements
+
+### 📚 Documentation
+
+- Fix app info command documentation
+- Fix variable interpolation syntax and interactive commands
+- Fix incorrect app command examples
+- Refine documentation based on feedback
+- Comprehensive documentation overhaul
 
 ### 🎨 Styling
 

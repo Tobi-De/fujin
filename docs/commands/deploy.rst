@@ -1,11 +1,23 @@
 deploy
 ======
 
+The ``fujin deploy`` command deploys your application to the server.
 
-.. cappa:: fujin.commands.deploy.Deploy
-   :style: terminal
-   :terminal-width: 0
+.. image:: ../_static/images/help/deploy-help.png
+   :alt: fujin deploy command help
+   :width: 100%
 
+Overview
+--------
+
+This is the core deployment command. It builds your application locally, bundles all necessary files, uploads them to the server, and installs/configures everything.
+
+Use ``fujin deploy`` for:
+
+- Deploying code changes
+- Updating configuration
+- Updating environment variables
+- Refreshing systemd units or Caddy configuration
 
 How it works
 ------------
