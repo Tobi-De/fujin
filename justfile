@@ -83,11 +83,29 @@ download-pocketbase:
 @logchanges *ARGS:
     uvx git-cliff --output CHANGELOG.md {{ ARGS }}
 
+# Sync plugin package versions to match core package version
+@sync-plugin-versions:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CORE_VERSION=$(grep '^version = ' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+    echo "Syncing plugin versions to $CORE_VERSION..."
+    for plugin in bitwarden 1password doppler; do
+        pyproject="plugins/fujin-secrets-${plugin}/pyproject.toml"
+        if [ -f "$pyproject" ]; then
+            echo "  - fujin-secrets-${plugin}"
+            sed -i "s/^version = .*/version = \"$CORE_VERSION\"/" "$pyproject"
+            sed -i "s/\"fujin-cli>=.*\"/\"fujin-cli>=$CORE_VERSION\"/" "$pyproject"
+        fi
+    done
+    echo "Done!"
+
 # Bump project version and update changelog
 bumpver VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     uvx bump-my-version bump {{ VERSION }}
+    just sync-plugin-versions
+    just fmt || true
     just logchanges
     [ -z "$(git status --porcelain)" ] && { echo "No changes to commit."; git push && git push --tags; exit 0; }
     version="$(uvx bump-my-version show current_version)"

@@ -1,0 +1,33 @@
+[build-system]
+build-backend = "uv_build"
+requires = [ "uv-build>=0.9.18,<0.10" ]
+
+[project]
+name = "fujin-secrets-bitwarden"
+version = "0.15.0"
+description = "Bitwarden secret adapter for Fujin"
+readme = "README.md"
+authors = [
+  { name = "Tobi", email = "tobidegnon@proton.me" },
+]
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+  "fujin-cli>=0.15",
+  "python-dotenv>=1.0.1",
+]
+
+urls.Homepage = "https://github.com/Tobi-De/fujin"
+urls.Issues = "https://github.com/Tobi-De/fujin/issues"
+urls.Source = "https://github.com/Tobi-De/fujin"
+entry-points."fujin.secrets".bitwarden = "fujin_secrets_bitwarden:bitwarden"
+
+[tool.uv.sources]
+fujin-cli = { workspace = true }

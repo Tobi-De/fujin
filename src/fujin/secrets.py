@@ -1,177 +1,95 @@
 from __future__ import annotations
 
+import logging
 import os
-import subprocess
 from contextlib import closing
-from contextlib import contextmanager
+from importlib.metadata import entry_points
 from io import StringIO
-from typing import Callable, ContextManager
-from typing import Generator
+from typing import Callable
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import dotenv_values
 
-from fujin.config import SecretAdapter
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
 
-secret_reader = Callable[[str], str]
-secret_adapter_context = Callable[[SecretConfig], ContextManager[secret_reader]]
+secret_adapter = Callable[[str, SecretConfig], str]
+
+_adapter_registry: dict[str, secret_adapter] | None = None
+
+
+def _discover_adapters() -> dict[str, secret_adapter]:
+    """Discover and register all secret adapters (built-in + plugins)."""
+
+    adapters: dict[str, secret_adapter] = {}
+
+    adapters["system"] = system
+    plugin_eps = entry_points(group="fujin.secrets")
+
+    for ep in plugin_eps:
+        try:
+            adapter_func = ep.load()
+            adapters[ep.name] = adapter_func
+        except Exception as e:
+            # Log warning but continue - don't fail on broken plugins
+            logging.getLogger(__name__).warning(
+                f"Failed to load secret adapter plugin '{ep.name}': {e}"
+            )
+
+    return adapters
+
+
+def get_adapter_registry() -> dict[str, secret_adapter]:
+    """Get the adapter registry, initializing it if needed."""
+    global _adapter_registry
+    if _adapter_registry is None:
+        _adapter_registry = _discover_adapters()
+    return _adapter_registry
 
 
 def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
-    adapter_to_context: dict[SecretAdapter, secret_adapter_context] = {
-        SecretAdapter.SYSTEM: system,
-        SecretAdapter.BITWARDEN: bitwarden,
-        SecretAdapter.ONE_PASSWORD: one_password,
-        SecretAdapter.DOPPLER: doppler,
-    }
     if not env_content:
         return ""
+
+    adapter_registry = get_adapter_registry()
+    adapter_name = secret_config.adapter
+
+    if adapter_name not in adapter_registry:
+        available = ", ".join(sorted(adapter_registry.keys()))
+        raise SecretResolutionError(
+            f"Secret adapter '{adapter_name}' is not installed.\n\n"
+            f"Available adapters: {available}\n\n"
+            f"To use '{adapter_name}', install the plugin:\n"
+            f"  uv pip install fujin-secrets-{adapter_name}",
+            adapter=adapter_name,
+        )
+
+    adapter_func = adapter_registry[adapter_name]
+    try:
+        return adapter_func(env_content, secret_config)
+    except Exception as e:
+        raise SecretResolutionError(
+            f"Adapter '{adapter_name}' failed: {e}", adapter=adapter_name
+        ) from e
+
+
+# =============================================================================================
+# SYSTEM ADAPTER (Built-in)
+# =============================================================================================
+
+
+def system(env_content: str, secret_config: SecretConfig) -> str:
+    """
+    Built-in adapter that reads secrets from environment variables.
+    """
     with closing(StringIO(env_content)) as buffer:
         env_dict = dotenv_values(stream=buffer)
-    secrets = {key: value for key, value in env_dict.items() if value.startswith("$")}
-    if not secrets:
-        return env_content
-    adapter_context = adapter_to_context[secret_config.adapter]
-    parsed_secrets = {}
-    with adapter_context(secret_config) as reader, ThreadPoolExecutor() as executor:
-        future_to_key = {
-            executor.submit(reader, secret[1:]): key for key, secret in secrets.items()
-        }
-        for future in as_completed(future_to_key):
-            key = future_to_key[future]
-            try:
-                parsed_secrets[key] = future.result()
-            except Exception as e:
-                raise SecretResolutionError(
-                    f"Failed to retrieve secret for {key}: {e}"
-                ) from e
 
-    env_dict.update(parsed_secrets)
+    # Resolve secrets (values starting with $)
+    for key, value in env_dict.items():
+        if value and value.startswith("$"):
+            secret_name = value[1:]  # Strip $
+            resolved = os.getenv(secret_name)
+            if resolved is not None:
+                env_dict[key] = resolved
+
     return "\n".join(f'{key}="{value}"' for key, value in env_dict.items())
-
-
-# =============================================================================================
-# BITWARDEN
-# =============================================================================================
-
-
-@contextmanager
-def bitwarden(secret_config: SecretConfig) -> Generator[secret_reader, None, None]:
-    session = os.getenv("BW_SESSION")
-    if not session:
-        if not secret_config.password_env:
-            raise SecretResolutionError(
-                "You need to set the password_env to use the bitwarden adapter or set the BW_SESSION environment variable",
-                adapter="bitwarden",
-            )
-        session = _signin(secret_config.password_env)
-
-    def read_secret(name: str) -> str:
-        result = subprocess.run(
-            [
-                "bw",
-                "get",
-                "password",
-                name,
-                "--raw",
-                "--session",
-                session,
-                "--nointeraction",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise SecretResolutionError(
-                f"Password not found for {name}", adapter="bitwarden", key=name
-            )
-        return result.stdout.strip()
-
-    try:
-        yield read_secret
-    finally:
-        pass
-        # subprocess.run(["bw", "lock"], capture_output=True)
-
-
-def _signin(password_env) -> str:
-    sync_result = subprocess.run(["bw", "sync"], capture_output=True, text=True)
-    if sync_result.returncode != 0:
-        raise SecretResolutionError(
-            f"Bitwarden sync failed: {sync_result.stdout}", adapter="bitwarden"
-        )
-    unlock_result = subprocess.run(
-        [
-            "bw",
-            "unlock",
-            "--nointeraction",
-            "--passwordenv",
-            password_env,
-            "--raw",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if unlock_result.returncode != 0:
-        raise SecretResolutionError(
-            f"Bitwarden unlock failed {unlock_result.stderr}", adapter="bitwarden"
-        )
-
-    return unlock_result.stdout.strip()
-
-
-# =============================================================================================
-# SYSTEM
-# =============================================================================================
-
-
-@contextmanager
-def system(_: SecretConfig) -> Generator[secret_reader, None, None]:
-    try:
-        yield os.getenv
-    finally:
-        pass
-
-
-# =============================================================================================
-# ONE_PASSWORD
-# =============================================================================================
-
-
-@contextmanager
-def one_password(_: SecretConfig) -> Generator[secret_reader, None, None]:
-    def read_secret(name: str) -> str:
-        result = subprocess.run(["op", "read", name], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise SecretResolutionError(result.stderr, adapter="1password", key=name)
-        return result.stdout.strip()
-
-    try:
-        yield read_secret
-    finally:
-        pass
-
-
-# =============================================================================================
-# DOPPLER
-# =============================================================================================
-
-
-@contextmanager
-def doppler(_: SecretConfig) -> Generator[secret_reader, None, None]:
-    def read_secret(name: str) -> str:
-        result = subprocess.run(
-            ["doppler", "run", "--command", f"echo ${name}"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise SecretResolutionError(result.stderr, adapter="doppler", key=name)
-        return result.stdout.strip()
-
-    try:
-        yield read_secret
-    finally:
-        pass

@@ -1,29 +1,30 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
+import json
 import logging
 import shlex
+import shutil
 import subprocess
 import tempfile
-import shutil
-import hashlib
-import zipapp
-import json
-from typing import Annotated
-from pathlib import Path
 import time
+import zipapp
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated
 
-import importlib.util
 import cappa
-from rich.prompt import Confirm
-from rich.panel import Panel
-from rich.table import Table
 from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm
+from rich.table import Table
 
-from fujin.commands import BaseCommand
-from fujin.secrets import resolve_secrets
-from fujin.errors import BuildError, UploadError
 from fujin.audit import log_operation
+from fujin.commands import BaseCommand
+from fujin.errors import BuildError
+from fujin.errors import UploadError
+from fujin.secrets import resolve_secrets
 
 logger = logging.getLogger(__name__)
 

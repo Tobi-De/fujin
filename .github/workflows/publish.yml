@@ -16,12 +16,38 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
-      - name: Build
+      - name: Build core package
         run: uv build
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-core
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+
+  build-plugin-packages:
+    name: Build plugin packages
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        plugin:
+          - bitwarden
+          - 1password
+          - doppler
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build plugin package
+        run: uv build --package fujin-secrets-${{ matrix.plugin }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-plugin-${{ matrix.plugin }}
           path: dist/*
           if-no-files-found: error
           overwrite: true
@@ -106,7 +132,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: wheels
+          name: wheels-core
           path: ${{ github.workspace }}/dist
           merge-multiple: true
 
@@ -124,30 +150,44 @@ jobs:
           name: binaries-${{ matrix.job.release_suffix }}
           path: dist/bin/*
           if-no-files-found: error
-  
+
   publish-to-pypi:
-    name: Publish to PyPI
+    name: Publish ${{ matrix.package }} to PyPI
     runs-on: ubuntu-latest
+    environment: pypi
     permissions:
       id-token: write
-    needs: [build-python-wheel-and-sdist, build-binaries]
+    needs: [build-python-wheel-and-sdist, build-plugin-packages, build-binaries]
+    strategy:
+      matrix:
+        package:
+          - name: fujin-cli
+            artifact: wheels-core
+          - name: fujin-secrets-bitwarden
+            artifact: wheels-plugin-bitwarden
+          - name: fujin-secrets-1password
+            artifact: wheels-plugin-1password
+          - name: fujin-secrets-doppler
+            artifact: wheels-plugin-doppler
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
+      - name: Download artifacts for ${{ matrix.package.name }}
+        uses: actions/download-artifact@v4
         with:
-          name: wheels
+          name: ${{ matrix.package.artifact }}
           path: dist
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish ${{ matrix.package.name }} to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
 
   release:
     name: Create a GitHub release
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    needs: [build-python-wheel-and-sdist, build-binaries]
+    needs: [build-python-wheel-and-sdist, build-plugin-packages, build-binaries]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -160,7 +200,7 @@ jobs:
       - name: Generate Changelog
         run: |
           awk '/^## /{if (p) exit; p=1; next} p' ${{ github.workspace }}/CHANGELOG.md | tee ${{ github.workspace }}-CHANGELOG.txt
-      
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:

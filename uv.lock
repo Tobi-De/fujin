@@ -11,6 +11,9 @@ resolution-markers = [
 members = [
     "bookstore",
     "fujin-cli",
+    "fujin-secrets-1password",
+    "fujin-secrets-bitwarden",
+    "fujin-secrets-doppler",
 ]
 
 [[package]]
@@ -332,6 +335,51 @@ docs = [
     { name = "sphinx-design" },
     { name = "sphinx-exec-code", specifier = ">=0.14" },
     { name = "sphinx-togglebutton", specifier = ">=0.3.2" },
+]
+
+[[package]]
+name = "fujin-secrets-1password"
+version = "0.15.0"
+source = { editable = "plugins/fujin-secrets-1password" }
+dependencies = [
+    { name = "fujin-cli" },
+    { name = "python-dotenv" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fujin-cli", editable = "." },
+    { name = "python-dotenv", specifier = ">=1.0.1" },
+]
+
+[[package]]
+name = "fujin-secrets-bitwarden"
+version = "0.15.0"
+source = { editable = "plugins/fujin-secrets-bitwarden" }
+dependencies = [
+    { name = "fujin-cli" },
+    { name = "python-dotenv" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fujin-cli", editable = "." },
+    { name = "python-dotenv", specifier = ">=1.0.1" },
+]
+
+[[package]]
+name = "fujin-secrets-doppler"
+version = "0.15.0"
+source = { editable = "plugins/fujin-secrets-doppler" }
+dependencies = [
+    { name = "fujin-cli" },
+    { name = "python-dotenv" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fujin-cli", editable = "." },
+    { name = "python-dotenv", specifier = ">=1.0.1" },
 ]
 
 [[package]]

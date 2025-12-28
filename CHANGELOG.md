@@ -23,6 +23,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚜 Refactor
 
+- Move third party plugins into separate packages
 - Move templates eject into it own command
 - Move custom context from process to host
 - Merge app exec and server exec into exec command

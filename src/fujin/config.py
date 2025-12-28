@@ -6,7 +6,10 @@ import sys
 from pathlib import Path
 
 import msgspec
-from jinja2 import Environment, FileSystemLoader, Template, TemplateNotFound
+from jinja2 import Environment
+from jinja2 import FileSystemLoader
+from jinja2 import Template
+from jinja2 import TemplateNotFound
 
 from .errors import ImproperlyConfiguredError
 
@@ -29,19 +32,21 @@ class InstallationMode(StrEnum):
     BINARY = "binary"
 
 
-class SecretAdapter(StrEnum):
-    BITWARDEN = "bitwarden"
-    ONE_PASSWORD = "1password"
-    DOPPLER = "doppler"
-    SYSTEM = "system"
-
-
 RESERVED_PROCESS_NAMES = {"env", "caddy", "units", "socket", "timer"}
 
 
 class SecretConfig(msgspec.Struct):
-    adapter: SecretAdapter
+    adapter: str
     password_env: str | None = None
+
+    def __post_init__(self):
+        import re
+
+        if not re.match(r"^[a-z0-9_-]+$", self.adapter):
+            raise ImproperlyConfiguredError(
+                f"Invalid adapter name '{self.adapter}'. "
+                "Adapter names must be lowercase alphanumeric with hyphens or underscores."
+            )
 
 
 class TimerConfig(msgspec.Struct):
@@ -110,7 +115,7 @@ class Config(msgspec.Struct, kw_only=True):
     local_config_dir: Path = Path(".fujin")
     secret_config: SecretConfig | None = msgspec.field(
         name="secrets",
-        default_factory=lambda: SecretConfig(adapter=SecretAdapter.SYSTEM),
+        default_factory=lambda: SecretConfig(adapter="system"),
     )
 
     def __post_init__(self):
@@ -345,7 +350,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
     domain_name: str
     user: str
     _env_file: str | None = msgspec.field(name="envfile", default=None)
-    env_content: str | None = msgspec.field(name="env", default=None)
+    env_content: str = msgspec.field(name="env", default="")
     apps_dir: str = ".local/share/fujin"
     password_env: str | None = None
     ssh_port: int = 22
@@ -362,7 +367,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
             if not envfile.exists():
                 raise ImproperlyConfiguredError(f"{self._env_file} not found")
             self.env_content = envfile.read_text()
-        self.env_content = self.env_content.strip() if self.env_content else ""
+        self.env_content = self.env_content.strip()
         # Only prepend /home/{user} if apps_dir is a relative path
         if not self.apps_dir.startswith("/"):
             self.apps_dir = f"/home/{self.user}/{self.apps_dir}"
