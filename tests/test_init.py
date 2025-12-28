@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -210,80 +209,6 @@ def test_init_normalizes_app_name_with_spaces(tmp_path, monkeypatch):
 
         config = tomllib.loads((app_dir / "fujin.toml").read_text())
         assert config["app"] == "my_test_app"
-
-
-# ============================================================================
-# Template Generation
-# ============================================================================
-
-
-def test_init_with_templates_flag_creates_fujin_directory(tmp_path, monkeypatch):
-    """init --templates creates .fujin directory with templates."""
-    monkeypatch.chdir(tmp_path)
-    with (
-        patch.object(Init, "output", MagicMock()) as mock_output,
-        patch("fujin.commands.init.importlib.util.find_spec") as mock_find_spec,
-        patch("fujin.commands.init.shutil.copy") as mock_copy,
-    ):
-        # Mock template location
-        mock_spec = MagicMock()
-        mock_spec.origin = "/fake/path/fujin/__init__.py"
-        mock_find_spec.return_value = mock_spec
-
-        # Mock template files
-        templates_dir = Path("/fake/path/fujin/templates")
-        mock_files = [
-            templates_dir / "default.service.j2",
-            templates_dir / "Caddyfile.j2",
-        ]
-
-        with patch.object(Path, "iterdir", return_value=mock_files):
-            init = Init(templates=True)
-            init()
-
-            # Verify .fujin directory was created
-            assert (tmp_path / ".fujin").exists()
-
-            # Verify templates were copied
-            assert mock_copy.call_count == 2
-
-            # Verify success message
-            assert any(
-                "Templates generated successfully" in str(call)
-                for call in mock_output.success.call_args_list
-            )
-
-
-def test_init_without_templates_flag_skips_template_generation(tmp_path, monkeypatch):
-    """init without --templates flag doesn't create .fujin directory."""
-    monkeypatch.chdir(tmp_path)
-    with patch.object(Init, "output", MagicMock()):
-        init = Init(templates=False)
-        init()
-
-        # .fujin should not be created
-        assert not (tmp_path / ".fujin").exists()
-
-
-def test_init_with_templates_creates_directory_if_not_exists(tmp_path, monkeypatch):
-    """init --templates creates .fujin directory if it doesn't exist."""
-    monkeypatch.chdir(tmp_path)
-    with (
-        patch.object(Init, "output", MagicMock()),
-        patch("fujin.commands.init.importlib.util.find_spec") as mock_find_spec,
-        patch("fujin.commands.init.shutil.copy"),
-    ):
-        mock_spec = MagicMock()
-        mock_spec.origin = "/fake/path/fujin/__init__.py"
-        mock_find_spec.return_value = mock_spec
-
-        with patch.object(Path, "iterdir", return_value=[]):
-            init = Init(templates=True)
-            init()
-
-            # Directory should be created
-            assert (tmp_path / ".fujin").exists()
-            assert (tmp_path / ".fujin").is_dir()
 
 
 # ============================================================================

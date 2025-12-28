@@ -8,10 +8,6 @@ Requires={{ app_name }}.socket
 After=network.target
 
 [Service]
-{%- if context.notify %}
-Type=notify
-NotifyAccess=main
-{%- endif %}
 User={{ user }}
 Group={{ user }}
 RuntimeDirectory={{ app_name }}

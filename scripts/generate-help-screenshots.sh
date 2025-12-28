@@ -62,6 +62,7 @@ generate_screenshot "server-setup-ssh-help" "fujin server setup-ssh --help"
 
 # New/undocumented commands
 generate_screenshot "show-help" "fujin show --help"
+generate_screenshot "templates-help" "fujin templates --help"
 generate_screenshot "audit-help" "fujin audit --help"
 generate_screenshot "exec-help" "fujin exec --help"
 

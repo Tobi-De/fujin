@@ -29,6 +29,8 @@ Quick Reference
      - Manage server operations (bootstrap, user creation, info)
    * - :doc:`show`
      - Show deployment configuration and rendered templates
+   * - :doc:`templates`
+     - Manage template files (eject for customization)
    * - :doc:`audit`
      - View audit logs for deployment operations stored on the server
    * - :doc:`exec`
@@ -52,6 +54,7 @@ Quick Reference
    app
    server
    show
+   templates
    audit
    exec
    rollback

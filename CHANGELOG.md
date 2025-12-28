@@ -23,22 +23,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚜 Refactor
 
-- Remove **extra parameter from log_operation
-- Encode full flag in operation name
-- Move audit to server-side JSONL storage
+- Move templates eject into it own command
 - Move custom context from process to host
 - Merge app exec and server exec into exec command
 - Consistent styling and help messages improvements
 
 ### 📚 Documentation
 
-- Fix rollback command documentation to match implementation
-- Fix exec command documentation to match implementation
-- Fix app info command documentation
-- Fix variable interpolation syntax and interactive commands
-- Fix incorrect app command examples
-- Refine documentation based on feedback
-- Comprehensive documentation overhaul
+- Update documentation de reflect latest changes
 
 ### 🎨 Styling
 
@@ -46,7 +38,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🧪 Testing
 
-- Update audit tests for server-side storage
 - Rewrote from scratch
 
 ## [0.14.1] - 2025-12-08
