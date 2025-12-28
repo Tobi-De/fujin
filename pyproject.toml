@@ -5,7 +5,7 @@ requires = [ "hatchling" ]
 
 [project]
 name = "fujin-cli"
-version = "0.14.1"
+version = "0.15.0"
 description = "Get your project up and running in a few minutes on your own vps."
 readme = "README.md"
 keywords = [
@@ -43,9 +43,9 @@ dependencies = [
   "ssh2-python>=1.2.0.post1",
 ]
 
-urls.Documentation = "https://github.com/falcopackages/fujin#readme"
-urls.Issues = "https://github.com/falcopackages/fujin/issues"
-urls.Source = "https://github.com/falcopackages/fujin"
+urls.Documentation = "https://github.com/Tobi-De/fujin#readme"
+urls.Issues = "https://github.com/Tobi-De/fujin/issues"
+urls.Source = "https://github.com/Tobi-De/fujin"
 
 scripts.fujin = "fujin.__main__:main"
 
@@ -68,7 +68,12 @@ docs = [
 packages = [ "src/fujin" ]
 
 [tool.uv.workspace]
-members = [ "examples/django/bookstore" ]
+members = [
+  "examples/django/bookstore",
+  "plugins/fujin-secrets-bitwarden",
+  "plugins/fujin-secrets-1password",
+  "plugins/fujin-secrets-doppler",
+]
 
 [tool.ruff]
 # Assume Python {{ python_version }}
@@ -140,7 +145,7 @@ markers = [
 ]
 
 [tool.bumpversion]
-current_version = "0.14.1"
+current_version = "0.15.0"
 parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
 serialize = [ "{major}.{minor}.{patch}" ]
 search = "{current_version}"
