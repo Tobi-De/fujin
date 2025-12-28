@@ -9,12 +9,13 @@ from rich.console import Console
 from rich.markup import escape
 
 from fujin.audit import read_logs
+from fujin.commands import BaseCommand
 
 
 @cappa.command(
-    help="View local audit logs for deployment operations",
+    help="View audit logs for deployment operations",
 )
-class Audit:
+class Audit(BaseCommand):
     limit: Annotated[
         int,
         cappa.Arg(
@@ -25,7 +26,12 @@ class Audit:
     ] = 20
 
     def __call__(self):
-        records = read_logs(limit=self.limit)
+        with self.connection() as conn:
+            records = read_logs(
+                connection=conn,
+                app_name=self.config.app_name,
+                limit=self.limit,
+            )
 
         if not records:
             console = Console()
@@ -55,23 +61,24 @@ class Audit:
 
                 user = record.get("user", "unknown")
                 operation = record.get("operation", "unknown")
-                details = record.get("details", {})
-                app_name = details.get("app_name", "")
+                app_name = record.get("app_name", "")
 
                 if operation == "deploy":
-                    version = details.get("version", "unknown")
+                    version = record.get("version", "unknown")
+                    git_commit = record.get("git_commit")
                     message = f"Deployed {app_name} version [blue]{version}[/blue]"
+                    if git_commit:
+                        message += f" [dim]({git_commit[:7]})[/dim]"
                 elif operation == "rollback":
-                    from_v = details.get("from_version", "unknown")
-                    to_v = details.get("to_version", "unknown")
+                    from_v = record.get("from_version", "unknown")
+                    to_v = record.get("to_version", "unknown")
                     message = f"Rolled back {app_name} from [blue]{from_v}[/blue] to [blue]{to_v}[/blue]"
                 elif operation == "down":
-                    version = details.get("version", "unknown")
-                    full = details.get("full", False)
-                    full_str = " (full cleanup)" if full else ""
-                    message = (
-                        f"Stopped {app_name} version [blue]{version}[/blue]{full_str}"
-                    )
+                    version = record.get("version", "unknown")
+                    message = f"Stopped {app_name} version [blue]{version}[/blue]"
+                elif operation == "full-down":
+                    version = record.get("version", "unknown")
+                    message = f"Stopped {app_name} version [blue]{version}[/blue] (full cleanup)"
                 else:
                     message = f"{operation}"
 

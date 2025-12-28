@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -16,10 +16,18 @@ from fujin.commands.audit import Audit
 
 def test_audit_with_no_logs_shows_message():
     """audit with no logs shows 'No audit logs found' message."""
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
+
     with (
         patch("fujin.commands.audit.read_logs", return_value=[]),
         patch("fujin.commands.audit.Console") as mock_console_class,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
     ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
         mock_console = MagicMock()
         mock_console_class.return_value = mock_console
 
@@ -45,9 +53,23 @@ def test_audit_with_no_logs_shows_message():
                 "operation": "deploy",
                 "user": "testuser",
                 "host": "example.com",
-                "details": {"app_name": "myapp", "version": "1.2.0"},
+                "app_name": "myapp",
+                "version": "1.2.0",
             },
             ["example.com", "Deployed myapp version", "1.2.0", "testuser"],
+        ),
+        # Deploy with git commit
+        (
+            {
+                "timestamp": "2024-01-15T10:30:00",
+                "operation": "deploy",
+                "user": "testuser",
+                "host": "example.com",
+                "app_name": "myapp",
+                "version": "1.2.0",
+                "git_commit": "abc1234567890",
+            },
+            ["example.com", "Deployed myapp version", "1.2.0", "abc1234"],
         ),
         # Rollback operation
         (
@@ -56,11 +78,9 @@ def test_audit_with_no_logs_shows_message():
                 "operation": "rollback",
                 "user": "testuser",
                 "host": "example.com",
-                "details": {
-                    "app_name": "myapp",
-                    "from_version": "1.2.0",
-                    "to_version": "1.1.0",
-                },
+                "app_name": "myapp",
+                "from_version": "1.2.0",
+                "to_version": "1.1.0",
             },
             ["Rolled back myapp from", "1.2.0", "1.1.0"],
         ),
@@ -71,20 +91,22 @@ def test_audit_with_no_logs_shows_message():
                 "operation": "down",
                 "user": "testuser",
                 "host": "example.com",
-                "details": {"app_name": "myapp", "version": "1.2.0", "full": False},
+                "app_name": "myapp",
+                "version": "1.2.0",
             },
             ["Stopped myapp version", "1.2.0"],
         ),
-        # Down operation with full flag
+        # Full-down operation
         (
             {
                 "timestamp": "2024-01-15T12:00:00",
-                "operation": "down",
+                "operation": "full-down",
                 "user": "testuser",
                 "host": "example.com",
-                "details": {"app_name": "myapp", "version": "1.2.0", "full": True},
+                "app_name": "myapp",
+                "version": "1.2.0",
             },
-            ["full cleanup"],
+            ["Stopped myapp version", "1.2.0", "full cleanup"],
         ),
         # Unknown operation
         (
@@ -93,7 +115,7 @@ def test_audit_with_no_logs_shows_message():
                 "operation": "custom_operation",
                 "user": "testuser",
                 "host": "example.com",
-                "details": {"app_name": "myapp"},
+                "app_name": "myapp",
             },
             ["custom_operation"],
         ),
@@ -101,10 +123,18 @@ def test_audit_with_no_logs_shows_message():
 )
 def test_audit_displays_operations(record, expected_patterns):
     """audit displays different operation types correctly."""
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
+
     with (
         patch("fujin.commands.audit.read_logs", return_value=[record]),
         patch("fujin.commands.audit.Console") as mock_console_class,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
     ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
         mock_console = MagicMock()
         mock_console_class.return_value = mock_console
 
@@ -131,28 +161,39 @@ def test_audit_groups_by_host():
             "operation": "deploy",
             "user": "testuser",
             "host": "server1.com",
-            "details": {"app_name": "myapp", "version": "1.0.0"},
+            "app_name": "myapp",
+            "version": "1.0.0",
         },
         {
             "timestamp": "2024-01-15T11:00:00",
             "operation": "deploy",
             "user": "testuser",
             "host": "server2.com",
-            "details": {"app_name": "myapp", "version": "1.0.0"},
+            "app_name": "myapp",
+            "version": "1.0.0",
         },
         {
             "timestamp": "2024-01-15T12:00:00",
             "operation": "deploy",
             "user": "testuser",
             "host": "server1.com",
-            "details": {"app_name": "myapp", "version": "1.1.0"},
+            "app_name": "myapp",
+            "version": "1.1.0",
         },
     ]
+
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
 
     with (
         patch("fujin.commands.audit.read_logs", return_value=records),
         patch("fujin.commands.audit.Console") as mock_console_class,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
     ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
         mock_console = MagicMock()
         mock_console_class.return_value = mock_console
 
@@ -172,22 +213,51 @@ def test_audit_groups_by_host():
 
 def test_audit_respects_limit_parameter():
     """audit passes limit parameter to read_logs."""
-    with patch("fujin.commands.audit.read_logs", return_value=[]) as mock_read_logs:
-        audit = Audit(limit=10)
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
+
+    with (
+        patch("fujin.commands.audit.read_logs", return_value=[]) as mock_read_logs,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
+    ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
+        audit = Audit()
+        audit.limit = 10
         audit()
 
-        # Should call read_logs with limit
-        mock_read_logs.assert_called_once_with(limit=10)
+        # Should call read_logs with connection, app_name, and limit
+        mock_read_logs.assert_called_once_with(
+            connection=mock_conn,
+            app_name="myapp",
+            limit=10,
+        )
 
 
 def test_audit_default_limit_is_20():
     """audit default limit is 20."""
-    with patch("fujin.commands.audit.read_logs", return_value=[]) as mock_read_logs:
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
+
+    with (
+        patch("fujin.commands.audit.read_logs", return_value=[]) as mock_read_logs,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
+    ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
         audit = Audit()
         audit()
 
         # Should call read_logs with default limit
-        mock_read_logs.assert_called_once_with(limit=20)
+        mock_read_logs.assert_called_once_with(
+            connection=mock_conn,
+            app_name="myapp",
+            limit=20,
+        )
 
 
 # ============================================================================
@@ -201,15 +271,22 @@ def test_audit_handles_missing_fields():
         {
             "timestamp": "2024-01-15T10:00:00",
             "operation": "deploy",
-            # Missing user, host
-            "details": {},  # Missing version, app_name
+            # Missing user, host, app_name, version
         }
     ]
+
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
 
     with (
         patch("fujin.commands.audit.read_logs", return_value=records),
         patch("fujin.commands.audit.Console") as mock_console_class,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
     ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
         mock_console = MagicMock()
         mock_console_class.return_value = mock_console
 
@@ -229,14 +306,23 @@ def test_audit_handles_invalid_timestamp():
             "operation": "deploy",
             "user": "testuser",
             "host": "example.com",
-            "details": {"app_name": "myapp", "version": "1.0.0"},
+            "app_name": "myapp",
+            "version": "1.0.0",
         }
     ]
+
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
 
     with (
         patch("fujin.commands.audit.read_logs", return_value=records),
         patch("fujin.commands.audit.Console") as mock_console_class,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
     ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
         mock_console = MagicMock()
         mock_console_class.return_value = mock_console
 
@@ -256,14 +342,23 @@ def test_audit_handles_missing_timestamp():
             "operation": "deploy",
             "user": "testuser",
             "host": "example.com",
-            "details": {"app_name": "myapp", "version": "1.0.0"},
+            "app_name": "myapp",
+            "version": "1.0.0",
         }
     ]
+
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
 
     with (
         patch("fujin.commands.audit.read_logs", return_value=records),
         patch("fujin.commands.audit.Console") as mock_console_class,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
     ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
         mock_console = MagicMock()
         mock_console_class.return_value = mock_console
 
@@ -283,14 +378,23 @@ def test_audit_formats_timestamp_correctly():
             "operation": "deploy",
             "user": "testuser",
             "host": "example.com",
-            "details": {"app_name": "myapp", "version": "1.0.0"},
+            "app_name": "myapp",
+            "version": "1.0.0",
         }
     ]
+
+    mock_config = Mock()
+    mock_config.app_name = "myapp"
 
     with (
         patch("fujin.commands.audit.read_logs", return_value=records),
         patch("fujin.commands.audit.Console") as mock_console_class,
+        patch.object(Audit, "config", mock_config),
+        patch.object(Audit, "connection") as mock_conn_ctx,
     ):
+        mock_conn = Mock()
+        mock_conn_ctx.return_value.__enter__.return_value = mock_conn
+
         mock_console = MagicMock()
         mock_console_class.return_value = mock_console
 

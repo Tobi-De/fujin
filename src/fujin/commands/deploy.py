@@ -12,8 +12,6 @@ from typing import Annotated
 from pathlib import Path
 import time
 from dataclasses import dataclass
-from datetime import datetime
-import getpass
 
 import importlib.util
 import cappa
@@ -248,13 +246,27 @@ class Deploy(BaseCommand):
                     )
                 conn.run(deploy_script, pty=True)
 
-                self._record_deployment(conn, version)
+                # Get git commit hash if available
+                git_commit = None
+                try:
+                    result = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    git_commit = result.stdout.strip()
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    pass  # Not a git repo or git not available
 
-        log_operation(
-            operation="deploy",
-            host=self.selected_host.name or self.selected_host.domain_name,
-            details={"version": version, "app_name": self.config.app_name},
-        )
+                log_operation(
+                    connection=conn,
+                    app_name=self.config.app_name,
+                    operation="deploy",
+                    host=self.selected_host.name or self.selected_host.domain_name,
+                    version=version,
+                    git_commit=git_commit,
+                )
 
         self.output.success("Deployment completed successfully!")
         if self.config.webserver.enabled:
@@ -309,47 +321,3 @@ class Deploy(BaseCommand):
                     raise cappa.Exit("Deployment cancelled", code=0)
             except KeyboardInterrupt:
                 raise cappa.Exit("\nDeployment cancelled", code=0)
-
-    def _record_deployment(self, conn, version: str):
-        git_commit = None
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            git_commit = result.stdout.strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-
-        record = {
-            "version": version,
-            "timestamp": datetime.now().isoformat(),
-            "user": getpass.getuser(),
-            "host": self.selected_host.name or self.selected_host.domain_name,
-            "git_commit": git_commit,
-        }
-
-        app_dir = shlex.quote(self.config.app_dir(self.selected_host))
-        history_file = f"{app_dir}/.deployments.json"
-
-        stdout, success = conn.run(
-            f"cat {history_file} 2>/dev/null || echo '[]'", hide=True, warn=True
-        )
-
-        try:
-            history = json.loads(stdout) if success and stdout.strip() else []
-        except json.JSONDecodeError:
-            history = []
-
-        # Add new record (prepend so newest is first), keep only last 50
-        history.insert(0, record)
-        history = history[:50]
-
-        # Write back to server
-        history_json = json.dumps(history)
-        conn.run(
-            f"cat > {history_file} << 'DEPLOY_HISTORY_EOF'\n{history_json}\nDEPLOY_HISTORY_EOF",
-            hide=True,
-        )
