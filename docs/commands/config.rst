@@ -1,6 +1,6 @@
-server
+config
 ======
 
-.. cappa:: fujin.commands.up.Server
+.. cappa:: fujin.commands.config.ConfigCMD
    :style: terminal
    :terminal-width: 0

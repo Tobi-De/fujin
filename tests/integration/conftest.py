@@ -1,47 +1,25 @@
-"""Integration test fixtures.
-
-Fixtures for integration tests that require Docker, SSH, and real deployments.
-"""
-
-from __future__ import annotations
-
-import os
+import pytest
 import subprocess
-import sys
 import time
 from pathlib import Path
 
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def mock_stdin():
-    """Replace sys.stdin with /dev/null to provide a real file descriptor for select()."""
-    original_stdin = sys.stdin
-    with open(os.devnull, "r") as devnull:
-        sys.stdin = devnull
-        yield
-        sys.stdin = original_stdin
-
 
 @pytest.fixture(scope="session")
-def docker_image():
-    """Build Docker image once per session."""
+def mock_vps_image():
+    """Builds the docker image once per session."""
     image_name = "fujin-test-vps"
     dockerfile_path = Path(__file__).parent / "Dockerfile"
-
     subprocess.run(
         ["docker", "build", "-t", image_name, "-f", str(dockerfile_path), "."],
         check=True,
-        cwd=Path(__file__).parent.parent.parent,
     )
     return image_name
 
 
-@pytest.fixture(scope="function")
-def vps_container(docker_image):
-    """Run container with systemd support for each test."""
-    container_name = f"fujin-vps-{int(time.time() * 1000)}"
+@pytest.fixture(scope="module")
+def vps_container(mock_vps_image):
+    """Runs the container with systemd support."""
+    container_name = f"fujin-vps-{int(time.time())}"
 
     # Run with cgroups and privileged mode for systemd
     cmd = [
@@ -56,7 +34,7 @@ def vps_container(docker_image):
         "0:22",  # Let Docker assign a port
         "--name",
         container_name,
-        docker_image,
+        mock_vps_image,
     ]
 
     subprocess.run(cmd, check=True)
@@ -65,13 +43,14 @@ def vps_container(docker_image):
     port_output = subprocess.check_output(
         ["docker", "port", container_name, "22"], text=True
     ).strip()
-    # Output format: 0.0.0.0:32768
+    # Output format usually: 0.0.0.0:32768
+    # We need the port number.
     host_port = int(port_output.split(":")[-1])
 
     # Wait for SSH to be ready
     time.sleep(5)
 
-    # Ensure SSH is running
+    # Ensure ssh is running (just in case systemd didn't start it yet or failed)
     subprocess.run(
         ["docker", "exec", container_name, "service", "ssh", "start"], check=False
     )
@@ -83,6 +62,7 @@ def vps_container(docker_image):
         "ip": "127.0.0.1",
         "port": host_port,
         "user": "fujin",
+        "password": "fujin",  # Or setup keys here
     }
 
     # Teardown
@@ -90,13 +70,13 @@ def vps_container(docker_image):
 
 
 @pytest.fixture
-def ssh_key(vps_container, tmp_path):
-    """Generate temp SSH key and inject into container."""
-    key_path = tmp_path / "id_ed25519"
+def ssh_key_setup(vps_container, tmp_path):
+    """Generates a temp SSH key and injects it into the container."""
+    key_path = tmp_path / "id_rsa"
 
     # Generate key
     subprocess.run(
-        ["ssh-keygen", "-t", "ed25519", "-f", str(key_path), "-N", ""],
+        ["ssh-keygen", "-t", "rsa", "-f", str(key_path), "-N", ""],
         check=True,
         stdout=subprocess.DEVNULL,
     )
@@ -105,6 +85,7 @@ def ssh_key(vps_container, tmp_path):
     pub_key = key_path.with_suffix(".pub").read_text().strip()
 
     # Inject into container
+    # We use docker exec to append to authorized_keys
     setup_cmd = (
         f"mkdir -p /home/fujin/.ssh && "
         f"echo '{pub_key}' >> /home/fujin/.ssh/authorized_keys && "

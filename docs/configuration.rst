@@ -81,17 +81,7 @@ statics
 Defines the mapping of URL paths to local directories for serving static files. The directories you map should be accessible by caddy, meaning
 with read permissions for the *www-data* group; a reliable choice is **/var/www**.
 
-**Variable Interpolation:**
-
-Static file paths support variable interpolation using Python's ``str.format()`` syntax. Available variables:
-
-- ``{app_name}`` - Your application name
-- ``{app_dir}`` - Full path to application directory
-- ``{domain_name}`` - Host's domain name
-
-**Examples:**
-
-Basic static files mapping:
+Example:
 
 .. code-block:: toml
     :caption: fujin.toml
@@ -99,29 +89,6 @@ Basic static files mapping:
     [webserver]
     upstream = "unix//run/project.sock"
     statics = { "/static/*" = "/var/www/myproject/static/" }
-
-Using variable interpolation:
-
-.. code-block:: toml
-    :caption: fujin.toml
-
-    [webserver]
-    statics = {
-        "/static/*" = "/var/www/{app_name}/static/",
-        "/media/*" = "/var/www/{app_name}/media/"
-    }
-
-Multiple static paths:
-
-.. code-block:: toml
-    :caption: fujin.toml
-
-    [webserver]
-    statics = {
-        "/static/*" = "/var/www/{app_name}/static/",
-        "/media/*" = "/var/www/{app_name}/media/",
-        "/assets/*" = "{app_dir}/public/"
-    }
 
 processes
 ---------
@@ -136,17 +103,7 @@ Each entry in the `processes` dictionary represents a service that will be manag
 - **command** (required): The command to execute. Relative paths are resolved against the application directory on the host.
 - **replicas** (optional, default: 1): The number of instances to run. If > 1, a template unit (e.g., `app-worker@.service`) is generated.
 - **socket** (optional, default: false): If true, enables socket activation. Fujin will look for a corresponding socket template.
-- **timer** (optional): Configuration for systemd timer-based scheduling. Accepts a dictionary with the following options:
-
-  - **on_calendar**: Calendar event expression (e.g., ``"daily"``, ``"*:*:00"`` for every minute)
-  - **on_boot_sec**: Time to wait after system boot (e.g., ``"5m"`` for 5 minutes)
-  - **on_unit_active_sec**: Time to wait after the service was last active (e.g., ``"1h"`` for recurring tasks)
-  - **on_active_sec**: Time to wait after the timer was activated
-  - **persistent** (default: true): Whether to catch up on missed runs
-  - **randomized_delay_sec**: Random delay to add (useful to prevent thundering herd)
-  - **accuracy_sec**: Timer accuracy (can save power on low-precision timers)
-
-  At least one trigger (``on_calendar``, ``on_boot_sec``, ``on_unit_active_sec``, or ``on_active_sec``) must be specified.
+- **timer** (optional): A systemd calendar event expression (e.g., `OnCalendar=daily`). If set, a timer unit is generated instead of a standard service.
 
 **Template Selection Logic:**
 
@@ -170,20 +127,8 @@ Example:
     # Uses default.service.j2, generating a template unit for multiple instances
     worker = { command = ".venv/bin/celery -A myproject worker", replicas = 2 }
 
-    # Simple timer - run daily
-    [processes.beat]
-    command = ".venv/bin/celery -A myproject beat"
-    timer = { on_calendar = "daily" }
-
-    # Advanced timer - run hourly with randomized delay to prevent thundering herd
-    [processes.cleanup]
-    command = ".venv/bin/cleanup"
-    timer = { on_calendar = "hourly", randomized_delay_sec = "5m" }
-
-    # Run 5 minutes after boot, then every hour after last completion
-    [processes.health]
-    command = ".venv/bin/healthcheck"
-    timer = { on_boot_sec = "5m", on_unit_active_sec = "1h" }
+    # Uses beat.service.j2 if exists, or default.service.j2. Also generates a timer unit.
+    beat = { command = ".venv/bin/celery -A myproject beat", timer = "OnCalendar=daily" }
 
 
 .. note::
@@ -194,88 +139,16 @@ Example:
 Host Configuration
 -------------------
 
-Fujin supports deploying to multiple hosts (servers) from a single configuration file. This is useful for managing staging and production environments, or deploying to multiple servers.
-
-**Single Host Setup:**
-
-.. code-block:: toml
-
-   [[hosts]]
-   domain_name = "example.com"
-   user = "deploy"
-   envfile = ".env.prod"
-
-**Multi-Host Setup:**
-
-.. code-block:: toml
-
-   [[hosts]]
-   name = "staging"
-   domain_name = "staging.example.com"
-   user = "deploy"
-   envfile = ".env.staging"
-
-   [[hosts]]
-   name = "production"
-   domain_name = "example.com"
-   user = "deploy"
-   envfile = ".env.prod"
-
-.. important::
-
-   When using multiple hosts, each host **must** have a unique ``name`` field. Use the ``-H`` flag to target specific hosts:
-
-   .. code-block:: bash
-
-      fujin deploy -H production
-      fujin app logs -H staging
-
-   Without ``-H``, commands target the first host by default.
-
-Host Fields
-~~~~~~~~~~~
-
-name
-^^^^
-
-**(Required for multi-host setups)**
-
-Unique identifier for the host. Use this with the ``-H`` flag to target specific hosts.
-
-.. code-block:: toml
-
-   [[hosts]]
-   name = "production"  # Required when you have multiple hosts
-
 ip
-^^
-
-**(Optional)**
-
-The IP address or hostname to connect via SSH. If omitted, defaults to ``domain_name``.
-
-.. code-block:: toml
-
-   [[hosts]]
-   ip = "192.168.1.100"        # Connect via IP
-   domain_name = "example.com"  # Used for Caddy/SSL
+~~
+The IP address or anything that resolves to the remote host IP's. This is use to communicate via ssh with the server, if omitted it's value will default to the one of the *domain_name*.
 
 domain_name
-^^^^^^^^^^^
-
-**(Required)**
-
-The domain name pointing to this host. Used for:
-
-- Caddy reverse proxy configuration
-- SSL certificate generation
-- SSH connection (if ``ip`` not specified)
+~~~~~~~~~~~
+The domain name pointing to this host. Used for web proxy configuration.
 
 user
-^^^^
-
-**(Required)**
-
+~~~~
 The login user for running remote tasks. Should have passwordless sudo access for optimal operation.
 
 .. note::
@@ -283,106 +156,39 @@ The login user for running remote tasks. Should have passwordless sudo access fo
     You can create a user with these requirements using the ``fujin server create-user`` command.
 
 envfile
-^^^^^^^
-
-**(Optional)**
-
+~~~~~~~
 Path to the production environment file that will be copied to the host.
 
-.. code-block:: toml
-
-   [[hosts]]
-   envfile = ".env.prod"
-
 env
-^^^
-
-**(Optional)**
-
+~~~
 A string containing the production environment variables. In combination with the secrets manager, this is most useful when
 you want to automate deployment through a CI/CD platform like GitLab CI or GitHub Actions. For an example of how to do this,
 check out the `integrations guide </integrations.html>`_
-
-.. code-block:: toml
-
-   [[hosts]]
-   env = """
-   DEBUG=False
-   SECRET_KEY=$SECRET_KEY
-   DATABASE_URL=$DATABASE_URL
-   """
 
 .. important::
 
     *envfile* and *env* are mutually exclusive—you can define only one.
 
 apps_dir
-^^^^^^^^
+~~~~~~~~
 
-**(Optional, default: .local/share/fujin)**
-
-Base directory for project storage on the host. Path is relative to user's home directory unless it starts with ``/``.
-
-This value determines your project's **app_dir**, which is **{apps_dir}/{app}**.
-
-.. code-block:: toml
-
-   [[hosts]]
-   apps_dir = "/opt/apps"  # Absolute path
-   # Results in: /opt/apps/myapp
-
-   [[hosts]]
-   apps_dir = ".local/share/fujin"  # Relative to home
-   # Results in: /home/user/.local/share/fujin/myapp
+Base directory for project storage on the host. Path is relative to user's home directory.
+Default: **.local/share/fujin**. This value determines your project's **app_dir**, which is **{apps_dir}/{app}**.
 
 password_env
-^^^^^^^^^^^^
-
-**(Optional)**
+~~~~~~~~~~~~
 
 Environment variable containing the user's password. Only needed if the user cannot run sudo without a password.
 
-.. code-block:: toml
-
-   [[hosts]]
-   password_env = "DEPLOY_PASSWORD"
-
 ssh_port
-^^^^^^^^
+~~~~~~~~
 
-**(Optional, default: 22)**
-
-SSH port for connecting to the host.
-
-.. code-block:: toml
-
-   [[hosts]]
-   ssh_port = 2222
+SSH port for connecting to the host. Default to **22**.
 
 key_filename
-^^^^^^^^^^^^
-
-**(Optional)**
+~~~~~~~~~~~~
 
 Path to the SSH private key file for authentication. Optional if using your system's default key location.
-
-.. code-block:: toml
-
-   [[hosts]]
-   key_filename = "~/.ssh/deploy_key"
-
-key_passphrase_env
-^^^^^^^^^^^^^^^^^^
-
-**(Optional)**
-
-Environment variable containing the SSH key passphrase if your key is encrypted.
-
-.. code-block:: toml
-
-   [[hosts]]
-   key_filename = "~/.ssh/deploy_key"
-   key_passphrase_env = "SSH_KEY_PASSPHRASE"
 
 aliases
 -------

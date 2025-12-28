@@ -4,42 +4,6 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
-
-### 🚀 Features
-
-- Rework timer config with more options
-- Added operation logging and deployment history
-- Added multi server support
-- Added show command in favor or printenv
-- Improved error messages
-- Added ssh-setup helper
-- Logs filtering options
-- Migrate to zipapp
-
-### 🐛 Bug Fixes
-
-- Failed auth when key not in agent
-
-### 🚜 Refactor
-
-- Move templates eject into it own command
-- Move custom context from process to host
-- Merge app exec and server exec into exec command
-- Consistent styling and help messages improvements
-
-### 📚 Documentation
-
-- Update documentation de reflect latest changes
-
-### 🎨 Styling
-
-- Deployment summary
-
-### 🧪 Testing
-
-- Rewrote from scratch
-
 ## [0.14.1] - 2025-12-08
 
 ### 🚀 Features

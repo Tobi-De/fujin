@@ -1,23 +1,11 @@
 deploy
 ======
 
-The ``fujin deploy`` command deploys your application to the server.
 
-.. image:: ../_static/images/help/deploy-help.png
-   :alt: fujin deploy command help
-   :width: 100%
+.. cappa:: fujin.commands.deploy.Deploy
+   :style: terminal
+   :terminal-width: 0
 
-Overview
---------
-
-This is the core deployment command. It builds your application locally, bundles all necessary files, uploads them to the server, and installs/configures everything.
-
-Use ``fujin deploy`` for:
-
-- Deploying code changes
-- Updating configuration
-- Updating environment variables
-- Refreshing systemd units or Caddy configuration
 
 How it works
 ------------
@@ -54,8 +42,8 @@ Below is an example of the layout and structure of a deployed application:
             ├── .version                          # Current deployed version
             ├── .venv/                            # Virtual environment
             └── .versions/                        # Stored deployment bundles
-                ├── app-1.2.3.pyz
-                └── app-1.2.2.pyz
+                ├── app-1.2.3.tar.gz
+                └── app-1.2.2.tar.gz
 
     .. tab-item:: binary
 
@@ -67,5 +55,5 @@ Below is an example of the layout and structure of a deployed application:
             ├── .version                          # Current deployed version
             ├── app_binary                        # Installed binary
             └── .versions/                        # Stored deployment bundles
-                ├── app-1.2.3.pyz
-                └── app-1.2.2.pyz
+                ├── app-1.2.3.tar.gz
+                └── app-1.2.2.tar.gz

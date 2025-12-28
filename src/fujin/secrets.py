@@ -8,12 +8,12 @@ from io import StringIO
 from typing import Callable, ContextManager
 from typing import Generator
 
+import cappa
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import dotenv_values
 
 from fujin.config import SecretAdapter
 from fujin.config import SecretConfig
-from fujin.errors import SecretResolutionError
 
 secret_reader = Callable[[str], str]
 secret_adapter_context = Callable[[SecretConfig], ContextManager[secret_reader]]
@@ -44,9 +44,7 @@ def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
             try:
                 parsed_secrets[key] = future.result()
             except Exception as e:
-                raise SecretResolutionError(
-                    f"Failed to retrieve secret for {key}: {e}"
-                ) from e
+                raise cappa.Exit(f"Failed to retrieve secret for {key}: {e}") from e
 
     env_dict.update(parsed_secrets)
     return "\n".join(f'{key}="{value}"' for key, value in env_dict.items())
@@ -62,9 +60,9 @@ def bitwarden(secret_config: SecretConfig) -> Generator[secret_reader, None, Non
     session = os.getenv("BW_SESSION")
     if not session:
         if not secret_config.password_env:
-            raise SecretResolutionError(
+            raise cappa.Exit(
                 "You need to set the password_env to use the bitwarden adapter or set the BW_SESSION environment variable",
-                adapter="bitwarden",
+                code=1,
             )
         session = _signin(secret_config.password_env)
 
@@ -84,9 +82,7 @@ def bitwarden(secret_config: SecretConfig) -> Generator[secret_reader, None, Non
             text=True,
         )
         if result.returncode != 0:
-            raise SecretResolutionError(
-                f"Password not found for {name}", adapter="bitwarden", key=name
-            )
+            raise cappa.Exit(f"Password not found for {name}")
         return result.stdout.strip()
 
     try:
@@ -99,9 +95,7 @@ def bitwarden(secret_config: SecretConfig) -> Generator[secret_reader, None, Non
 def _signin(password_env) -> str:
     sync_result = subprocess.run(["bw", "sync"], capture_output=True, text=True)
     if sync_result.returncode != 0:
-        raise SecretResolutionError(
-            f"Bitwarden sync failed: {sync_result.stdout}", adapter="bitwarden"
-        )
+        raise cappa.Exit(f"Bitwarden sync failed: {sync_result.stdout}", code=1)
     unlock_result = subprocess.run(
         [
             "bw",
@@ -115,9 +109,7 @@ def _signin(password_env) -> str:
         text=True,
     )
     if unlock_result.returncode != 0:
-        raise SecretResolutionError(
-            f"Bitwarden unlock failed {unlock_result.stderr}", adapter="bitwarden"
-        )
+        raise cappa.Exit(f"Bitwarden unlock failed {unlock_result.stderr}", code=1)
 
     return unlock_result.stdout.strip()
 
@@ -145,7 +137,7 @@ def one_password(_: SecretConfig) -> Generator[secret_reader, None, None]:
     def read_secret(name: str) -> str:
         result = subprocess.run(["op", "read", name], capture_output=True, text=True)
         if result.returncode != 0:
-            raise SecretResolutionError(result.stderr, adapter="1password", key=name)
+            raise cappa.Exit(result.stderr)
         return result.stdout.strip()
 
     try:
@@ -168,7 +160,7 @@ def doppler(_: SecretConfig) -> Generator[secret_reader, None, None]:
             text=True,
         )
         if result.returncode != 0:
-            raise SecretResolutionError(result.stderr, adapter="doppler", key=name)
+            raise cappa.Exit(result.stderr)
         return result.stdout.strip()
 
     try:

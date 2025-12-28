@@ -1,5 +1,5 @@
-Deploy a Django Application
-===========================
+Deploying a Django Application
+==============================
 
 This guide walks you through deploying a standard Django application packaged with ``uv``.
 
@@ -13,23 +13,11 @@ Prerequisites
 Server Setup
 ------------
 
-Fujin provides helper commands to set up your server. These commands handle SSH key setup and user creation.
-
-**Set up SSH access** (if you don't have SSH configured):
+Create a dedicated deployment user:
 
 .. code-block:: shell
 
-    # Interactive SSH setup wizard
-    fujin server setup-ssh
-
-**Create a dedicated deployment user**:
-
-.. code-block:: shell
-
-    # Interactive user creation wizard
-    fujin server create-user
-
-These commands ensure your server is properly configured for deployments. For more details, see :doc:`../commands/server`.
+    fujin server create-user fujin
 
 Project Setup
 -------------
@@ -103,7 +91,7 @@ Configuration
 
     .. code-block:: toml
 
-        [[hosts]]
+        [host]
         user = "fujin"
         domain_name = "your-domain.com"
         envfile = ".env.prod"
@@ -115,12 +103,8 @@ Configuration
         [webserver]
         # Tell Caddy to proxy requests to the Gunicorn socket
         upstream = "unix//run/bookstore.sock"
-
-        [webserver.statics]
         # Map static files to be served directly by Caddy
-        # Using variable interpolation with app_dir for cleaner paths
-        "/static/*" = "{app_dir}/staticfiles/"
-        "/media/*" = "{app_dir}/media/"
+        statics = { "/static/*" = "/var/www/bookstore/static/" }
 
 3.  **Release Command**:
 
@@ -128,12 +112,11 @@ Configuration
 
     .. code-block:: toml
 
-        release_command = "bookstore migrate && bookstore collectstatic --no-input"
+        release_command = "bookstore migrate && bookstore collectstatic --no-input && sudo rsync --mkpath -a --delete staticfiles/ /var/www/bookstore/static/"
 
     *   ``bookstore migrate``: Applies database migrations.
-    *   ``bookstore collectstatic``: Collects static files to the ``staticfiles`` folder in your app directory.
-
-    Note: Since we're using ``{app_dir}/staticfiles/`` in the Caddy configuration, static files are served directly from the app directory. No need for rsync to ``/var/www``.
+    *   ``bookstore collectstatic``: Collects static files to the local ``staticfiles`` folder.
+    *   ``rsync``: Syncs the collected files to ``/var/www/...`` where Caddy can serve them. We use ``sudo`` because the ``/var/www`` directory is owned by root/www-data.
 
 Deploy
 ------
@@ -148,41 +131,7 @@ The ``fujin up`` command is your "first deploy" tool. It performs the following:
 1.  **Provisions the server**: Installs necessary system packages (like Python, uv, Caddy).
 2.  **Deploys the app**: Uploads your code, installs dependencies, runs the release command, and starts the services.
 
-For subsequent updates after the initial deployment, use ``fujin deploy``.
+For subsequent updates (code changes), use ``fujin redeploy`` which is much faster as it skips the provisioning step.
 
-Updating Your Application
---------------------------
-
-After the initial deployment with ``fujin up``, use ``fujin deploy`` for all updates:
-
-**Code changes:**
-
-.. code-block:: bash
-
-   # Make your changes
-   git commit -am "Fix bug"
-
-   # Deploy to server
-   fujin deploy
-
-**Environment variable changes:**
-
-.. code-block:: bash
-
-   # Update .env.prod
-   nano .env.prod
-
-   # Redeploy
-   fujin deploy
-
-**Configuration changes:**
-
-.. code-block:: bash
-
-   # Update fujin.toml
-   nano fujin.toml
-
-   # Deploy with new configuration
-   fujin deploy
-
-The ``fujin deploy`` command is fast - it only uploads and installs what changed.
+- ``fujin redeploy``: Fast code + env updates
+- ``fujin deploy``: Apply config/template changes

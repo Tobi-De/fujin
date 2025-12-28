@@ -1,4 +1,4 @@
-Deploy a Binary Application
+Deploying a Binary Application
 ==============================
 
 This guide covers deploying self-contained executables (Go/Rust/Python via PyApp). Example: PocketBase.
@@ -13,17 +13,11 @@ Prerequisites
 Server Setup
 ------------
 
-Fujin provides helper commands to set up your server:
+Create a dedicated deployment user:
 
 .. code-block:: shell
 
-    # Interactive SSH setup wizard (if needed)
-    fujin server setup-ssh
-
-    # Interactive user creation wizard
-    fujin server create-user
-
-For more details, see :doc:`../commands/server`.
+    fujin server create-user fujin
 
 Project Setup
 -------------
@@ -87,41 +81,5 @@ The ``fujin up`` command will:
 Common Operations
 -----------------
 
-**Update your binary**
-
-.. code-block:: shell
-
-    # Download new version
-    curl -LO https://github.com/pocketbase/pocketbase/releases/download/v0.23.0/pocketbase_0.23.0_linux_amd64.zip
-    unzip pocketbase_0.23.0_linux_amd64.zip
-
-    # Update version in fujin.toml
-    # version = "0.23.0"
-
-    # Deploy the update
-    fujin deploy
-
-**View logs**
-
-.. code-block:: shell
-
-    # Follow application logs
-    fujin app logs -f
-
-    # Check service status
-    fujin app info
-
-**Manage the service**
-
-.. code-block:: shell
-
-    # Restart after config changes
-    fujin app restart
-
-    # Stop the application
-    fujin app stop
-
-    # Start the application
-    fujin app start
-
-For more management commands, see :doc:`../commands/app`.
+- ``fujin redeploy``: Fast code + env updates
+- ``fujin deploy``: Apply config/template changes

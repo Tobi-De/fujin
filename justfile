@@ -33,6 +33,7 @@ fujin *ARGS:
     cd examples/django/bookstore
     ../../../.venv/bin/python -m fujin {{ ARGS }}
 
+
 download-pocketbase:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -42,6 +43,7 @@ download-pocketbase:
     rm ./examples/golang/pocketbase/LICENSE.md
     rm ./examples/golang/pocketbase/CHANGELOG.md
     chmod +x ./examples/golang/pocketbase/pocketbase
+
 
 # -------------------------------------------------------------------------
 # Maintenance

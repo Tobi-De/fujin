@@ -25,23 +25,25 @@ class Prune(BaseCommand):
         if self.keep < 1:
             raise cappa.Exit("The minimum value for the --keep option is 1", code=1)
 
-        versions_dir = f"{self.config.app_dir(self.selected_host)}/.versions"
+        versions_dir = f"{self.config.app_dir}/.versions"
         with self.connection() as conn:
             _, success = conn.run(f"test -d {versions_dir}", warn=True, hide=True)
             if not success:
-                self.output.info("No versions directory found. Nothing to prune.")
+                self.stdout.output(
+                    "[blue]No versions directory found. Nothing to prune.[/blue]"
+                )
                 return
 
             # List files sorted by time (newest first)
             result, _ = conn.run(f"ls -1t {versions_dir}", warn=True, hide=True)
 
             if not result:
-                self.output.info("No versions found to prune")
+                self.stdout.output("[blue]No versions found to prune[/blue]")
                 return
 
             filenames = result.strip().splitlines()
             prefix = f"{self.config.app_name}-"
-            suffix = ".pyz"
+            suffix = ".tar.gz"
 
             valid_bundles = []
             for fname in filenames:
@@ -49,8 +51,8 @@ class Prune(BaseCommand):
                     valid_bundles.append(fname)
 
             if len(valid_bundles) <= self.keep:
-                self.output.info(
-                    f"Only {len(valid_bundles)} versions found. Nothing to prune (keep={self.keep})."
+                self.stdout.output(
+                    f"[blue]Only {len(valid_bundles)} versions found. Nothing to prune (keep={self.keep}).[/blue]"
                 )
                 return
 
@@ -69,4 +71,4 @@ class Prune(BaseCommand):
 
             cmd = f"cd {versions_dir} && rm -f {' '.join(to_delete)}"
             conn.run(cmd)
-            self.output.success("Pruning completed successfully")
+            self.stdout.output("[green]Pruning completed successfully[/green]")

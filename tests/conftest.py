@@ -1,78 +1,94 @@
-"""Shared fixtures for all tests."""
-
-from __future__ import annotations
-
-from unittest.mock import MagicMock, patch
-
-import msgspec
 import pytest
-
-from fujin.commands import BaseCommand
-from fujin.config import Config
-
-
-@pytest.fixture
-def minimal_config_dict(tmp_path, monkeypatch):
-    """Minimal valid configuration dict used across all tests."""
-    monkeypatch.chdir(tmp_path)
-
-    return {
-        "app": "testapp",
-        "version": "1.0.0",
-        "build_command": "echo building",
-        "installation_mode": "python-package",
-        "python_version": "3.11",
-        "distfile": "dist/testapp-{version}-py3-none-any.whl",
-        "processes": {"web": {"command": "gunicorn"}},
-        "hosts": [{"domain_name": "example.com", "user": "deploy"}],
-        "webserver": {"enabled": False, "upstream": "localhost:8000"},
-    }
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+from contextlib import contextmanager
+from fujin.config import Config, HostConfig, Webserver, ProcessConfig, InstallationMode
 
 
 @pytest.fixture
-def minimal_config(minimal_config_dict):
-    """Convert minimal_config_dict to Config object."""
-    return msgspec.convert(minimal_config_dict, type=Config)
+def capture_bundle(tmp_path):
+    @contextmanager
+    def _mock_temp_dir():
+        yield str(tmp_path)
+
+    with patch("tempfile.TemporaryDirectory", side_effect=_mock_temp_dir):
+        yield tmp_path
 
 
 @pytest.fixture
-def config_with_webserver(minimal_config_dict):
-    """Config with webserver enabled."""
-    minimal_config_dict["webserver"]["enabled"] = True
-    return msgspec.convert(minimal_config_dict, type=Config)
-
-
-@pytest.fixture
-def temp_project_dir(tmp_path, monkeypatch):
-    """Temporary project directory with pyproject.toml."""
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-
-    pyproject = project_dir / "pyproject.toml"
-    pyproject.write_text("""
-[project]
-name = "testapp"
-version = "2.5.0"
-""")
-
-    monkeypatch.chdir(project_dir)
-    return project_dir
+def mock_config():
+    return Config(
+        app_name="testapp",
+        version="0.1.0",
+        build_command="echo build",
+        distfile="dist/testapp-{version}.whl",
+        installation_mode=InstallationMode.PY_PACKAGE,
+        python_version="3.12",
+        host=HostConfig(
+            domain_name="example.com",
+            user="testuser",
+            env_content="FOO=bar",
+        ),
+        webserver=Webserver(upstream="localhost:8000"),
+        processes={
+            "web": ProcessConfig(command="run web"),
+            "worker": ProcessConfig(command="run worker", replicas=2),
+        },
+        local_config_dir=Path(__file__).parent.parent / "src" / "fujin" / "templates",
+    )
 
 
 @pytest.fixture
 def mock_connection():
-    """Mocked SSH connection for command tests."""
-    mock_conn = MagicMock()
-    mock_conn.run.return_value = ("", True)
+    conn = MagicMock()
+    conn.run.return_value = ("", True)
+    return conn
 
-    with patch.object(BaseCommand, "connection") as mock_connection_ctx:
-        mock_connection_ctx.return_value.__enter__.return_value = mock_conn
-        mock_connection_ctx.return_value.__exit__.return_value = None
-        yield mock_conn
+
+@pytest.fixture(autouse=True)
+def patch_host_connection(mock_connection):
+    with patch("fujin.commands.BaseCommand.connection") as mock_ctx:
+        mock_ctx.return_value.__enter__.return_value = mock_connection
+        yield
 
 
 @pytest.fixture
-def mock_output():
-    """Mocked output handler for command tests."""
-    with patch.object(BaseCommand, "output", MagicMock()) as mock_out:
-        yield mock_out
+def mock_calls(mock_connection):
+    return mock_connection.run.call_args_list
+
+
+@pytest.fixture(autouse=True)
+def patch_config_read(mock_config):
+    """Automatically patch Config.read for all tests."""
+    with patch("fujin.config.Config.read", return_value=mock_config):
+        yield
+
+
+@pytest.fixture
+def get_commands():
+    def _get(mock_calls):
+        commands = []
+        for c in mock_calls:
+            # Filter out non-run calls if using mock_connection.mock_calls
+            if c[0] and c[0] != "run":
+                continue
+
+            if c.args:
+                cmd = str(c.args[0])
+            elif "command" in c.kwargs:
+                cmd = str(c.kwargs["command"])
+            else:
+                continue
+
+            env_prefix = "/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"
+            full_command = f'export PATH="{env_prefix}" && {cmd}'
+            commands.append(full_command)
+        return commands
+
+    return _get
+
+
+@pytest.fixture(autouse=True)
+def silence_command_output():
+    with patch("fujin.commands.BaseCommand.stdout"):
+        yield

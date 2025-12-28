@@ -1,256 +1,221 @@
-"""Tests for down command."""
-
-from __future__ import annotations
-
-from unittest.mock import MagicMock, patch
-
-import msgspec
+from unittest.mock import patch, MagicMock
+from fujin.commands.down import Down
+from fujin.commands.deploy import Deploy
+from inline_snapshot import snapshot
+from tests.script_runner import script_runner  # noqa: F401
+import tarfile
+import io
 import pytest
 
-from fujin.commands.down import Down
-from fujin.config import Config
+
+def test_down_aborts_if_not_confirmed(mock_connection, get_commands):
+    with patch("rich.prompt.Confirm.ask", return_value=False):
+        down = Down()
+        down()
+        assert get_commands(mock_connection.mock_calls) == snapshot([])
+
+
+def test_down_command_generation(mock_connection, get_commands):
+    with patch("rich.prompt.Confirm.ask", return_value=True):
+        down = Down()
+        down()
+
+        assert get_commands(mock_connection.mock_calls) == snapshot(
+            [
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && cat /home/testuser/.local/share/fujin/testapp/.version',
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && test -f /home/testuser/.local/share/fujin/testapp/.versions/testapp-.tar.gz',
+                'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && mkdir -p /tmp/uninstall-testapp- && tar --overwrite -xzf /home/testuser/.local/share/fujin/testapp/.versions/testapp-.tar.gz -C /tmp/uninstall-testapp- && cd /tmp/uninstall-testapp- && chmod +x uninstall.sh && bash ./uninstall.sh && cd / && rm -rf /tmp/uninstall-testapp-rm -rf /home/testuser/.local/share/fujin/testapp',
+            ]
+        )
 
 
 @pytest.fixture
-def minimal_config(tmp_path, monkeypatch):
-    """Minimal config for down tests."""
-    monkeypatch.chdir(tmp_path)
-
-    return {
-        "app": "testapp",
-        "version": "1.0.0",
-        "build_command": "echo building",
-        "installation_mode": "python-package",
-        "python_version": "3.11",
-        "distfile": "dist/testapp-{version}-py3-none-any.whl",
-        "processes": {"web": {"command": "gunicorn"}},
-        "hosts": [{"domain_name": "example.com", "user": "deploy"}],
-        "webserver": {"enabled": False, "upstream": "localhost:8000"},
-    }
+def setup_distfile(tmp_path, mock_config):
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    dist_file = dist_dir / f"testapp-{mock_config.version}.whl"
+    dist_file.touch()
+    mock_config.distfile = str(dist_dir / "testapp-{version}.whl")
+    return dist_file
 
 
-# ============================================================================
-# Confirmation Flow
-# ============================================================================
+def test_down_script_execution(
+    mock_connection,
+    script_runner,
+    mock_config,
+    capture_bundle,
+    setup_distfile,
+):
+    # 1. Deploy first to generate the bundle
+    mock_config.app_name = "testapp"
+    mock_config.version = "0.1.0"
 
+    captured_command = []
 
-def test_down_aborted_when_user_declines(minimal_config):
-    """Down command exits without action when user declines confirmation."""
-    config = msgspec.convert(minimal_config, type=Config)
-    mock_conn = MagicMock()
+    def run_side_effect(cmd, **kwargs):
+        captured_command.append(cmd)
+        if "sha256sum" in cmd:
+            return "checksum123\n", True
+        return "", True
 
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
-        patch("fujin.commands.down.Confirm") as mock_confirm,
-        patch.object(Down, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = False  # User declines
+    mock_connection.run.side_effect = run_side_effect
 
-        down = Down()
+    with patch("hashlib.file_digest") as mock_digest:
+        mock_digest.return_value.hexdigest.return_value = "checksum123"
+        with patch("subprocess.run"):
+            deploy = Deploy()
+            deploy()
+
+    # 2. Setup environment for Down
+    app_dir = script_runner.root / "home/testuser/.local/share/fujin/testapp"
+    app_dir.mkdir(parents=True)
+    (app_dir / ".version").write_text("0.1.0")
+
+    versions_dir = app_dir / ".versions"
+    versions_dir.mkdir()
+
+    # Copy the generated bundle to the "remote" location
+    bundle_name = f"testapp-0.1.0.tar.gz"
+    generated_bundle = capture_bundle / "deploy.tar.gz"
+    remote_bundle = versions_dir / bundle_name
+    remote_bundle.write_bytes(generated_bundle.read_bytes())
+
+    # Mock system commands
+    script_runner._create_mock("userdel", "echo userdel $@")
+
+    # Setup systemd units to be removed
+    systemd_dir = script_runner.root / "etc/systemd/system"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    (systemd_dir / "testapp.service").touch()
+    (systemd_dir / "testapp-worker@.service").touch()
+
+    # Mock systemctl list-unit-files output for uninstall script
+    script_runner._create_mock(
+        "systemctl",
+        """
+if [[ "$1" == "list-unit-files" ]]; then
+    echo "testapp.service enabled"
+    echo "testapp-worker@.service enabled"
+else
+    echo "systemctl $@" >> """
+        + str(script_runner.logs / "systemctl.log")
+        + """
+fi
+""",
+    )
+
+    # 3. Run Down
+    with patch("rich.prompt.Confirm.ask", return_value=True):
+        down = Down(full=False)
         down()
 
-        # Connection should not be used if user declines
-        assert not mock_conn.run.called
+    # 4. Verify uninstall script execution
+    # Extract and run the script manually as before
+    with tarfile.open(remote_bundle, "r:gz") as tar:
+        extracted_script = tar.extractfile("./uninstall.sh").read().decode()
+
+    result = script_runner.run(extracted_script)
+    result.assert_success()
+
+    # Verify systemd units were stopped/disabled
+    log = result.get_log("systemctl")
+    assert "disable --now testapp.service" in log
+    assert "testapp-worker@1.service" in log
+    assert "testapp-worker@2.service" in log
+
+    # Verify Caddy was NOT removed (full=False)
+    caddy_cmds = "sudo systemctl stop caddy"
+    assert not any(caddy_cmds in cmd for cmd in captured_command)
 
 
-def test_down_handles_keyboard_interrupt(minimal_config):
-    """Down command handles Ctrl+C gracefully during confirmation."""
-    config = msgspec.convert(minimal_config, type=Config)
+def test_down_full_script_execution(
+    mock_connection,
+    script_runner,
+    mock_config,
+    capture_bundle,
+    setup_distfile,
+):
+    # 1. Deploy first to generate the bundle
+    mock_config.app_name = "testapp"
+    mock_config.version = "0.1.0"
 
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.commands.down.Confirm") as mock_confirm,
-        patch.object(Down, "output", MagicMock()),
-    ):
-        mock_confirm.ask.side_effect = KeyboardInterrupt
+    captured_command = []
 
-        down = Down()
+    def run_side_effect(cmd, **kwargs):
+        captured_command.append(cmd)
+        if "sha256sum" in cmd:
+            return "checksum123\n", True
+        return "", True
 
-        with pytest.raises(SystemExit) as exc_info:
-            down()
+    mock_connection.run.side_effect = run_side_effect
 
-        assert exc_info.value.code == 0
+    with patch("hashlib.file_digest") as mock_digest:
+        mock_digest.return_value.hexdigest.return_value = "checksum123"
+        with patch("subprocess.run"):
+            deploy = Deploy()
+            deploy()
 
+    # 2. Setup environment for Down
+    app_dir = script_runner.root / "home/testuser/.local/share/fujin/testapp"
+    app_dir.mkdir(parents=True)
+    (app_dir / ".version").write_text("0.1.0")
 
-# ============================================================================
-# Successful Teardown
-# ============================================================================
+    versions_dir = app_dir / ".versions"
+    versions_dir.mkdir()
 
+    # Copy the generated bundle to the "remote" location
+    bundle_name = f"testapp-0.1.0.tar.gz"
+    generated_bundle = capture_bundle / "deploy.tar.gz"
+    remote_bundle = versions_dir / bundle_name
+    remote_bundle.write_bytes(generated_bundle.read_bytes())
 
-def test_down_successful_teardown_with_bundle(minimal_config):
-    """Down successfully tears down when bundle exists."""
-    config = msgspec.convert(minimal_config, type=Config)
-    mock_conn = MagicMock()
+    # Mock system commands
+    script_runner._create_mock("userdel", "echo userdel $@")
 
-    # Mock responses for: version read, bundle exists check, uninstall
-    mock_conn.run.side_effect = [
-        ("1.0.0", True),  # cat .version
-        ("", True),  # test -f bundle (exists)
-        ("", True),  # uninstall command
-    ]
+    # Setup systemd units
+    systemd_dir = script_runner.root / "etc/systemd/system"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    (systemd_dir / "testapp.service").touch()
 
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
-        patch("fujin.commands.down.Confirm") as mock_confirm,
-        patch("fujin.commands.down.log_operation"),
-        patch.object(Down, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
+    # Mock systemctl
+    script_runner._create_mock(
+        "systemctl",
+        """
+if [[ "$1" == "list-unit-files" ]]; then
+    echo "testapp.service enabled"
+else
+    echo "systemctl $@" >> """
+        + str(script_runner.logs / "systemctl.log")
+        + """
+fi
+""",
+    )
 
-        down = Down()
-        down()
-
-        # Verify uninstall command was called
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert any("python3" in cmd and "uninstall" in cmd for cmd in calls)
-        assert any("rm -rf" in cmd for cmd in calls)
-
-
-def test_down_uses_config_version_when_version_file_missing(minimal_config):
-    """Down uses config version when .version file doesn't exist."""
-    config = msgspec.convert(minimal_config, type=Config)
-    mock_conn = MagicMock()
-
-    # Version file read fails, bundle check, uninstall
-    mock_conn.run.side_effect = [
-        ("", False),  # cat .version fails
-        ("", True),  # test -f bundle (exists)
-        ("", True),  # uninstall command
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
-        patch("fujin.commands.down.Confirm") as mock_confirm,
-        patch("fujin.commands.down.log_operation"),
-        patch.object(Down, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
-
-        down = Down()
-        down()
-
-        # Should have tried to run uninstall with config version
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert any("testapp-1.0.0.pyz" in cmd for cmd in calls)
-
-
-# ============================================================================
-# Force Flag Behavior
-# ============================================================================
-
-
-def test_down_fails_when_uninstall_fails_without_force(minimal_config):
-    """Down raises error when uninstall fails and --force not set."""
-    config = msgspec.convert(minimal_config, type=Config)
-    mock_conn = MagicMock()
-
-    # Version read, bundle exists, uninstall fails
-    mock_conn.run.side_effect = [
-        ("1.0.0", True),  # cat .version
-        ("", True),  # test -f bundle (exists)
-        ("", False),  # uninstall command fails
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
-        patch("fujin.commands.down.Confirm") as mock_confirm,
-        patch.object(Down, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
-
-        down = Down(force=False)
-
-        with pytest.raises(SystemExit) as exc_info:
-            down()
-
-        assert exc_info.value.code == 1
-
-
-def test_down_continues_with_force_when_uninstall_fails(minimal_config):
-    """Down continues with force cleanup when uninstall fails and --force set."""
-    config = msgspec.convert(minimal_config, type=Config)
-    mock_conn = MagicMock()
-
-    # Version read, bundle exists, uninstall fails, force cleanup
-    mock_conn.run.side_effect = [
-        ("1.0.0", True),  # cat .version
-        ("", True),  # test -f bundle (exists)
-        ("", False),  # uninstall command fails
-        ("", True),  # rm -rf (force cleanup)
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
-        patch("fujin.commands.down.Confirm") as mock_confirm,
-        patch("fujin.commands.down.log_operation"),
-        patch.object(Down, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
-
-        down = Down(force=True)
-        down()
-
-        # Verify force cleanup was called
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        # Should have two rm -rf calls: one in uninstall, one for force cleanup
-        assert sum("rm -rf" in cmd for cmd in calls) == 2
-
-
-# ============================================================================
-# Full Flag Behavior
-# ============================================================================
-
-
-def test_down_with_full_flag_uninstalls_caddy(minimal_config):
-    """Down with --full flag also uninstalls Caddy."""
-    config = msgspec.convert(minimal_config, type=Config)
-    mock_conn = MagicMock()
-
-    # Version read, bundle exists, uninstall, caddy uninstall
-    mock_conn.run.side_effect = [
-        ("1.0.0", True),  # cat .version
-        ("", True),  # test -f bundle (exists)
-        ("", True),  # uninstall command
-        ("", True),  # caddy uninstall commands
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
-        patch("fujin.commands.down.Confirm") as mock_confirm,
-        patch("fujin.commands.down.log_operation"),
-        patch("fujin.commands.down.caddy") as mock_caddy,
-        patch.object(Down, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
-        mock_caddy.get_uninstall_commands.return_value = [
-            "systemctl stop caddy",
-            "apt remove -y caddy",
-        ]
-
+    # 3. Run Down with full=True
+    with patch("rich.prompt.Confirm.ask", return_value=True):
         down = Down(full=True)
         down()
 
-        # Verify Caddy uninstall was attempted
-        mock_caddy.get_uninstall_commands.assert_called_once()
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert any(
-            "systemctl stop caddy" in cmd and "apt remove" in cmd for cmd in calls
-        )
+    # 4. Verify uninstall script execution
+    with tarfile.open(remote_bundle, "r:gz") as tar:
+        extracted_script = tar.extractfile("./uninstall.sh").read().decode()
+
+    result = script_runner.run(extracted_script)
+    result.assert_success()
+
+    # Verify systemd units were stopped/disabled
+    log = result.get_log("systemctl")
+    assert "disable --now testapp.service" in log
+
+    # Verify Caddy WAS removed (full=True)
+    caddy_cmds = "&& ".join(
+        [
+            "sudo systemctl stop caddy",
+            "sudo systemctl disable caddy",
+            "sudo rm -f /usr/bin/caddy",
+            "sudo rm -f /etc/systemd/system/caddy.service",
+            "sudo userdel caddy",
+            "sudo rm -rf /etc/caddy",
+        ]
+    )
+    assert any(caddy_cmds in cmd for cmd in captured_command)

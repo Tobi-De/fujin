@@ -6,10 +6,10 @@ import sys
 import re
 import os
 import logging
+import cappa
 from contextlib import contextmanager
 from typing import Generator
 from fujin.config import HostConfig
-from fujin.errors import ConnectionError, SSHAuthenticationError
 import termios
 import tty
 import codecs
@@ -33,15 +33,7 @@ class SSH2Connection:
         self.sock = sock
 
     @contextmanager
-    def cd(self, path: str) -> Generator[None, None, None]:
-        """Context manager to temporarily change the working directory for commands.
-
-        Args:
-            path: Absolute or relative path to change to
-
-        Yields:
-            None
-        """
+    def cd(self, path: str):
         prev_cwd = self.cwd
         if path.startswith("/"):
             self.cwd = path
@@ -61,19 +53,8 @@ class SSH2Connection:
         pty: bool = False,
         hide: bool = False,
     ) -> tuple[str, bool]:
-        """Executes a command on the remote host.
-
-        Args:
-            command: The shell command to execute
-            warn: If True, don't raise an exception on non-zero exit status
-            pty: If True, allocate a pseudo-terminal for the command (enables password prompts, interactive shells)
-            hide: If True, suppress stdout/stderr output. Can also be 'out' or 'err' to hide selectively
-
-        Returns:
-            A tuple of (stdout_output, success) where success is True if exit status was 0
-
-        Raises:
-            cappa.Exit: If the command fails and warn=False
+        """
+        Executes a command on the remote host.
         """
 
         cwd_prefix = ""
@@ -88,8 +69,7 @@ class SSH2Connection:
         full_command = f'export PATH="{env_prefix}" && {cwd_prefix}{command}'
         logger.debug(f"Running command: {full_command}")
 
-        watchers: tuple[re.Pattern[str], ...] | None = None
-        pass_response: str | None = None
+        watchers, pass_response = None, None
         if self.host.password:
             logger.debug("Setting up sudo password watchers")
             watchers = (
@@ -169,7 +149,7 @@ class SSH2Connection:
                                 sys.stdout.flush()
                             stdout_buffer.append(text)
 
-                            if "sudo" in text and watchers and pass_response:
+                            if "sudo" in text and watchers:
                                 for pattern in watchers:
                                     if pattern.search(text):
                                         logger.debug(
@@ -206,22 +186,15 @@ class SSH2Connection:
 
         exit_status = channel.get_exit_status()
         if exit_status != 0 and not warn:
-            raise ConnectionError(
+            raise cappa.Exit(
                 f"Command failed with exit code {exit_status}", code=exit_status
             )
 
         return "".join(stdout_buffer), exit_status == 0
 
-    def put(self, local: str, remote: str) -> None:
-        """Uploads a local file to the remote host using SCP.
-
-        Args:
-            local: Path to the local file to upload
-            remote: Destination path on the remote host (absolute or relative to cwd)
-
-        Raises:
-            FileNotFoundError: If the local file doesn't exist
-            ValueError: If the local path is not a file
+    def put(self, local: str, remote: str):
+        """
+        Uploads a local file to the remote host.
         """
         local_path = Path(local)
 
@@ -268,7 +241,7 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         # disable Nagle's algorithm for lower latency
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except socket.error as e:
-        raise ConnectionError(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
+        raise cappa.Exit(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
 
     session = Session()
     try:
@@ -276,101 +249,31 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         session.handshake(sock)
     except Exception as e:
         sock.close()
-        raise ConnectionError("SSH Handshake failed") from e
+        raise cappa.Exit("SSH Handshake failed") from e
 
     logger.info("Authenticating...")
-    auth_methods_tried = []
-    authenticated = False
-    auth_method_used = None
-
-    # Method 1: Explicit key file (if specified)
-    if host.key_filename:
-        try:
-            key_path = Path(host.key_filename).expanduser()
-            logger.debug(f"Trying explicit key: {key_path}")
+    try:
+        if host.key_filename:
+            logger.debug(
+                "Authenticating with public key from file %s", host.key_filename
+            )
             passphrase = host.key_passphrase or ""
-            session.userauth_publickey_fromfile(host.user, str(key_path), passphrase)
-            authenticated = session.userauth_authenticated()
-            if authenticated:
-                auth_method_used = f"key file: {key_path}"
-                logger.info(f"✓ Authenticated using {key_path}")
-            auth_methods_tried.append(f"key file: {key_path}")
-        except Exception as e:
-            logger.debug(f"Key file auth failed: {e}")
-            auth_methods_tried.append(f"key file: {key_path} (failed)")
-
-    # Method 2: SSH agent (loaded keys)
-    if not authenticated:
-        try:
-            logger.debug("Trying ssh-agent...")
-            session.agent_auth(host.user)
-            authenticated = session.userauth_authenticated()
-            if authenticated:
-                logger.info("✓ Authenticated using ssh-agent")
-            auth_methods_tried.append("ssh-agent")
-        except Exception as e:
-            logger.debug(f"Agent auth failed: {e}")
-            auth_methods_tried.append("ssh-agent (failed)")
-
-    # Method 3: Common key locations (fallback)
-    if not authenticated:
-        common_keys = [
-            "~/.ssh/id_ed25519",
-            "~/.ssh/id_rsa",
-            "~/.ssh/id_ecdsa",
-            "~/.ssh/id_dsa",
-        ]
-
-        for key_path_str in common_keys:
-            if authenticated:
-                break
-
-            key_path = Path(key_path_str).expanduser()
-            if not key_path.exists():
-                continue
-
-            try:
-                logger.debug(f"Trying default key: {key_path}")
-                # Try with empty passphrase (most common case)
-                session.userauth_publickey_fromfile(host.user, str(key_path), "")
-                authenticated = session.userauth_authenticated()
-
-                if authenticated:
-                    logger.info(f"✓ Authenticated using {key_path}")
-                    auth_methods_tried.append(f"default key: {key_path}")
-                    break
-
-            except Exception as e:
-                logger.debug(f"Key {key_path} failed: {e}")
-
-    # Method 4: Password (if configured)
-    if not authenticated and host.password:
-        try:
-            logger.debug("Trying password authentication...")
+            session.userauth_publickey_fromfile(
+                host.user, str(host.key_filename), passphrase
+            )
+        elif host.password:
+            logger.debug("Authenticating with password")
             session.userauth_password(host.user, host.password)
-            authenticated = session.userauth_authenticated()
-            if authenticated:
-                logger.info("✓ Authenticated using password")
-            auth_methods_tried.append("password")
-        except Exception as e:
-            logger.debug(f"Password auth failed: {e}")
-            auth_methods_tried.append("password (failed)")
+        else:
+            logger.debug("Authenticating with SSH agent...")
+            session.agent_auth(host.user)
 
-    if not authenticated:
+    except Exception as e:
         sock.close()
-        methods_str = ", ".join(auth_methods_tried) if auth_methods_tried else "none"
-        host_str = f"{host.user}@{host.domain_name or host.ip}"
+        raise cappa.Exit(f"Authentication failed for {host.user}") from e
 
-        error_msg = (
-            f"Authentication failed for {host_str}\n"
-            f"Tried: {methods_str}\n\n"
-            f"Solutions:\n"
-            f"  1. Ensure your SSH key is authorized on the server\n"
-            f"  2. Add your key to ssh-agent: ssh-add ~/.ssh/id_ed25519\n"
-            f'  3. Specify key in fujin.toml: key_filename = "~/.ssh/id_ed25519"\n'
-            f"  4. Set password in fujin.toml or .env file"
-        )
-        raise SSHAuthenticationError(error_msg)
+    if not session.userauth_authenticated():
+        raise cappa.Exit("Authentication failed")
 
     conn = SSH2Connection(session, host, sock=sock)
     try:

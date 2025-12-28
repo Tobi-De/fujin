@@ -1,5 +1,5 @@
-How to...
-=========
+How-tos
+=======
 
 This section contains practical, step-by-step guides for deploying applications with Fujin.
 
@@ -43,7 +43,7 @@ The process involves three steps:
 
     .. code-block:: toml
 
-        [[hosts]]
+        [host]
         user = "root"
         domain_name = "your-domain.com"
 
@@ -58,7 +58,7 @@ The process involves three steps:
 
     .. code-block:: toml
 
-        [[hosts]]
+        [host]
         user = "fujin"
         domain_name = "your-domain.com"
 
