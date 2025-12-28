@@ -88,7 +88,6 @@ Static file paths support variable interpolation using Python's ``str.format()``
 - ``{app_name}`` - Your application name
 - ``{app_dir}`` - Full path to application directory
 - ``{domain_name}`` - Host's domain name
-- Any custom variables from host ``context``
 
 **Examples:**
 
@@ -316,93 +315,6 @@ check out the `integrations guide </integrations.html>`_
 .. important::
 
     *envfile* and *env* are mutually exclusive—you can define only one.
-
-context
-^^^^^^^
-
-**(Optional)**
-
-Custom key-value pairs that can be used in systemd templates, Caddyfiles, and static paths. Useful for host-specific configuration.
-
-Context variables are available as:
-- ``{{ context.key_name }}`` in Jinja2 templates (systemd units, Caddyfiles)
-- ``{context.key_name}`` in static path configurations (uses Python's str.format)
-
-**Use cases:**
-
-- Host-specific settings (number of workers, memory limits)
-- Different ports or domains per environment
-- Feature flags for staging vs production
-- Custom paths or directories
-
-**Example:**
-
-.. code-block:: toml
-
-   [[hosts]]
-   name = "staging"
-   domain_name = "staging.example.com"
-   context = {
-       workers = "2",
-       max_requests = "1000",
-       log_level = "debug",
-       media_bucket = "staging-media"
-   }
-
-   [[hosts]]
-   name = "production"
-   domain_name = "example.com"
-   context = {
-       workers = "8",
-       max_requests = "10000",
-       log_level = "warning",
-       media_bucket = "prod-media"
-   }
-
-**Using in systemd templates** (``.fujin/web.service.j2``):
-
-.. code-block:: jinja
-
-   [Service]
-   ExecStart={{ app_dir }}/.venv/bin/gunicorn \
-       --workers {{ context.workers }} \
-       --max-requests {{ context.max_requests }} \
-       --log-level {{ context.log_level }} \
-       myapp.wsgi:application
-
-**Using in Caddyfile templates** (``.fujin/Caddyfile.j2``):
-
-.. code-block:: jinja
-
-   {{ domain_name }} {
-       # Use context variable in header
-       header X-Environment "{{ context.env_name }}"
-
-       reverse_proxy {{ upstream }}
-   }
-
-**Using in static paths**:
-
-.. code-block:: toml
-
-   [webserver]
-   statics = {
-       "/static/*" = "/var/www/{app_name}/{context.env_name}/static/"
-   }
-
-**Available everywhere:**
-
-All Jinja2 templates have access to context variables, including:
-
-- Systemd service files (``.fujin/*.service.j2``)
-- Caddyfile (``.fujin/Caddyfile.j2``)
-- Socket files (``.fujin/*.socket.j2``)
-- Timer files (``.fujin/*.timer.j2``)
-- Static paths in ``[webserver]`` configuration
-
-.. tip::
-
-   Use context for environment-specific settings instead of maintaining separate template files for each environment.
 
 apps_dir
 ^^^^^^^^

@@ -23,6 +23,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚜 Refactor
 
+- Remove **extra parameter from log_operation
 - Encode full flag in operation name
 - Move audit to server-side JSONL storage
 - Move custom context from process to host
@@ -31,6 +32,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 📚 Documentation
 
+- Fix rollback command documentation to match implementation
+- Fix exec command documentation to match implementation
 - Fix app info command documentation
 - Fix variable interpolation syntax and interactive commands
 - Fix incorrect app command examples

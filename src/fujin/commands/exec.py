@@ -13,13 +13,6 @@ from fujin.commands import BaseCommand
 )
 @dataclass
 class Exec(BaseCommand):
-    """
-    Examples:
-      fujin exec ls -la              Run command on server
-      fujin exec --appenv ls         Run in app directory with app environment
-      fujin exec --app shell         Run command via app binary (e.g., myapp shell)
-    """
-
     command: Annotated[str, cappa.Arg(help="Command to execute")] = field(kw_only=True)
     appenv: Annotated[
         bool,
