@@ -30,7 +30,7 @@ Quick Reference
    * - :doc:`show`
      - Show deployment configuration and rendered templates
    * - :doc:`audit`
-     - View local audit logs for deployment operations
+     - View audit logs for deployment operations stored on the server
    * - :doc:`exec`
      - Execute arbitrary commands on the server or via app binary
    * - :doc:`rollback`

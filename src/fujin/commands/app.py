@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-import json
 from typing import Annotated
-from datetime import datetime
-from collections import defaultdict
 
 import cappa
 from rich.table import Table
-from rich.console import Console
-from rich.markup import escape
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
@@ -251,23 +246,7 @@ class App(BaseCommand):
         ] = None,
     ):
         """
-        # Show last 50 lines for web process (default)
-        fujin app logs web
-
-        # Follow logs in real-time
-        fujin app logs web --follow
-
-        # Show only error-level logs
-        fujin app logs web --level err
-
-        # Show logs from last 2 hours
-        fujin app logs --since "2 hours ago"
-
-        # Filter logs by pattern
-        fujin app logs --grep "ValueError"
-
-        # Combine multiple filters
-        fujin app logs web -n 100 --level warning --since "1 hour ago"
+        Show last 50 lines for web process (default)
         """
         with self.connection() as conn:
             # Use instances for logs (shows logs from running services)
@@ -323,74 +302,3 @@ class App(BaseCommand):
                 return
 
             conn.run(f"sudo systemctl cat {' '.join(names)}", pty=True)
-
-    @cappa.command(help="Show deployment history")
-    def history(
-        self,
-        limit: Annotated[
-            int,
-            cappa.Arg(
-                short="-n",
-                long="--limit",
-                help="Number of deployments to show",
-            ),
-        ] = 10,
-    ):
-        """Display deployment history from the server."""
-        with self.connection() as conn:
-            app_dir = shlex.quote(self.config.app_dir(self.selected_host))
-            history_file = f"{app_dir}/.deployments.json"
-
-            stdout, success = conn.run(
-                f"cat {history_file} 2>/dev/null", hide=True, warn=True
-            )
-
-            if not success or not stdout.strip():
-                self.output.warning("No deployment history found")
-                return
-
-            try:
-                history = json.loads(stdout)
-            except json.JSONDecodeError:
-                self.output.error("Failed to parse deployment history")
-                return
-
-            if not history:
-                self.output.warning("No deployments recorded")
-                return
-
-            history = history[:limit]
-
-            grouped: dict[str, list[dict]] = defaultdict(list)
-            for record in history:
-                host = record.get("host", "unknown")
-                grouped[host].append(record)
-
-            console = Console()
-
-            first = True
-            for host, host_records in grouped.items():
-                if not first:
-                    console.print()
-                console.print(f"[green]{host}[/green]:")
-                first = False
-
-                for record in host_records:
-                    try:
-                        ts = datetime.fromisoformat(record["timestamp"])
-                        timestamp = ts.strftime("%Y-%m-%d %H:%M")
-                    except (ValueError, KeyError):
-                        timestamp = record.get("timestamp", "unknown")
-
-                    user = record.get("user", "unknown")
-                    version = record.get("version", "unknown")
-                    git_commit = record.get("git_commit", "")
-
-                    message = f"Deployed version [blue]{version}[/blue]"
-                    if git_commit:
-                        message += f" [dim]({git_commit[:7]})[/dim]"
-
-                    console.print(
-                        f"  [{escape(timestamp)}] [dim]\\[[/dim][yellow]{user}[/yellow][dim]][/dim] {message}",
-                        highlight=False,
-                    )

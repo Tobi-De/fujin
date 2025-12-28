@@ -23,6 +23,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚜 Refactor
 
+- Encode full flag in operation name
+- Move audit to server-side JSONL storage
 - Move custom context from process to host
 - Merge app exec and server exec into exec command
 - Consistent styling and help messages improvements
@@ -41,6 +43,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🧪 Testing
 
+- Update audit tests for server-side storage
 - Rewrote from scratch
 
 ## [0.14.1] - 2025-12-08

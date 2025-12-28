@@ -77,14 +77,12 @@ class Down(BaseCommand):
                     "&& ".join(caddy.get_uninstall_commands()), pty=True, warn=True
                 )
 
-        log_operation(
-            operation="down",
-            host=self.selected_host.name or self.selected_host.domain_name,
-            details={
-                "version": version,
-                "app_name": self.config.app_name,
-                "full": self.full,
-            },
-        )
+            log_operation(
+                connection=conn,
+                app_name=self.config.app_name,
+                operation="full-down" if self.full else "down",
+                host=self.selected_host.name or self.selected_host.domain_name,
+                version=version,
+            )
 
         self.output.success("Project teardown completed successfully!")

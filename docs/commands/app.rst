@@ -234,18 +234,6 @@ Display systemd unit file contents for your services.
    # Show Caddy configuration
    fujin app cat caddy
 
-History Command
----------------
-
-View recent journal entries for your application services.
-
-.. code-block:: bash
-
-   # Show history for all services
-   fujin app history
-
-   # Show history for specific process
-   fujin app history web
 
 Common Workflows
 ----------------
