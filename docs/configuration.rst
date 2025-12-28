@@ -81,7 +81,18 @@ statics
 Defines the mapping of URL paths to local directories for serving static files. The directories you map should be accessible by caddy, meaning
 with read permissions for the *www-data* group; a reliable choice is **/var/www**.
 
-Example:
+**Variable Interpolation:**
+
+Static file paths support variable interpolation using Python's ``str.format()`` syntax. Available variables:
+
+- ``{app_name}`` - Your application name
+- ``{app_dir}`` - Full path to application directory
+- ``{domain_name}`` - Host's domain name
+- Any custom variables from host ``context``
+
+**Examples:**
+
+Basic static files mapping:
 
 .. code-block:: toml
     :caption: fujin.toml
@@ -89,6 +100,29 @@ Example:
     [webserver]
     upstream = "unix//run/project.sock"
     statics = { "/static/*" = "/var/www/myproject/static/" }
+
+Using variable interpolation:
+
+.. code-block:: toml
+    :caption: fujin.toml
+
+    [webserver]
+    statics = {
+        "/static/*" = "/var/www/{app_name}/static/",
+        "/media/*" = "/var/www/{app_name}/media/"
+    }
+
+Multiple static paths:
+
+.. code-block:: toml
+    :caption: fujin.toml
+
+    [webserver]
+    statics = {
+        "/static/*" = "/var/www/{app_name}/static/",
+        "/media/*" = "/var/www/{app_name}/media/",
+        "/assets/*" = "{app_dir}/public/"
+    }
 
 processes
 ---------
@@ -161,16 +195,88 @@ Example:
 Host Configuration
 -------------------
 
+Fujin supports deploying to multiple hosts (servers) from a single configuration file. This is useful for managing staging and production environments, or deploying to multiple servers.
+
+**Single Host Setup:**
+
+.. code-block:: toml
+
+   [[hosts]]
+   domain_name = "example.com"
+   user = "deploy"
+   envfile = ".env.prod"
+
+**Multi-Host Setup:**
+
+.. code-block:: toml
+
+   [[hosts]]
+   name = "staging"
+   domain_name = "staging.example.com"
+   user = "deploy"
+   envfile = ".env.staging"
+
+   [[hosts]]
+   name = "production"
+   domain_name = "example.com"
+   user = "deploy"
+   envfile = ".env.prod"
+
+.. important::
+
+   When using multiple hosts, each host **must** have a unique ``name`` field. Use the ``-H`` flag to target specific hosts:
+
+   .. code-block:: bash
+
+      fujin deploy -H production
+      fujin app logs -H staging
+
+   Without ``-H``, commands target the first host by default.
+
+Host Fields
+~~~~~~~~~~~
+
+name
+^^^^
+
+**(Required for multi-host setups)**
+
+Unique identifier for the host. Use this with the ``-H`` flag to target specific hosts.
+
+.. code-block:: toml
+
+   [[hosts]]
+   name = "production"  # Required when you have multiple hosts
+
 ip
-~~
-The IP address or anything that resolves to the remote host IP's. This is use to communicate via ssh with the server, if omitted it's value will default to the one of the *domain_name*.
+^^
+
+**(Optional)**
+
+The IP address or hostname to connect via SSH. If omitted, defaults to ``domain_name``.
+
+.. code-block:: toml
+
+   [[hosts]]
+   ip = "192.168.1.100"        # Connect via IP
+   domain_name = "example.com"  # Used for Caddy/SSL
 
 domain_name
-~~~~~~~~~~~
-The domain name pointing to this host. Used for web proxy configuration.
+^^^^^^^^^^^
+
+**(Required)**
+
+The domain name pointing to this host. Used for:
+
+- Caddy reverse proxy configuration
+- SSL certificate generation
+- SSH connection (if ``ip`` not specified)
 
 user
-~~~~
+^^^^
+
+**(Required)**
+
 The login user for running remote tasks. Should have passwordless sudo access for optimal operation.
 
 .. note::
@@ -178,39 +284,193 @@ The login user for running remote tasks. Should have passwordless sudo access fo
     You can create a user with these requirements using the ``fujin server create-user`` command.
 
 envfile
-~~~~~~~
+^^^^^^^
+
+**(Optional)**
+
 Path to the production environment file that will be copied to the host.
 
+.. code-block:: toml
+
+   [[hosts]]
+   envfile = ".env.prod"
+
 env
-~~~
+^^^
+
+**(Optional)**
+
 A string containing the production environment variables. In combination with the secrets manager, this is most useful when
 you want to automate deployment through a CI/CD platform like GitLab CI or GitHub Actions. For an example of how to do this,
 check out the `integrations guide </integrations.html>`_
+
+.. code-block:: toml
+
+   [[hosts]]
+   env = """
+   DEBUG=False
+   SECRET_KEY=$SECRET_KEY
+   DATABASE_URL=$DATABASE_URL
+   """
 
 .. important::
 
     *envfile* and *env* are mutually exclusive—you can define only one.
 
-apps_dir
-~~~~~~~~
+context
+^^^^^^^
 
-Base directory for project storage on the host. Path is relative to user's home directory.
-Default: **.local/share/fujin**. This value determines your project's **app_dir**, which is **{apps_dir}/{app}**.
+**(Optional)**
+
+Custom key-value pairs that can be used in systemd templates, Caddyfiles, and static paths. Useful for host-specific configuration.
+
+Context variables are available as:
+- ``{{ context.key_name }}`` in Jinja2 templates (systemd units, Caddyfiles)
+- ``{context.key_name}`` in static path configurations (uses Python's str.format)
+
+**Use cases:**
+
+- Host-specific settings (number of workers, memory limits)
+- Different ports or domains per environment
+- Feature flags for staging vs production
+- Custom paths or directories
+
+**Example:**
+
+.. code-block:: toml
+
+   [[hosts]]
+   name = "staging"
+   domain_name = "staging.example.com"
+   context = {
+       workers = "2",
+       max_requests = "1000",
+       log_level = "debug",
+       media_bucket = "staging-media"
+   }
+
+   [[hosts]]
+   name = "production"
+   domain_name = "example.com"
+   context = {
+       workers = "8",
+       max_requests = "10000",
+       log_level = "warning",
+       media_bucket = "prod-media"
+   }
+
+**Using in systemd templates** (``.fujin/web.service.j2``):
+
+.. code-block:: jinja
+
+   [Service]
+   ExecStart={{ app_dir }}/.venv/bin/gunicorn \
+       --workers {{ context.workers }} \
+       --max-requests {{ context.max_requests }} \
+       --log-level {{ context.log_level }} \
+       myapp.wsgi:application
+
+**Using in Caddyfile templates** (``.fujin/Caddyfile.j2``):
+
+.. code-block:: jinja
+
+   {{ domain_name }} {
+       # Use context variable in header
+       header X-Environment "{{ context.env_name }}"
+
+       reverse_proxy {{ upstream }}
+   }
+
+**Using in static paths**:
+
+.. code-block:: toml
+
+   [webserver]
+   statics = {
+       "/static/*" = "/var/www/{app_name}/{context.env_name}/static/"
+   }
+
+**Available everywhere:**
+
+All Jinja2 templates have access to context variables, including:
+
+- Systemd service files (``.fujin/*.service.j2``)
+- Caddyfile (``.fujin/Caddyfile.j2``)
+- Socket files (``.fujin/*.socket.j2``)
+- Timer files (``.fujin/*.timer.j2``)
+- Static paths in ``[webserver]`` configuration
+
+.. tip::
+
+   Use context for environment-specific settings instead of maintaining separate template files for each environment.
+
+apps_dir
+^^^^^^^^
+
+**(Optional, default: .local/share/fujin)**
+
+Base directory for project storage on the host. Path is relative to user's home directory unless it starts with ``/``.
+
+This value determines your project's **app_dir**, which is **{apps_dir}/{app}**.
+
+.. code-block:: toml
+
+   [[hosts]]
+   apps_dir = "/opt/apps"  # Absolute path
+   # Results in: /opt/apps/myapp
+
+   [[hosts]]
+   apps_dir = ".local/share/fujin"  # Relative to home
+   # Results in: /home/user/.local/share/fujin/myapp
 
 password_env
-~~~~~~~~~~~~
+^^^^^^^^^^^^
+
+**(Optional)**
 
 Environment variable containing the user's password. Only needed if the user cannot run sudo without a password.
 
-ssh_port
-~~~~~~~~
+.. code-block:: toml
 
-SSH port for connecting to the host. Default to **22**.
+   [[hosts]]
+   password_env = "DEPLOY_PASSWORD"
+
+ssh_port
+^^^^^^^^
+
+**(Optional, default: 22)**
+
+SSH port for connecting to the host.
+
+.. code-block:: toml
+
+   [[hosts]]
+   ssh_port = 2222
 
 key_filename
-~~~~~~~~~~~~
+^^^^^^^^^^^^
+
+**(Optional)**
 
 Path to the SSH private key file for authentication. Optional if using your system's default key location.
+
+.. code-block:: toml
+
+   [[hosts]]
+   key_filename = "~/.ssh/deploy_key"
+
+key_passphrase_env
+^^^^^^^^^^^^^^^^^^
+
+**(Optional)**
+
+Environment variable containing the SSH key passphrase if your key is encrypted.
+
+.. code-block:: toml
+
+   [[hosts]]
+   key_filename = "~/.ssh/deploy_key"
+   key_passphrase_env = "SSH_KEY_PASSPHRASE"
 
 aliases
 -------
