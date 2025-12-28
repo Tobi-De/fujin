@@ -7,18 +7,19 @@ from typing import Annotated
 import cappa
 from rich.table import Table
 
-
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 
 
-@cappa.command(help="Run application-related tasks")
+@cappa.command(
+    help="Manage your application",
+)
 class App(BaseCommand):
-    @cappa.command(help="Display information about the application")
+    @cappa.command(help="Display application information and process status")
     def info(self):
         with self.connection() as conn:
-            app_dir = shlex.quote(self.config.app_dir)
-            names = self.config.active_systemd_units
+            app_dir = shlex.quote(self.config.app_dir(self.selected_host))
+            names = self.config.systemd_units
             delimiter = "___FUJIN_DELIM___"
 
             # Combine commands to reduce SSH roundtrips
@@ -39,7 +40,7 @@ class App(BaseCommand):
             rollback_files = parts[1].strip().splitlines()
             rollback_versions = []
             prefix = f"{self.config.app_name}-"
-            suffix = ".tar.gz"
+            suffix = ".pyz"
             for fname in rollback_files:
                 fname = fname.strip()
                 if fname.startswith(prefix) and fname.endswith(suffix):
@@ -53,7 +54,7 @@ class App(BaseCommand):
 
             infos = {
                 "app_name": self.config.app_name,
-                "app_dir": self.config.app_dir,
+                "app_dir": self.config.app_dir(self.selected_host),
                 "app_bin": self.config.app_bin,
                 "local_version": self.config.version,
                 "remote_version": remote_version,
@@ -67,7 +68,7 @@ class App(BaseCommand):
                 infos["python_version"] = self.config.python_version
 
             if self.config.webserver.enabled:
-                infos["running_at"] = f"https://{self.config.host.domain_name}"
+                infos["running_at"] = f"https://{self.selected_host.domain_name}"
 
             services_status = {}
             statuses = parts[2].strip().split("\n")
@@ -75,17 +76,15 @@ class App(BaseCommand):
 
             services = {}
             for process_name in self.config.processes:
-                active_systemd_units = self.config.get_active_unit_names(process_name)
+                unit_names = self.config.get_unit_names(process_name)
                 running_count = sum(
-                    1
-                    for name in active_systemd_units
-                    if services_status.get(name) == "active"
+                    1 for name in unit_names if services_status.get(name) == "active"
                 )
-                total_count = len(active_systemd_units)
+                total_count = len(unit_names)
 
                 if total_count == 1:
                     services[process_name] = services_status.get(
-                        active_systemd_units[0], "unknown"
+                        unit_names[0], "unknown"
                     )
                 else:
                     services[process_name] = f"{running_count}/{total_count}"
@@ -94,7 +93,9 @@ class App(BaseCommand):
             if socket_name in services_status:
                 services["socket"] = services_status[socket_name]
 
-        infos_text = "\n".join(f"{key}: {value}" for key, value in infos.items())
+        # Format info text with clickable URL
+        info_lines = [f"{key}: {value}" for key, value in infos.items()]
+        infos_text = "\n".join(info_lines)
 
         table = Table(title="", header_style="bold cyan")
         table.add_column("Process", style="")
@@ -119,17 +120,8 @@ class App(BaseCommand):
 
             table.add_row(service, status_str)
 
-        self.stdout.output(infos_text)
-        self.stdout.output(table)
-
-    @cappa.command(help="Run an arbitrary command via the application binary")
-    def exec(
-        self,
-        command: str,
-    ):
-        with self.connection() as conn:
-            with conn.cd(self.config.app_dir):
-                conn.run(f"source .appenv && {self.config.app_bin} {command}", pty=True)
+        self.output.output(infos_text)
+        self.output.output(table)
 
     @cappa.command(
         help="Start an interactive shell session using the system SSH client"
@@ -143,7 +135,7 @@ class App(BaseCommand):
             ),
         ] = "$SHELL",
     ):
-        host = self.config.host
+        host = self.selected_host
         ssh_target = f"{host.user}@{host.ip or host.domain_name}"
         ssh_cmd = ["ssh", "-t"]
         if host.ssh_port:
@@ -151,7 +143,7 @@ class App(BaseCommand):
         if host.key_filename:
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
-        full_remote_cmd = f"cd {self.config.app_dir} && source .appenv && {command}"
+        full_remote_cmd = f"cd {self.config.app_dir(self.selected_host)} && source .appenv && {command}"
         ssh_cmd.extend([ssh_target, full_remote_cmd])
         subprocess.run(ssh_cmd)
 
@@ -190,12 +182,13 @@ class App(BaseCommand):
 
     def _run_service_command(self, command: str, name: str | None):
         with self.connection() as conn:
-            names = self._resolve_active_systemd_units(name)
+            # Use instances for start/stop/restart (operates on running services)
+            names = self._resolve_units(name, use_templates=False)
             if not names:
-                self.stdout.output("[yellow]No services found[/yellow]")
+                self.output.warning("No services found")
                 return
 
-            self.stdout.output(
+            self.output.output(
                 f"Running [cyan]{command}[/cyan] on: [cyan]{', '.join(names)}[/cyan]"
             )
             conn.run(f"sudo systemctl {command} {' '.join(names)}", pty=True)
@@ -206,130 +199,106 @@ class App(BaseCommand):
             "restart": "restarted",
             "stop": "stopped",
         }.get(command, command)
-        self.stdout.output(f"[green]{msg} {past_tense} successfully![/green]")
+        self.output.success(f"{msg} {past_tense} successfully!")
 
     @cappa.command(help="Show logs for the specified service")
     def logs(
         self,
         name: Annotated[str | None, cappa.Arg(help="Service name")] = None,
-        follow: Annotated[bool, cappa.Arg(short="-f")] = False,
-        lines: Annotated[int, cappa.Arg(short="-n", long="--lines")] = 50,
+        follow: Annotated[
+            bool, cappa.Arg(short="-f", long="--follow", help="Follow log output")
+        ] = False,
+        lines: Annotated[
+            int,
+            cappa.Arg(short="-n", long="--lines", help="Number of log lines to show"),
+        ] = 50,
+        level: Annotated[
+            str | None,
+            cappa.Arg(
+                long="--level",
+                help="Filter by log level",
+                choices=[
+                    "emerg",
+                    "alert",
+                    "crit",
+                    "err",
+                    "warning",
+                    "notice",
+                    "info",
+                    "debug",
+                ],
+            ),
+        ] = None,
+        since: Annotated[
+            str | None,
+            cappa.Arg(
+                long="--since",
+                help="Show logs since specified time (e.g., '2 hours ago', '2024-01-01', 'yesterday')",
+            ),
+        ] = None,
+        grep: Annotated[
+            str | None,
+            cappa.Arg(
+                short="-g",
+                long="--grep",
+                help="Filter logs by pattern (case-insensitive)",
+            ),
+        ] = None,
     ):
+        """
+        Show last 50 lines for web process (default)
+        """
         with self.connection() as conn:
-            names = self._resolve_active_systemd_units(name)
+            # Use instances for logs (shows logs from running services)
+            names = self._resolve_units(name, use_templates=False)
 
             if names:
                 units = " ".join(f"-u {n}" for n in names)
-                self.stdout.output(f"Showing logs for: [cyan]{', '.join(names)}[/cyan]")
-                conn.run(
-                    f"sudo journalctl {units} -n {lines} {'-f' if follow else ''}",
-                    warn=True,
-                    pty=True,
-                )
+
+                cmd_parts = ["sudo journalctl", units]
+                if not follow:
+                    cmd_parts.append(f"-n {lines}")
+                if level:
+                    cmd_parts.append(f"-p {level}")
+                if since:
+                    cmd_parts.append(f"--since {shlex.quote(since)}")
+                if grep:
+                    cmd_parts.append(f"-g {shlex.quote(grep)}")
+                if follow:
+                    cmd_parts.append("-f")
+
+                journalctl_cmd = " ".join(cmd_parts)
+
+                self.output.output(f"Showing logs for: [cyan]{', '.join(names)}[/cyan]")
+                conn.run(journalctl_cmd, warn=True, pty=True)
             else:
-                self.stdout.output("[yellow]No services found[/yellow]")
+                self.output.warning("No services found")
 
     @cappa.command(help="Show the systemd unit file content for the specified service")
     def cat(
         self,
-        name: Annotated[str, cappa.Arg(help="Service name")],
+        name: Annotated[str | None, cappa.Arg(help="Service name")] = None,
     ):
+        if not name:
+            self.output.info("Available options:")
+            self.output.output(self._get_available_options())
+            return
+
         with self.connection() as conn:
             if name == "caddy" and self.config.webserver.enabled:
-                # Special case for Caddy
-                self.stdout.output(
-                    f"Showing Caddy configuration at: [cyan]{self.config.caddy_config_path}[/cyan]"
-                )
+                self.output.output(f"[cyan]# {self.config.caddy_config_path}[/cyan]")
                 print()
                 conn.run(f"cat {self.config.caddy_config_path}")
+                print()
                 return
 
-            names = self._resolve_active_systemd_units(name)
+            if name == "units":
+                names = self.config.systemd_units
+            else:
+                names = self._resolve_units(name, use_templates=True)
 
             if not names:
-                self.stdout.output("[yellow]No services found[/yellow]")
+                self.output.warning("No services found")
                 return
 
             conn.run(f"sudo systemctl cat {' '.join(names)}", pty=True)
-
-    def _resolve_active_systemd_units(self, name: str | None) -> list[str]:
-        """
-        Resolve a user-provided name to a list of systemd unit names.
-
-        This method handles various ways to specify services:
-        - ``None``: Returns all active units defined in the configuration.
-        - Process name (e.g., "web"): Returns the service unit(s) for that process,
-          plus any associated socket or timer units.
-        - "socket": Returns the main application socket if enabled.
-        - "timer": Returns all timer units.
-        - Specific unit (e.g., "web.service", "web.socket", "worker.timer"):
-          Returns only that specific unit.
-
-        If the name cannot be resolved, it raises a ``cappa.Exit`` with a list of
-        available valid names.
-        """
-        if not name:
-            return self.config.active_systemd_units
-
-        if name in self.config.processes:
-            units = self.config.get_active_unit_names(name)
-            process_config = self.config.processes[name]
-            if process_config.socket:
-                units.append(f"{self.config.app_name}.socket")
-            if process_config.timer:
-                service_name = self.config.get_unit_template_name(name)
-                timer_name = f"{service_name.replace('.service', '')}.timer"
-                units.append(timer_name)
-            return units
-
-        if name == "socket":
-            has_socket = any(config.socket for config in self.config.processes.values())
-            if has_socket:
-                return [f"{self.config.app_name}.socket"]
-
-        if name == "timer":
-            return [n for n in self.config.active_systemd_units if n.endswith(".timer")]
-
-        if name.endswith(".socket"):
-            process_name = name[:-7]
-            if process_name in self.config.processes:
-                if self.config.processes[process_name].socket:
-                    return [f"{self.config.app_name}.socket"]
-                raise cappa.Exit(
-                    f"Process '{process_name}' does not have a socket enabled.", code=1
-                )
-
-        if name.endswith(".timer"):
-            process_name = name[:-6]
-            if process_name in self.config.processes:
-                if self.config.processes[process_name].timer:
-                    service_name = self.config.get_unit_template_name(process_name)
-                    timer_name = f"{service_name.replace('.service', '')}.timer"
-                    return [timer_name]
-                raise cappa.Exit(
-                    f"Process '{process_name}' does not have a timer enabled.", code=1
-                )
-
-        if name.endswith(".service"):
-            process_name = name[:-8]
-            if process_name in self.config.processes:
-                return self.config.get_active_unit_names(process_name)
-
-        options = []
-        if any(p.timer for p in self.config.processes.values()):
-            options.append("timer")
-        if any(p.socket for p in self.config.processes.values()):
-            options.append("socket")
-
-        for process_name, process_config in self.config.processes.items():
-            options.append(process_name)
-            options.append(f"{process_name}.service")
-            if process_config.socket:
-                options.append(f"{process_name}.socket")
-            if process_config.timer:
-                options.append(f"{process_name}.timer")
-
-        raise cappa.Exit(
-            f"Unknown service '{name}'. Available services: {', '.join(options)}",
-            code=1,
-        )

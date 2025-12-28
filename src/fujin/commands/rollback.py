@@ -5,31 +5,33 @@ import cappa
 from rich.prompt import Confirm
 from rich.prompt import Prompt
 
-from fujin.commands import BaseCommand, install_archive_script, uninstall_archive_script
+from fujin.commands import BaseCommand
+from fujin.audit import log_operation
 
 
-@cappa.command(help="Rollback application to a previous version")
+@cappa.command(
+    help="Roll back application to a previous version",
+)
 @dataclass
 class Rollback(BaseCommand):
     def __call__(self):
         with self.connection() as conn:
-            app_dir = shlex.quote(self.config.app_dir)
+            app_dir = shlex.quote(self.config.app_dir(self.selected_host))
             result, _ = conn.run(f"ls -1t {app_dir}/.versions", warn=True, hide=True)
             if not result:
-                self.stdout.output("[blue]No rollback targets available")
+                self.output.info("No rollback targets available")
                 return
 
             filenames = result.strip().splitlines()
             versions = []
             prefix = f"{self.config.app_name}-"
-            suffix = ".tar.gz"
             for fname in filenames:
-                if fname.startswith(prefix) and fname.endswith(suffix):
-                    v = fname[len(prefix) : -len(suffix)]
+                if fname.startswith(prefix) and fname.endswith(".pyz"):
+                    v = fname[len(prefix) : -4]
                     versions.append(v)
 
             if not versions:
-                self.stdout.output("[blue]No rollback targets available")
+                self.output.info("No rollback targets available")
                 return
 
             try:
@@ -47,8 +49,8 @@ class Rollback(BaseCommand):
             current_version = current_version.strip()
 
             if current_version == version:
-                self.stdout.output(
-                    f"[yellow]Version {version} is already the current version.[/yellow]"
+                self.output.warning(
+                    f"Version {version} is already the current version."
                 )
                 return
 
@@ -60,45 +62,47 @@ class Rollback(BaseCommand):
 
             # Uninstall current
             if current_version:
-                self.stdout.output(
-                    f"[blue]Uninstalling current version {current_version}...[/blue]"
+                self.output.info(f"Uninstalling current version {current_version}...")
+                current_bundle = (
+                    f"{app_dir}/.versions/{self.config.app_name}-{current_version}.pyz"
                 )
-                current_bundle = f"{app_dir}/.versions/{self.config.app_name}-{current_version}.tar.gz"
-
-                # Check if bundle exists
                 _, exists = conn.run(f"test -f {current_bundle}", warn=True, hide=True)
+
                 if exists:
-                    uninstall_cmd = uninstall_archive_script(
-                        current_bundle, self.config.app_name, current_version
-                    )
+                    uninstall_cmd = f"python3 {current_bundle} uninstall"
                     _, ok = conn.run(uninstall_cmd, warn=True)
                     if not ok:
-                        self.stdout.output(
-                            f"[yellow]Warning: uninstall failed for version {current_version}.[/yellow]"
+                        self.output.warning(
+                            f"Warning: uninstall failed for version {current_version}."
                         )
                 else:
-                    self.stdout.output(
-                        f"[yellow]Bundle for current version {current_version} not found. Skipping uninstall.[/yellow]"
+                    self.output.warning(
+                        f"Bundle for current version {current_version} not found. Skipping uninstall."
                     )
 
             # Install target
-            self.stdout.output(f"[blue]Installing version {version}...[/blue]")
-            target_bundle = (
-                f"{app_dir}/.versions/{self.config.app_name}-{version}.tar.gz"
-            )
-            install_cmd = install_archive_script(
-                target_bundle, self.config.app_name, version
-            )
+            self.output.info(f"Installing version {version}...")
+            target_bundle = f"{app_dir}/.versions/{self.config.app_name}-{version}.pyz"
+            install_cmd = f"python3 {target_bundle} install || (echo 'install failed' >&2; exit 1)"
+
             # delete all versions after new target
             cleanup_cmd = (
                 f"cd {app_dir}/.versions && ls -1t | "
-                f"awk '/{self.config.app_name}-{version}\\.tar\\.gz/{{exit}} {{print}}' | "
+                f"awk '/{self.config.app_name}-{version}\\.pyz/{{exit}} {{print}}' | "
                 "xargs -r rm"
             )
             full_cmd = install_cmd + (
                 f" && echo '==> Cleaning up newer versions...' && {cleanup_cmd}"
             )
             conn.run(full_cmd, pty=True)
-            self.stdout.output(
-                f"[green]Rollback to version {version} completed successfully![/green]"
+
+            log_operation(
+                connection=conn,
+                app_name=self.config.app_name,
+                operation="rollback",
+                host=self.selected_host.name or self.selected_host.domain_name,
+                from_version=current_version,
+                to_version=version,
             )
+
+        self.output.success(f"Rollback to version {version} completed successfully!")

@@ -8,16 +8,18 @@ import cappa
 import fujin
 
 from fujin.commands.app import App
-from fujin.commands.config import ConfigCMD
+from fujin.commands.audit import Audit
 from fujin.commands.deploy import Deploy
 from fujin.commands.docs import Docs
 from fujin.commands.down import Down
+from fujin.commands.exec import Exec
 from fujin.commands.init import Init
 from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
 from fujin.commands.server import Server
+from fujin.commands.show import Show
+from fujin.commands.templates import Templates
 from fujin.commands.up import Up
-from fujin.commands.printenv import Printenv
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -46,12 +48,14 @@ class Fujin:
         | Deploy
         | App
         | Server
-        | ConfigCMD
+        | Show
+        | Templates
+        | Audit
+        | Exec
         | Docs
         | Down
         | Rollback
         | Prune
-        | Printenv
     ]
     verbose: Annotated[
         int,

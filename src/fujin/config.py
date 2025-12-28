@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
-import shlex
 from pathlib import Path
 
 import msgspec
@@ -37,17 +36,48 @@ class SecretAdapter(StrEnum):
     SYSTEM = "system"
 
 
+RESERVED_PROCESS_NAMES = {"env", "caddy", "units", "socket", "timer"}
+
+
 class SecretConfig(msgspec.Struct):
     adapter: SecretAdapter
     password_env: str | None = None
+
+
+class TimerConfig(msgspec.Struct):
+    """Configuration for systemd timer units.
+
+    Supports various systemd timer options for flexible scheduling.
+    See systemd.timer(5) for detailed documentation.
+    """
+
+    on_calendar: str | None = None
+    on_boot_sec: str | None = None
+    on_unit_active_sec: str | None = None
+    on_active_sec: str | None = None
+    persistent: bool = True
+    randomized_delay_sec: str | None = None
+    accuracy_sec: str | None = None
+
+    def __post_init__(self):
+        triggers = [
+            self.on_calendar,
+            self.on_boot_sec,
+            self.on_unit_active_sec,
+            self.on_active_sec,
+        ]
+        if not any(triggers):
+            raise ImproperlyConfiguredError(
+                "Timer must specify at least one trigger: on_calendar, on_boot_sec, "
+                "on_unit_active_sec, or on_active_sec"
+            )
 
 
 class ProcessConfig(msgspec.Struct):
     command: str
     replicas: int = 1
     socket: bool = False
-    timer: str | None = None
-    context: dict[str, str] = msgspec.field(default_factory=dict)
+    timer: TimerConfig | None = None
 
     def __post_init__(self):
         if self.socket and self.timer:
@@ -73,7 +103,7 @@ class Config(msgspec.Struct, kw_only=True):
     installation_mode: InstallationMode
     distfile: str
     aliases: dict[str, str] = msgspec.field(default_factory=dict)
-    host: HostConfig
+    hosts: list[HostConfig]
     processes: dict[str, ProcessConfig] = msgspec.field(default_factory=dict)
     webserver: Webserver
     requirements: str | None = None
@@ -84,6 +114,21 @@ class Config(msgspec.Struct, kw_only=True):
     )
 
     def __post_init__(self):
+        if not self.hosts or len(self.hosts) == 0:
+            raise ImproperlyConfiguredError(
+                "At least one host must be defined in 'hosts' array"
+            )
+
+        # Validate host names in multi-host setup
+        if len(self.hosts) > 1:
+            names = [h.name for h in self.hosts if h.name]
+            if not names or len(names) != len(self.hosts):
+                raise ImproperlyConfiguredError(
+                    "All hosts must have a 'name' field when using multiple hosts"
+                )
+            if len(names) != len(set(names)):
+                raise ImproperlyConfiguredError("Host names must be unique")
+
         if self.installation_mode == InstallationMode.PY_PACKAGE:
             if not self.python_version:
                 self.python_version = find_python_version()
@@ -96,10 +141,37 @@ class Config(msgspec.Struct, kw_only=True):
                 raise ImproperlyConfiguredError("Process names cannot be empty strings")
             elif process_name.count(" ") > 0:
                 raise ImproperlyConfiguredError("Process names cannot contain spaces")
+            elif process_name in RESERVED_PROCESS_NAMES:
+                raise ImproperlyConfiguredError(
+                    f"Process name '{process_name}' is reserved and cannot be used"
+                )
 
         if "web" not in self.processes and self.webserver.enabled:
             raise ImproperlyConfiguredError(
                 "Missing web process or set the proxy enabled to False to disable the use of a proxy"
+            )
+
+    def select_host(self, host_name: str | None = None) -> HostConfig:
+        """
+        Select a host by name, or return the default (first) host.
+        """
+        if not host_name:
+            return self.hosts[0]
+
+        for host in self.hosts:
+            if host.name == host_name:
+                return host
+
+        # Host not found - show helpful error
+        available_names = [h.name for h in self.hosts if h.name]
+        if available_names:
+            available = ", ".join(available_names)
+            raise ImproperlyConfiguredError(
+                f"Host '{host_name}' not found. Available hosts: {available}"
+            )
+        else:
+            raise ImproperlyConfiguredError(
+                f"Host '{host_name}' not found. No named hosts configured."
             )
 
     @property
@@ -108,12 +180,16 @@ class Config(msgspec.Struct, kw_only=True):
             return f".venv/bin/{self.app_name}"
         return self.app_name
 
-    @property
-    def app_dir(self) -> str:
-        return f"{self.host.apps_dir}/{self.app_name}"
+    def app_dir(self, host: HostConfig | None = None) -> str:
+        """Get app directory for the given host (or default host)."""
+        host = host or self.select_host()
+        return f"{host.apps_dir}/{self.app_name}"
 
-    def get_release_dir(self, version: str | None = None) -> str:
-        return f"{self.app_dir}/v{version or self.version}"
+    def get_release_dir(
+        self, version: str | None = None, host: HostConfig | None = None
+    ) -> str:
+        """Get release directory for the given version and host."""
+        return f"{self.app_dir(host)}/v{version or self.version}"
 
     def get_distfile_path(self, version: str | None = None) -> Path:
         version = version or self.version
@@ -138,7 +214,7 @@ class Config(msgspec.Struct, kw_only=True):
             return f"{self.app_name}{suffix}"
         return f"{self.app_name}-{process_name}{suffix}"
 
-    def get_active_unit_names(self, process_name: str) -> list[str]:
+    def get_unit_names(self, process_name: str) -> list[str]:
         config = self.processes[process_name]
         service_name = self.get_unit_template_name(process_name)
         if config.replicas > 1:
@@ -147,10 +223,10 @@ class Config(msgspec.Struct, kw_only=True):
         return [service_name]
 
     @property
-    def active_systemd_units(self) -> list[str]:
+    def systemd_units(self) -> list[str]:
         services = []
         for name in self.processes:
-            services.extend(self.get_active_unit_names(name))
+            services.extend(self.get_unit_names(name))
         for name, config in self.processes.items():
             if config.socket:
                 services.append(f"{self.app_name}.socket")
@@ -167,14 +243,18 @@ class Config(msgspec.Struct, kw_only=True):
     def _package_templates_path(self) -> Path:
         return Path(importlib.util.find_spec("fujin").origin).parent / "templates"
 
-    def render_systemd_units(self) -> tuple[dict[str, str], list[str]]:
+    def render_systemd_units(
+        self, host: HostConfig | None = None
+    ) -> tuple[dict[str, str], list[str]]:
+        """Render systemd units for the given host (or default host)."""
+        host = host or self.select_host()
         env = self._template_env()
         package_templates = self._package_templates_path()
 
         context = {
             "app_name": self.app_name,
-            "user": self.host.user,
-            "app_dir": self.app_dir,
+            "user": host.user,
+            "app_dir": self.app_dir(host),
         }
 
         files = {}
@@ -202,7 +282,6 @@ class Config(msgspec.Struct, kw_only=True):
                 user_template_units.append(service_name)
 
             body = template.render(
-                context=process_config.context,
                 **context,
                 command=command,
                 process_name=process_name,
@@ -218,7 +297,7 @@ class Config(msgspec.Struct, kw_only=True):
                 if is_user_template:
                     user_template_units.append(socket_name)
 
-                body = template.render(context=process_config.context, **context)
+                body = template.render(**context)
                 files[socket_name] = body
 
             if process_config.timer:
@@ -230,7 +309,6 @@ class Config(msgspec.Struct, kw_only=True):
                     user_template_units.append(timer_name)
 
                 body = template.render(
-                    context=process_config.context,
                     **context,
                     process_name=process_name,
                     process=process_config,
@@ -239,66 +317,22 @@ class Config(msgspec.Struct, kw_only=True):
 
         return files, user_template_units
 
-    def render_caddyfile(self) -> str:
+    def render_caddyfile(self, host: HostConfig | None = None) -> str:
+        """Render Caddyfile for the given host (or default host)."""
+        host = host or self.select_host()
         env = self._template_env()
         template = env.get_template("Caddyfile.j2")
-        return template.render(
-            domain_name=self.host.domain_name,
-            upstream=self.webserver.upstream,
-            statics=self.webserver.statics,
-        )
-
-    def build_context(
-        self,
-        *,
-        distfile_name: str,
-        user_units: list[str],
-        new_units: dict[str, str],
-    ) -> dict:
-        units_valid = sorted(set(self.active_systemd_units) | set(new_units.keys()))
-        regular_units = [
-            u for u in self.active_systemd_units if not u.endswith("@.service")
-        ]
-        template_units = [
-            u for u in self.active_systemd_units if u.endswith("@.service")
-        ]
-
-        def to_bash_array(values: list[str]) -> str:
-            return "(" + " ".join(shlex.quote(v) for v in values) + ")"
-
-        return {
-            "app_name": self.app_name,
-            "app_dir": self.app_dir,
-            "version": self.version,
-            "installation_mode": self.installation_mode.value,
-            "python_version": self.python_version,
-            "requirements": bool(self.requirements),
-            "distfile_name": distfile_name,
-            "release_command": self.release_command,
-            "webserver_enabled": self.webserver.enabled,
-            "caddy_config_path": self.caddy_config_path,
-            "app_bin": self.app_bin,
-            "units": {
-                "active": to_bash_array(self.active_systemd_units),
-                "valid": to_bash_array(units_valid),
-                "regular": to_bash_array(regular_units),
-                "regular_len": len(regular_units),
-                "template": to_bash_array(template_units),
-                "template_len": len(template_units),
-                "user": to_bash_array(user_units),
-                "user_len": len(user_units),
-            },
+        context = {"user": host.user, "app_dir": self.app_dir(host)}
+        statics = {
+            key: value.format(**context)
+            for key, value in self.webserver.statics.items()
         }
-
-    def render_install_script(self, *, context: dict) -> str:
-        env = self._template_env()
-        template = env.get_template("install.sh.j2")
-        return template.render(**context)
-
-    def render_uninstall_script(self, *, context: dict) -> str:
-        env = self._template_env()
-        template = env.get_template("uninstall.sh.j2")
-        return template.render(**context)
+        return template.render(
+            domain_name=host.domain_name,
+            upstream=self.webserver.upstream,
+            statics=statics,
+            **context,
+        )
 
     @property
     def caddy_config_path(self) -> str:
@@ -306,6 +340,7 @@ class Config(msgspec.Struct, kw_only=True):
 
 
 class HostConfig(msgspec.Struct, kw_only=True):
+    name: str | None = None
     ip: str | None = None
     domain_name: str
     user: str
@@ -328,7 +363,9 @@ class HostConfig(msgspec.Struct, kw_only=True):
                 raise ImproperlyConfiguredError(f"{self._env_file} not found")
             self.env_content = envfile.read_text()
         self.env_content = self.env_content.strip() if self.env_content else ""
-        self.apps_dir = f"/home/{self.user}/{self.apps_dir}"
+        # Only prepend /home/{user} if apps_dir is a relative path
+        if not self.apps_dir.startswith("/"):
+            self.apps_dir = f"/home/{self.user}/{self.apps_dir}"
         self.ip = self.ip or self.domain_name
 
     @property

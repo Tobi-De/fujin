@@ -3,27 +3,35 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
-import tarfile
 import tempfile
 import shutil
 import hashlib
+import zipapp
+import json
 from typing import Annotated
 from pathlib import Path
 import time
+from dataclasses import dataclass
 
+import importlib.util
 import cappa
 from rich.prompt import Confirm
+from rich.panel import Panel
+from rich.table import Table
+from rich.console import Console
 
 from fujin.commands import BaseCommand
-from fujin.commands._base import install_archive_script
 from fujin.secrets import resolve_secrets
+from fujin.errors import BuildError, UploadError
+from fujin.audit import log_operation
 
 logger = logging.getLogger(__name__)
 
 
 @cappa.command(
-    help="Deploy the project by building, transferring files, installing, and configuring services"
+    help="Deploy your application to the server",
 )
+@dataclass
 class Deploy(BaseCommand):
     no_input: Annotated[
         bool,
@@ -35,33 +43,49 @@ class Deploy(BaseCommand):
 
     def __call__(self):
         logger.info("Starting deployment process")
+
         if self.config.secret_config:
-            self.stdout.output("[blue]Resolving secrets from configuration...[/blue]")
+            self.output.info("Resolving secrets from configuration...")
             parsed_env = resolve_secrets(
-                self.config.host.env_content, self.config.secret_config
+                self.selected_host.env_content, self.config.secret_config
             )
         else:
-            parsed_env = self.config.host.env_content
+            parsed_env = self.selected_host.env_content
 
         try:
             logger.debug(
                 f"Building application with command: {self.config.build_command}"
             )
-            self.stdout.output(
-                f"[blue]Building application v{self.config.version}...[/blue]"
-            )
+            self.output.info(f"Building application ...")
             subprocess.run(self.config.build_command, check=True, shell=True)
         except subprocess.CalledProcessError as e:
-            raise cappa.Exit(f"build command failed: {e}", code=1) from e
+            self.output.error(f"Build command failed with exit code {e.returncode}")
+            self.output.info(
+                f"Command: {self.config.build_command}\n\n"
+                "Troubleshooting:\n"
+                "  - Check that all build dependencies are installed\n"
+                "  - Verify your build_command in fujin.toml is correct\n"
+                "  - Try running the build command manually to see full error output"
+            )
+            raise BuildError("Build failed", command=self.config.build_command) from e
         # the build commands might be responsible for creating the requirements file
         if self.config.requirements and not Path(self.config.requirements).exists():
-            raise cappa.Exit(f"{self.config.requirements} not found", code=1)
+            self.output.error(
+                f"Requirements file not found: {self.config.requirements}"
+            )
+            self.output.info(
+                "\nTroubleshooting:\n"
+                "  - Ensure your build_command generates the requirements file\n"
+                "  - Check that the 'requirements' path in fujin.toml is correct\n"
+                f"  - Try running: uv pip compile pyproject.toml -o {self.config.requirements}"
+            )
+            raise BuildError(f"Requirements file not found: {self.config.requirements}")
 
         version = self.config.version
         distfile_path = self.config.get_distfile_path(version)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            self.stdout.output("[blue]Preparing deployment bundle...[/blue]")
+            self.output.info("Preparing deployment bundle...")
             bundle_dir = Path(tmpdir) / f"{self.config.app_name}-bundle"
             bundle_dir.mkdir()
 
@@ -74,47 +98,78 @@ class Deploy(BaseCommand):
 
             units_dir = bundle_dir / "units"
             units_dir.mkdir()
-            new_units, user_units = self.config.render_systemd_units()
+            new_units, user_units = self.config.render_systemd_units(self.selected_host)
             for name, content in new_units.items():
                 (units_dir / name).write_text(content)
 
             if self.config.webserver.enabled:
                 (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
 
-            context = self.config.build_context(
-                distfile_name=distfile_path.name,
-                user_units=user_units,
-                new_units=new_units,
+            # Create installer config
+            installer_config = {
+                "app_name": self.config.app_name,
+                "app_dir": self.config.app_dir(self.selected_host),
+                "version": version,
+                "installation_mode": self.config.installation_mode.value,
+                "python_version": self.config.python_version,
+                "requirements": bool(self.config.requirements),
+                "distfile_name": distfile_path.name,
+                "release_command": self.config.release_command,
+                "webserver_enabled": self.config.webserver.enabled,
+                "caddy_config_path": self.config.caddy_config_path,
+                "app_bin": self.config.app_bin,
+                "active_units": self.config.systemd_units,
+                "valid_units": sorted(
+                    set(self.config.systemd_units) | set(new_units.keys())
+                ),
+                "user_units": user_units,
+            }
+
+            # Create zipapp
+            logger.info("Creating Python zipapp installer")
+            zipapp_dir = Path(tmpdir) / "zipapp_source"
+            zipapp_dir.mkdir()
+
+            # Copy installer __main__.py
+            installer_dir = (
+                Path(importlib.util.find_spec("fujin").origin).parent / "_installer"
+            )
+            installer_src = installer_dir / "__main__.py"
+            shutil.copy(installer_src, zipapp_dir / "__main__.py")
+
+            # Copy bundle artifacts into zipapp
+            for item in bundle_dir.iterdir():
+                dest = zipapp_dir / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dest)
+                else:
+                    shutil.copy(item, dest)
+
+            # Write config.json
+            (zipapp_dir / "config.json").write_text(
+                json.dumps(installer_config, indent=2)
             )
 
-            install_script = self.config.render_install_script(
-                context=context,
+            # Create the zipapp
+            zipapp_path = Path(tmpdir) / "installer.pyz"
+            zipapp.create_archive(
+                zipapp_dir,
+                zipapp_path,
+                interpreter="/usr/bin/env python3",
             )
-
-            (bundle_dir / "install.sh").write_text(install_script)
-            logger.debug("Generated install script:\n%s", install_script)
-
-            uninstall_script = self.config.render_uninstall_script(
-                context=context,
-            )
-            (bundle_dir / "uninstall.sh").write_text(uninstall_script)
-            logger.debug("Generated uninstall script:\n%s", uninstall_script)
-
-            # Create tarball
-            logger.info("Creating gzip-compressed deployment bundle")
-            tar_ext = "tar.gz"
-            tar_path = Path(tmpdir) / f"deploy.{tar_ext}"
-            with tarfile.open(tar_path, "w:gz", format=tarfile.PAX_FORMAT) as tar:
-                tar.add(bundle_dir, arcname=".")
 
             # Calculate local checksum
             logger.info("Calculating local bundle checksum")
-            with open(tar_path, "rb") as f:
+            with open(zipapp_path, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
-            remote_bundle_dir = Path(self.config.app_dir) / ".versions"
+            self._show_deployment_summary(zipapp_path)
+
+            remote_bundle_dir = (
+                Path(self.config.app_dir(self.selected_host)) / ".versions"
+            )
             remote_bundle_path = (
-                f"{remote_bundle_dir}/{self.config.app_name}-{version}.{tar_ext}"
+                f"{remote_bundle_dir}/{self.config.app_name}-{version}.pyz"
             )
 
             # Quote remote paths for shell usage (safe insertion into remote commands)
@@ -128,13 +183,13 @@ class Deploy(BaseCommand):
                 max_upload_retries = 3
                 upload_ok = False
                 for attempt in range(1, max_upload_retries + 1):
-                    self.stdout.output(
-                        f"[blue]Uploading deployment bundle (attempt {attempt}/{max_upload_retries})...[/blue]"
+                    self.output.info(
+                        f"Uploading deployment bundle (attempt {attempt}/{max_upload_retries})..."
                     )
 
                     # Upload to a temporary filename first, then move into place
                     tmp_remote = f"{remote_bundle_path}.uploading.{int(time.time())}"
-                    conn.put(str(tar_path), tmp_remote)
+                    conn.put(str(zipapp_path), tmp_remote)
 
                     logger.info("Verifying uploaded bundle checksum")
                     remote_checksum_out, _ = conn.run(
@@ -146,31 +201,43 @@ class Deploy(BaseCommand):
                     if local_checksum == remote_checksum:
                         conn.run(f"mv {tmp_remote} {remote_bundle_path_q}")
                         upload_ok = True
-                        self.stdout.output(
-                            "[green]Bundle uploaded and verified successfully.[/green]"
+                        self.output.success(
+                            "Bundle uploaded and verified successfully."
                         )
                         break
 
                     conn.run(f"rm -f {tmp_remote}")
-                    self.stdout.output(
-                        f"[red]Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}[/red]"
+                    self.output.error(
+                        f"Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}"
+                    )
+                    self.output.warning(
+                        "The uploaded file doesn't match the local file. This could indicate:\n"
+                        "  - Network corruption during transfer\n"
+                        "  - Storage issues on the remote server\n"
+                        "  - Interrupted upload"
                     )
 
                     if self.no_input or (
                         attempt == max_upload_retries
                         or not Confirm.ask("Upload failed. Retry?")
                     ):
-                        raise cappa.Exit("Upload aborted by user.", code=1)
+                        self.output.error("Upload verification failed")
+                        self.output.info(
+                            "\nTroubleshooting:\n"
+                            "  - Check your network connection stability\n"
+                            "  - Verify the remote server has sufficient disk space: df -h\n"
+                            "  - Try deploying again with: fujin deploy"
+                        )
+                        raise UploadError(
+                            "Upload verification failed", checksum_mismatch=True
+                        )
 
                 if not upload_ok:
-                    raise cappa.Exit("Upload failed after retries.", code=1)
+                    self.output.error("Upload failed after maximum retries")
+                    raise UploadError("Upload failed after maximum retries")
 
-                self.stdout.output("[blue]Executing remote installation...[/blue]")
-                deploy_script = install_archive_script(
-                    remote_bundle_path_q,
-                    app_name=self.config.app_name,
-                    version=version,
-                )
+                self.output.info("Executing remote installation...")
+                deploy_script = f"python3 {remote_bundle_path_q} install || (echo 'install failed' >&2; exit 1)"
                 if self.config.versions_to_keep:
                     deploy_script += (
                         "&& echo '==> Pruning old versions...' && "
@@ -179,8 +246,78 @@ class Deploy(BaseCommand):
                     )
                 conn.run(deploy_script, pty=True)
 
-        self.stdout.output("[green]Deployment completed successfully![/green]")
+                # Get git commit hash if available
+                git_commit = None
+                try:
+                    result = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    git_commit = result.stdout.strip()
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    pass  # Not a git repo or git not available
+
+                log_operation(
+                    connection=conn,
+                    app_name=self.config.app_name,
+                    operation="deploy",
+                    host=self.selected_host.name or self.selected_host.domain_name,
+                    version=version,
+                    git_commit=git_commit,
+                )
+
+        self.output.success("Deployment completed successfully!")
         if self.config.webserver.enabled:
-            self.stdout.output(
-                f"[blue]Application is available at: https://{self.config.host.domain_name}[/blue]"
-            )
+            url = f"https://{self.selected_host.domain_name}"
+            self.output.info(f"Application is available at: {url}")
+
+    def _show_deployment_summary(self, bundle_path: Path):
+        console = Console()
+
+        bundle_size = bundle_path.stat().st_size
+        if bundle_size < 1024:
+            size_str = f"{bundle_size} B"
+        elif bundle_size < 1024 * 1024:
+            size_str = f"{bundle_size / 1024:.1f} KB"
+        else:
+            size_str = f"{bundle_size / (1024 * 1024):.1f} MB"
+
+        # Build summary table
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column("Key", style="bold cyan", width=12)
+        table.add_column("Value")
+
+        table.add_row("App", self.config.app_name)
+        table.add_row("Version", self.config.version)
+        host_display = self.selected_host.name if self.selected_host.name else "default"
+        table.add_row("Host", f"{host_display} ({self.selected_host.domain_name})")
+        processes_summary = []
+        for name, proc in self.config.processes.items():
+            if proc.replicas > 1:
+                processes_summary.append(f"{name} ({proc.replicas})")
+            else:
+                processes_summary.append(name)
+        table.add_row("Processes", ", ".join(processes_summary))
+        table.add_row("Bundle", size_str)
+
+        # Display in a panel
+        panel = Panel(
+            table,
+            title="[bold]Deployment Summary[/bold]",
+            border_style="blue",
+            padding=(1, 1),
+            width=60,
+        )
+        console.print(panel)
+
+        # Confirm unless --no-input is set
+        if not self.no_input:
+            try:
+                if not Confirm.ask(
+                    "\n[bold]Proceed with deployment?[/bold]", default=True
+                ):
+                    raise cappa.Exit("Deployment cancelled", code=0)
+            except KeyboardInterrupt:
+                raise cappa.Exit("\nDeployment cancelled", code=0)
