@@ -677,8 +677,8 @@ Check Deployment History
    # View deployment history
    fujin audit -H production
 
-   # View application history
-   fujin app history -H production
+   # View last 10 deployments
+   fujin audit --limit 10 -H production
 
 Rollback if Needed
 ~~~~~~~~~~~~~~~~~~

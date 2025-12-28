@@ -96,14 +96,13 @@ class Rollback(BaseCommand):
             )
             conn.run(full_cmd, pty=True)
 
-        log_operation(
-            operation="rollback",
-            host=self.selected_host.name or self.selected_host.domain_name,
-            details={
-                "from_version": current_version,
-                "to_version": version,
-                "app_name": self.config.app_name,
-            },
-        )
+            log_operation(
+                connection=conn,
+                app_name=self.config.app_name,
+                operation="rollback",
+                host=self.selected_host.name or self.selected_host.domain_name,
+                from_version=current_version,
+                to_version=version,
+            )
 
         self.output.success(f"Rollback to version {version} completed successfully!")
