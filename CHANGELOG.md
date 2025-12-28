@@ -22,7 +22,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚜 Refactor
 
-- Rewrite test suite with cleaner architecture
 - Move custom context from process to host
 - Merge app exec and server exec into exec command
 - Consistent styling and help messages improvements
@@ -33,9 +32,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🧪 Testing
 
-- Consolidate installer tests and add rigorous command checks
-- Add installer tests with unified mock approach
-- Add connection tests with clean architecture
+- Rewrote from scratch
 
 ## [0.14.1] - 2025-12-08
 

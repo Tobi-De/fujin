@@ -84,7 +84,6 @@ export PATH=".venv/bin:$PATH"
         else:
             run(f"uv pip install {distfile_path}")
     else:
-        # binary
         log("Installing binary...")
         (app_dir / ".appenv").write_text(f"""set -a
 source .env
@@ -105,7 +104,6 @@ export PATH="{app_dir}:$PATH"
 
     log("Configuring systemd services...")
 
-    # Verify user units if any
     if config.user_units:
         log("Verifying user-provided systemd units...")
         for unit in config.user_units:

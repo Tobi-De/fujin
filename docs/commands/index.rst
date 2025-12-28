@@ -15,7 +15,6 @@ Commands
    docs
    down
    init
-   printenv
    prune
    rollback
    server

@@ -18,7 +18,7 @@ Given the following configuration in ``fujin.toml``:
 
     [processes.worker]
     command = "celery -A app worker"
-    timer = "*:00"  # Run hourly
+    timer = { on_calendar = "*:00" }  # Run hourly
 
 You can interact with services in various ways:
 

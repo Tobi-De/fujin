@@ -93,6 +93,7 @@ The `Config` class (msgspec struct) is the central configuration object, loaded 
 **Key components:**
 - `Config`: Main configuration with app metadata, processes, host config, and webserver settings
 - `ProcessConfig`: Defines how each process runs (command, replicas, socket/timer options)
+- `TimerConfig`: Systemd timer configuration (on_calendar, on_boot_sec, on_unit_active_sec, persistent, etc.)
 - `HostConfig`: SSH connection details, environment files, and deployment target info
 - `Webserver`: Caddy reverse proxy configuration (upstream, statics, config directory)
 - `InstallationMode`: Enum for `python-package` vs `binary` deployment

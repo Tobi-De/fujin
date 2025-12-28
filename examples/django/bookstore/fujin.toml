@@ -19,7 +19,10 @@ shell = "server exec --appenv -i bash"
 [processes]
 web = { command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -" }
 worker = { command = ".venv/bin/bookstore db_worker", replicas = 2 }
-health = { command = ".venv/bin/bookstore health", timer = "*:*:00" }
+
+[processes.health]
+command = ".venv/bin/bookstore health"
+timer = { on_calendar = "*:*:00" }
 
 [[hosts]]
 name = "default"
