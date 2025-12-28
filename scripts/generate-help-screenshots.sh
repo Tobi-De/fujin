@@ -26,8 +26,7 @@ generate_screenshot() {
 
     echo "📸 Generating ${name}.png..."
 
-    # Use termshot with proper syntax
-    termshot --no-decoration --filename "$output" -- "uv run $command"
+    termshot --no-decoration --no-shadow --filename "$output" -- "uv run $command"
 
     echo "   ✓ Saved to $output"
 }

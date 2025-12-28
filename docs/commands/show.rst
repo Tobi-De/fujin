@@ -99,51 +99,6 @@ Examples
 
    fujin show -H staging env
 
-Common Use Cases
-----------------
-
-.. admonition:: Before deploying
-
-   Always run ``fujin show caddy`` and ``fujin show units`` to verify your configuration renders correctly before deploying.
-
-.. admonition:: Debugging environment issues
-
-   If your app isn't working after deployment, use ``fujin show env --plain`` locally to verify all required environment variables are set.
-
-.. admonition:: Template customization
-
-   After creating custom templates in ``.fujin/``, use ``fujin show <process>`` to verify they render as expected.
-
-.. admonition:: Multi-environment verification
-
-   Use ``-H`` flag to compare configurations between staging and production:
-
-   .. code-block:: bash
-
-      fujin show -H staging env > staging.env
-      fujin show -H production env > production.env
-      diff staging.env production.env
-
-Troubleshooting
----------------
-
-**"No webserver configuration found"**
-   You tried ``fujin show caddy`` but webserver is disabled. Enable it in ``fujin.toml``:
-
-   .. code-block:: toml
-
-      [webserver]
-      enabled = true
-
-**"No environment file configured"**
-   You haven't set ``envfile`` or ``env`` in your host configuration.
-
-**Secrets still show as REDACTED with --plain**
-   The secrets weren't successfully resolved. Check:
-
-   - Your secret adapter configuration
-   - Environment variables for secret manager authentication
-   - Secret manager CLI is installed and authenticated
 
 See Also
 --------
