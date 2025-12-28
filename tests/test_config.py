@@ -12,6 +12,7 @@ from fujin.config import (
     Config,
     InstallationMode,
     ProcessConfig,
+    TimerConfig,
     read_version_from_pyproject,
 )
 from fujin.errors import ImproperlyConfiguredError
@@ -219,7 +220,11 @@ def test_config_validates_process_names(
 
 def test_process_config_validates_socket_and_timer_mutual_exclusion():
     with pytest.raises(ImproperlyConfiguredError) as exc_info:
-        ProcessConfig(command="test", socket=True, timer="daily")
+        ProcessConfig(
+            command="test",
+            socket=True,
+            timer=TimerConfig(on_calendar="daily"),
+        )
 
     assert "both" in exc_info.value.message.lower()
     assert "socket" in exc_info.value.message.lower()
@@ -230,7 +235,7 @@ def test_process_config_validates_socket_and_timer_mutual_exclusion():
     "kwargs,expected_error",
     [
         ({"replicas": 2, "socket": True}, "replicas"),
-        ({"replicas": 2, "timer": "daily"}, "replicas"),
+        ({"replicas": 2, "timer": TimerConfig(on_calendar="daily")}, "replicas"),
         ({"replicas": 0}, "at least 1 replica"),
     ],
 )
@@ -239,6 +244,27 @@ def test_process_config_validates_replicas(kwargs, expected_error):
         ProcessConfig(command="test", **kwargs)
 
     assert expected_error in exc_info.value.message.lower()
+
+
+def test_timer_config_requires_at_least_one_trigger():
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        TimerConfig()
+
+    assert "trigger" in exc_info.value.message.lower()
+
+
+@pytest.mark.parametrize(
+    "timer_config",
+    [
+        TimerConfig(on_calendar="daily"),
+        TimerConfig(on_boot_sec="5m"),
+        TimerConfig(on_unit_active_sec="1h"),
+        TimerConfig(on_active_sec="30m"),
+        TimerConfig(on_calendar="hourly", randomized_delay_sec="5m"),
+    ],
+)
+def test_timer_config_accepts_valid_configurations(timer_config):
+    assert timer_config is not None
 
 
 # ============================================================================
@@ -303,7 +329,7 @@ def test_systemd_units_includes_all_services_sockets_and_timers(minimal_config_d
     }
     minimal_config_dict["processes"]["scheduled"] = {
         "command": "backup",
-        "timer": "daily",
+        "timer": {"on_calendar": "daily"},
     }
     # Note: socket processes need replicas=1
     minimal_config_dict["processes"]["api"] = {
