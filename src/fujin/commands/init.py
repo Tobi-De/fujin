@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -21,7 +19,6 @@ class Init(BaseCommand):
     Examples:
       fujin init                        Create config with simple profile
       fujin init --profile django       Create config for Django project
-      fujin init --templates            Generate config with default templates
     """
 
     profile: Annotated[
@@ -33,14 +30,6 @@ class Init(BaseCommand):
             help="Configuration profile to use",
         ),
     ] = "simple"
-    templates: Annotated[
-        bool,
-        cappa.Arg(
-            long="--templates",
-            short="-t",
-            help="Generate the .fujin folder with default templates",
-        ),
-    ] = False
 
     def __call__(self):
         fujin_toml = Path("fujin.toml")
@@ -66,17 +55,6 @@ class Init(BaseCommand):
                         config.pop("version")
             fujin_toml.write_text(tomli_w.dumps(config, multiline_strings=True))
             self.output.success("Sample configuration file generated successfully!")
-
-        if self.templates:
-            config_dir = Path(".fujin")
-            config_dir.mkdir(exist_ok=True)
-
-            templates_folder = (
-                Path(importlib.util.find_spec("fujin").origin).parent / "templates"
-            )
-            for file in templates_folder.iterdir():
-                shutil.copy(file, config_dir / file.name)
-            self.output.success("Templates generated successfully in .fujin folder!")
 
 
 def simple_config(app_name) -> dict:
