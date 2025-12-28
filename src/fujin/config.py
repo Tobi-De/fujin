@@ -45,11 +45,41 @@ class SecretConfig(msgspec.Struct):
     password_env: str | None = None
 
 
+class TimerConfig(msgspec.Struct):
+    """Configuration for systemd timer units.
+
+    Supports various systemd timer options for flexible scheduling.
+    See systemd.timer(5) for detailed documentation.
+    """
+
+    on_calendar: str | None = None
+    on_boot_sec: str | None = None
+    on_unit_active_sec: str | None = None
+    on_active_sec: str | None = None
+    persistent: bool = True
+    randomized_delay_sec: str | None = None
+    accuracy_sec: str | None = None
+
+    def __post_init__(self):
+        # At least one trigger must be specified
+        triggers = [
+            self.on_calendar,
+            self.on_boot_sec,
+            self.on_unit_active_sec,
+            self.on_active_sec,
+        ]
+        if not any(triggers):
+            raise ImproperlyConfiguredError(
+                "Timer must specify at least one trigger: on_calendar, on_boot_sec, "
+                "on_unit_active_sec, or on_active_sec"
+            )
+
+
 class ProcessConfig(msgspec.Struct):
     command: str
     replicas: int = 1
     socket: bool = False
-    timer: str | None = None
+    timer: TimerConfig | None = None
 
     def __post_init__(self):
         if self.socket and self.timer:

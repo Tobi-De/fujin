@@ -31,7 +31,7 @@ def config_with_timer(minimal_config_dict):
     minimal_config_dict["processes"]["health"] = {
         "command": "healthcheck",
         "replicas": 1,
-        "timer": "daily",
+        "timer": {"on_calendar": "daily"},
     }
     return minimal_config_dict
 
@@ -43,7 +43,7 @@ def config_with_all_features(minimal_config_dict):
     minimal_config_dict["processes"]["health"] = {
         "command": "healthcheck",
         "replicas": 1,
-        "timer": "hourly",
+        "timer": {"on_calendar": "hourly"},
     }
     return minimal_config_dict
 

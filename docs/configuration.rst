@@ -103,7 +103,17 @@ Each entry in the `processes` dictionary represents a service that will be manag
 - **command** (required): The command to execute. Relative paths are resolved against the application directory on the host.
 - **replicas** (optional, default: 1): The number of instances to run. If > 1, a template unit (e.g., `app-worker@.service`) is generated.
 - **socket** (optional, default: false): If true, enables socket activation. Fujin will look for a corresponding socket template.
-- **timer** (optional): A systemd calendar event expression (e.g., `OnCalendar=daily`). If set, a timer unit is generated instead of a standard service.
+- **timer** (optional): Configuration for systemd timer-based scheduling. Accepts a dictionary with the following options:
+
+  - **on_calendar**: Calendar event expression (e.g., ``"daily"``, ``"*:*:00"`` for every minute)
+  - **on_boot_sec**: Time to wait after system boot (e.g., ``"5m"`` for 5 minutes)
+  - **on_unit_active_sec**: Time to wait after the service was last active (e.g., ``"1h"`` for recurring tasks)
+  - **on_active_sec**: Time to wait after the timer was activated
+  - **persistent** (default: true): Whether to catch up on missed runs
+  - **randomized_delay_sec**: Random delay to add (useful to prevent thundering herd)
+  - **accuracy_sec**: Timer accuracy (can save power on low-precision timers)
+
+  At least one trigger (``on_calendar``, ``on_boot_sec``, ``on_unit_active_sec``, or ``on_active_sec``) must be specified.
 
 **Template Selection Logic:**
 
@@ -127,8 +137,20 @@ Example:
     # Uses default.service.j2, generating a template unit for multiple instances
     worker = { command = ".venv/bin/celery -A myproject worker", replicas = 2 }
 
-    # Uses beat.service.j2 if exists, or default.service.j2. Also generates a timer unit.
-    beat = { command = ".venv/bin/celery -A myproject beat", timer = "OnCalendar=daily" }
+    # Simple timer - run daily
+    [processes.beat]
+    command = ".venv/bin/celery -A myproject beat"
+    timer = { on_calendar = "daily" }
+
+    # Advanced timer - run hourly with randomized delay to prevent thundering herd
+    [processes.cleanup]
+    command = ".venv/bin/cleanup"
+    timer = { on_calendar = "hourly", randomized_delay_sec = "5m" }
+
+    # Run 5 minutes after boot, then every hour after last completion
+    [processes.health]
+    command = ".venv/bin/healthcheck"
+    timer = { on_boot_sec = "5m", on_unit_active_sec = "1h" }
 
 
 .. note::
