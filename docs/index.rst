@@ -25,5 +25,6 @@ fujin documentation
    commands/index
    secrets
    integrations
+   troubleshooting
    changelog
 
