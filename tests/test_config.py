@@ -498,21 +498,3 @@ def test_caddyfile_statics_interpolates_variables(
     expected_app_dir = config.app_dir(config.hosts[0])
     assert f"{expected_app_dir}/static/" in caddyfile
     assert f"/var/www/{config.hosts[0].user}/media/" in caddyfile
-
-
-def test_caddyfile_statics_interpolates_custom_context(
-    minimal_config_dict, temp_project_dir
-):
-    """Caddyfile statics can use custom context variables from host."""
-    minimal_config_dict["hosts"][0]["context"] = {"storage_path": "/mnt/storage"}
-    minimal_config_dict["webserver"] = {
-        "enabled": True,
-        "upstream": "localhost:8000",
-        "statics": {"/uploads/*": "{storage_path}/uploads/"},
-    }
-
-    config = msgspec.convert(minimal_config_dict, type=Config)
-    caddyfile = config.render_caddyfile()
-
-    # Custom context variable should be interpolated
-    assert "/mnt/storage/uploads/" in caddyfile

@@ -172,22 +172,6 @@ Available in service/socket/timer templates:
    * - ``{{ process.timer }}``
      - Timer configuration (if set)
 
-Context Variables
-~~~~~~~~~~~~~~~~~
-
-Custom variables from host ``context``:
-
-.. code-block:: toml
-
-   [[hosts]]
-   context = {
-       workers = "4",
-       timeout = "60",
-       custom_var = "value"
-   }
-
-Access in templates as ``{{ context.workers }}``, etc.
-
 Common Customizations
 ---------------------
 
@@ -227,44 +211,6 @@ Add environment variables directly in the service file:
    # Additional environment variables
    Environment="PYTHONUNBUFFERED=1"
    Environment="DJANGO_SETTINGS_MODULE=config.settings"
-   Environment="LOG_LEVEL={{ context.log_level }}"
-
-Using Host Context
-~~~~~~~~~~~~~~~~~~
-
-Make templates adapt to staging vs production:
-
-.. code-block:: toml
-
-   # fujin.toml
-   [[hosts]]
-   name = "staging"
-   context = {
-       workers = "2",
-       timeout = "30",
-       debug_enabled = "true"
-   }
-
-   [[hosts]]
-   name = "production"
-   context = {
-       workers = "8",
-       timeout = "60",
-       debug_enabled = "false"
-   }
-
-Template:
-
-.. code-block:: jinja
-
-   [Service]
-   ExecStart={{ app_dir }}/.venv/bin/gunicorn \
-       --workers {{ context.workers }} \
-       --timeout {{ context.timeout }} \
-       {% if context.debug_enabled == "true" %}
-       --log-level debug \
-       {% endif %}
-       config.wsgi:application
 
 Custom Restart Policy
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -438,16 +384,16 @@ Create ``.fujin/web.service.j2``:
    # Gunicorn with custom settings
    ExecStart={{ app_dir }}/.venv/bin/gunicorn \
        --bind unix:/run/{{ app_name }}/{{ app_name }}.sock \
-       --workers {{ context.workers | default("4") }} \
+       --workers 4 \
        --worker-class sync \
-       --max-requests {{ context.max_requests | default("1000") }} \
+       --max-requests 1000 \
        --max-requests-jitter 50 \
        --timeout 60 \
        --graceful-timeout 30 \
        --keep-alive 5 \
        --access-logfile - \
        --error-logfile - \
-       --log-level {{ context.log_level | default("info") }} \
+       --log-level info \
        config.wsgi:application
 
    Restart=always
@@ -480,10 +426,10 @@ Create ``.fujin/worker.service.j2``:
    # Celery worker
    ExecStart={{ app_dir }}/.venv/bin/celery \
        -A config worker \
-       --loglevel={{ context.log_level | default("info") }} \
-       --concurrency={{ context.worker_concurrency | default("4") }} \
-       --max-tasks-per-child={{ context.max_tasks_per_child | default("1000") }} \
-       --time-limit={{ context.task_time_limit | default("3600") }}
+       --loglevel=info \
+       --concurrency=4 \
+       --max-tasks-per-child=1000 \
+       --time-limit=3600
 
    # Graceful shutdown
    KillSignal=SIGTERM
@@ -536,8 +482,7 @@ Local Testing
        process_name='web',
        user='deploy',
        app_dir='/home/deploy/apps/myapp',
-       process={'command': 'gunicorn app:app'},
-       context={'workers': '4'}
+       process={'command': 'gunicorn app:app'}
    ))
    EOF
 
@@ -571,20 +516,20 @@ Common Mistakes
       # Missing: {% endif %}
 
       # Wrong: Undefined variable
-      {{ workers }}  # Use {{ context.workers }}
+      {{ workers }}  # Use {{ process.command }}
 
 2. **Systemd syntax errors:**
 
    .. code-block:: jinja
 
-      # Wrong: Missing quotes in multi-line command
+      # Wrong: Missing backslash in multi-line command
       ExecStart={{ app_dir }}/.venv/bin/gunicorn \
-          --workers {{ context.workers }}
+          --workers 4
           config.wsgi:application  # Missing backslash!
 
       # Correct:
       ExecStart={{ app_dir }}/.venv/bin/gunicorn \
-          --workers {{ context.workers }} \
+          --workers 4 \
           config.wsgi:application
 
 3. **Incorrect paths:**
@@ -642,8 +587,8 @@ Full Django Production Template
 
    # Resource limits
    LimitNOFILE=65536
-   MemoryMax={{ context.memory_limit | default("2G") }}
-   CPUQuota={{ context.cpu_quota | default("200%") }}
+   MemoryMax=2G
+   CPUQuota=200%
 
    # Startup
    ExecStartPre=/bin/mkdir -p /run/{{ app_name }}
@@ -653,15 +598,15 @@ Full Django Production Template
        config.wsgi:application \
        --name {{ app_name }} \
        --bind unix:/run/{{ app_name }}/{{ app_name }}.sock \
-       --workers {{ context.workers | default("4") }} \
+       --workers 4 \
        --worker-class sync \
-       --max-requests {{ context.max_requests | default("1000") }} \
+       --max-requests 1000 \
        --max-requests-jitter 50 \
        --timeout 60 \
        --graceful-timeout 30 \
        --access-logfile - \
        --error-logfile - \
-       --log-level {{ context.log_level | default("info") }}
+       --log-level info
 
    # Shutdown
    KillSignal=SIGTERM
@@ -756,17 +701,16 @@ Best Practices
 --------------
 
 1. **Start with defaults:** Only customize what you need
-2. **Use context variables:** Make templates environment-agnostic
-3. **Test locally:** Preview with ``fujin show`` before deploying
-4. **Version control:** Commit ``.fujin/`` to git
-5. **Document customizations:** Add comments explaining why you changed defaults
-6. **Keep it simple:** Complex templates are harder to debug
-7. **Use includes:** For shared config, create include files
+2. **Test locally:** Preview with ``fujin show`` before deploying
+3. **Version control:** Commit ``.fujin/`` to git
+4. **Document customizations:** Add comments explaining why you changed defaults
+5. **Keep it simple:** Complex templates are harder to debug
+6. **Use includes:** For shared config, create include files
 
 See Also
 --------
 
-- :doc:`../configuration` - Context variables and configuration
+- :doc:`../configuration` - Configuration reference
 - :doc:`../commands/show` - Preview rendered templates
 - :doc:`django-complete` - Django deployment with custom templates
 - `Jinja2 Documentation <https://jinja.palletsprojects.com/>`_

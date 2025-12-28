@@ -1,7 +1,7 @@
 exec
 ====
 
-The ``fujin exec`` command executes arbitrary commands on your server, either through the application binary or directly on the server with the app environment loaded.
+Execute arbitrary commands on your server.
 
 .. image:: ../_static/images/help/exec-help.png
    :alt: fujin exec command help
@@ -10,18 +10,11 @@ The ``fujin exec`` command executes arbitrary commands on your server, either th
 Overview
 --------
 
-``fujin exec`` provides a flexible way to run commands in your deployment environment:
+``fujin exec`` provides three ways to run commands on your server:
 
-- Run Django/Flask management commands
-- Execute database queries
-- Run maintenance scripts
-- Debug issues in production
-- Test configurations
-
-The command intelligently determines where to execute based on your installation mode:
-
-- **Python package mode**: Runs commands via the installed application binary
-- **Binary mode**: Executes commands on the server with app environment loaded
+1. **Plain server command** (default) - Run any command on the server
+2. **With app environment** (``--appenv``) - Run in app directory with environment loaded
+3. **Via app binary** (``--app``) - Execute through your application binary
 
 Usage
 -----
@@ -34,318 +27,233 @@ Options
 -------
 
 ``-H, --host HOST``
-   Target a specific host in multi-host setups. Defaults to the first host defined in your configuration.
-
-``-i, --interactive``
-   Run command in interactive mode (allocates a PTY). Required for commands that need user input.
+   Target a specific host in multi-host setups.
 
 ``--appenv``
-   Load application environment variables from ``.env`` file. Useful when running server commands that need access to app configuration.
+   Change to app directory and load environment from ``.appenv`` file.
+
+``--app``
+   Execute command via the application binary (e.g., ``myapp migrate``).
+
+.. note::
+   The ``--app`` and ``--appenv`` flags are mutually exclusive - you cannot use both together.
 
 Arguments
 ---------
 
 ``COMMAND [ARGS...]``
-   The command to execute and its arguments. Everything after ``fujin exec [options]`` is passed to the remote command.
+   The command to execute. Everything after options is passed to the remote command.
 
 Execution Modes
 ---------------
 
-**Python Package Mode (default)**
+**Plain Server Command (default)**
 
-When your ``installation_mode`` is ``python-package``, commands are executed through your application binary:
-
-.. code-block:: bash
-
-   # Equivalent to running on server:
-   # cd /path/to/app && .venv/bin/myapp migrate
-
-   fujin exec migrate --no-input
-
-**Binary Mode**
-
-When your ``installation_mode`` is ``binary``, commands run as shell commands with working directory set to your app directory:
+Run any command on the server:
 
 .. code-block:: bash
 
-   # Runs in /path/to/app directory
-   fujin exec ./myapp migrate
+   # Check disk space
+   fujin exec df -h
 
-**With App Environment**
+   # View processes
+   fujin exec ps aux
 
-Use ``--appenv`` to load environment variables from your ``.env`` file:
+   # Any server command
+   fujin exec ls -la /var/log
+
+**With App Environment (--appenv)**
+
+Run commands in your app directory with environment variables loaded:
 
 .. code-block:: bash
 
-   # Environment variables from .env are available
+   # Run Python script with app environment
    fujin exec --appenv python script.py
+
+   # Access database with credentials from .env
+   fujin exec --appenv psql -U \$DB_USER -d \$DB_NAME
+
+   # Start interactive bash in app directory
+   fujin exec --appenv bash
+
+Equivalent to:
+
+.. code-block:: bash
+
+   cd /path/to/app && source .appenv && your-command
+
+**Via App Binary (--app)**
+
+Execute commands through your application binary:
+
+.. code-block:: bash
+
+   # Django migrations
+   fujin exec --app migrate
+
+   # Django shell
+   fujin exec --app shell
+
+   # Custom management command
+   fujin exec --app my_command
+
+Equivalent to:
+
+.. code-block:: bash
+
+   cd /path/to/app && source .appenv && myapp your-command
 
 Examples
 --------
 
-**Django management commands**
+**Django Management Commands**
 
 .. code-block:: bash
 
-   # Run database migrations
-   fujin exec migrate
+   # Run migrations
+   fujin exec --app migrate
 
-   # Create superuser (interactive)
-   fujin exec -i createsuperuser
+   # Create superuser
+   fujin exec --app createsuperuser
 
    # Collect static files
-   fujin exec collectstatic --no-input
+   fujin exec --app collectstatic --no-input
 
    # Open Django shell
-   fujin exec -i shell
+   fujin exec --app shell
 
-   # If you have django-extensions
-   fujin exec -i shell_plus
+   # Custom management command
+   fujin exec --app my_custom_command
 
-**Database operations**
+**Database Operations**
 
 .. code-block:: bash
 
-   # Run database query
-   fujin exec dbshell -i
+   # Django database shell
+   fujin exec --app dbshell
+
+   # Direct PostgreSQL access
+   fujin exec --appenv 'psql -U $DB_USER -d $DB_NAME'
 
    # Export database
-   fujin exec --appenv pg_dump mydb > backup.sql
+   fujin exec pg_dump mydb > backup.sql
 
-   # Show database size
-   fujin exec 'python -c "from myapp import db; print(db.get_size())"'
-
-**Flask commands**
+**Maintenance and Debugging**
 
 .. code-block:: bash
 
-   # Run Flask shell
-   fujin exec -i flask shell
-
-   # Run database migrations
-   fujin exec flask db upgrade
-
-   # Custom Flask command
-   fujin exec flask my-custom-command
-
-**Maintenance and debugging**
-
-.. code-block:: bash
-
-   # Check Python version
-   fujin exec python --version
-
-   # List installed packages
-   fujin exec pip list
-
-   # Check disk space
-   fujin exec --appenv df -h
+   # Check app directory contents
+   fujin exec --appenv ls -la
 
    # View environment variables
    fujin exec --appenv env
 
-   # Run health check
-   fujin exec healthcheck
+   # Check Python version in app
+   fujin exec --appenv python --version
 
-**Server commands with app context**
+   # Run health check script
+   fujin exec --appenv python healthcheck.py
+
+**Server Commands**
 
 .. code-block:: bash
 
-   # Start a bash session in app directory
-   fujin exec --appenv -i bash
+   # Check disk space
+   fujin exec df -h
+
+   # View system logs
+   fujin exec tail -f /var/log/syslog
 
    # Check running processes
-   fujin exec --appenv ps aux | grep myapp
+   fujin exec ps aux | grep python
 
-   # View log files
-   fujin exec --appenv tail -f /var/log/myapp/error.log
+   # System info
+   fujin exec uname -a
 
-**Multi-host operations**
+**Interactive Shells**
 
 .. code-block:: bash
 
-   # Run migration on staging
-   fujin exec -H staging migrate
+   # Django shell
+   fujin exec --app shell
 
-   # Run migration on production
-   fujin exec -H production migrate
+   # Bash in app directory
+   fujin exec --appenv bash
+
+   # Python REPL with app environment
+   fujin exec --appenv python
+
+   # Database shell
+   fujin exec --app dbshell
+
+**Multi-Host Operations**
+
+.. code-block:: bash
+
+   # Run on staging
+   fujin exec -H staging --app migrate
+
+   # Run on production
+   fujin exec -H production --app migrate
+
+   # Check disk on multiple hosts
+   fujin exec -H staging df -h
+   fujin exec -H production df -h
 
 Common Patterns
 ---------------
 
-**Using aliases for frequent commands**
+**Using Aliases**
 
-Instead of typing ``fujin exec -i shell`` repeatedly, create aliases in ``fujin.toml``:
+Create shortcuts in ``fujin.toml`` for frequently-used commands:
 
 .. code-block:: toml
 
    [aliases]
-   shell = "exec -i shell"
-   dbshell = "exec -i dbshell"
-   migrate = "exec migrate"
-   console = "exec -i shell_plus"
+   shell = "exec --app shell"
+   migrate = "exec --app migrate"
+   bash = "exec --appenv bash"
 
 Then use:
 
 .. code-block:: bash
 
-   fujin shell        # Opens Django shell
-   fujin migrate      # Runs migrations
-   fujin console      # Opens shell_plus
+   fujin shell      # Opens Django shell
+   fujin migrate    # Runs migrations
+   fujin bash       # Opens bash in app directory
 
-**One-off scripts**
-
-Run Python scripts in your app's environment:
+**Running Scripts**
 
 .. code-block:: bash
 
-   # Create a script
-   echo 'from myapp.models import User; print(User.objects.count())' > count_users.py
+   # Upload script to server
+   scp myscript.py user@server:/path/to/app/
 
-   # Upload and run it
-   scp count_users.py user@server:/path/to/app/
-   fujin exec python count_users.py
+   # Run with app environment
+   fujin exec --appenv python myscript.py
 
-**Data imports/exports**
-
-.. code-block:: bash
-
-   # Export data
-   fujin exec dumpdata > data.json
-
-   # Import data (after uploading file)
-   fujin exec loaddata data.json
-
-Interactive vs Non-Interactive
--------------------------------
-
-**Non-interactive (default)**
-
-For commands that don't need user input:
+**Data Import/Export**
 
 .. code-block:: bash
 
-   fujin exec migrate
-   fujin exec collectstatic --no-input
-   fujin exec python script.py
+   # Export Django data
+   fujin exec --app dumpdata > data.json
 
-**Interactive (-i flag)**
+   # Import Django data (after uploading)
+   fujin exec --app loaddata data.json
 
-For commands that need user input or full terminal:
+   # Database dump
+   fujin exec --appenv 'pg_dump $DB_NAME' > backup.sql
 
-.. code-block:: bash
-
-   fujin exec -i shell        # Django/Flask shell
-   fujin exec -i bash         # Bash session
-   fujin exec -i dbshell      # Database shell
-   fujin exec -i createsuperuser
-
-Common Use Cases
-----------------
-
-.. admonition:: Running migrations after deploy
-
-   While you can use ``release_command`` for automatic migrations, sometimes you want to run them manually:
-
-   .. code-block:: bash
-
-      fujin exec migrate --plan    # Preview migrations
-      fujin exec migrate           # Apply migrations
-
-.. admonition:: Debugging production issues
-
-   Investigate issues without redeploying:
-
-   .. code-block:: bash
-
-      fujin exec -i shell_plus
-      >>> from myapp.models import Order
-      >>> Order.objects.filter(status='pending').count()
-
-.. admonition:: One-off administrative tasks
-
-   .. code-block:: bash
-
-      fujin exec createsuperuser -i
-      fujin exec changepassword admin -i
-      fujin exec clearsessions
-
-.. admonition:: Testing before deployment
-
-   Test commands on staging before production:
-
-   .. code-block:: bash
-
-      fujin exec -H staging migrate --plan
-      # Review, then:
-      fujin exec -H production migrate
-
-Security Considerations
------------------------
-
-**Be careful with exec**
-
-``fujin exec`` gives you full access to run commands on your server. Some precautions:
-
-- Avoid running untrusted code
-- Be careful with ``--appenv`` and environment variables
-- Use ``-H`` flag explicitly for production commands
-- Consider using :doc:`app` subcommands for common operations (they're safer)
-
-**Environment variables**
-
-Without ``--appenv``, environment variables from ``.env`` are NOT loaded. This is intentional for security.
-
-**Interactive shells**
-
-Interactive shells (``-i bash``) give you full server access. Use responsibly.
-
-Troubleshooting
----------------
-
-**Command not found**
-
-Your application binary isn't in PATH. Check:
-
-- Your ``installation_mode`` in ``fujin.toml``
-- The binary was installed correctly during deployment
-- The ``app_name`` matches your binary name
-
-**Permission denied**
-
-The command needs elevated permissions. Try:
-
-- Using ``sudo`` in the command: ``fujin exec 'sudo command'``
-- Ensuring your user has necessary permissions
-- Checking file permissions in the app directory
-
-**Interactive command hangs**
-
-You forgot the ``-i`` flag for an interactive command:
-
-.. code-block:: bash
-
-   # Wrong - hangs
-   fujin exec shell
-
-   # Correct
-   fujin exec -i shell
-
-**Environment variables not available**
-
-Add ``--appenv`` flag:
-
-.. code-block:: bash
-
-   fujin exec --appenv python script.py
 
 See Also
 --------
 
-- :doc:`app` - Application management commands (safer alternatives)
+- :doc:`app` - Application management (safer alternatives)
 - :doc:`../configuration` - Configuration reference
 - :doc:`deploy` - Deployment workflow
 
 .. tip::
 
-   For frequently-used commands, create aliases in ``fujin.toml`` instead of typing ``fujin exec`` repeatedly. See the aliases section in the :doc:`../configuration` documentation.
+   Create aliases in ``fujin.toml`` for frequently-used commands instead of typing ``fujin exec`` repeatedly.

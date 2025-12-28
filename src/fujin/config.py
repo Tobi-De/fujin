@@ -282,7 +282,6 @@ class Config(msgspec.Struct, kw_only=True):
                 user_template_units.append(service_name)
 
             body = template.render(
-                context=host.context,
                 **context,
                 command=command,
                 process_name=process_name,
@@ -298,7 +297,7 @@ class Config(msgspec.Struct, kw_only=True):
                 if is_user_template:
                     user_template_units.append(socket_name)
 
-                body = template.render(context=host.context, **context)
+                body = template.render(**context)
                 files[socket_name] = body
 
             if process_config.timer:
@@ -310,7 +309,6 @@ class Config(msgspec.Struct, kw_only=True):
                     user_template_units.append(timer_name)
 
                 body = template.render(
-                    context=host.context,
                     **context,
                     process_name=process_name,
                     process=process_config,
@@ -326,7 +324,7 @@ class Config(msgspec.Struct, kw_only=True):
         template = env.get_template("Caddyfile.j2")
         context = {"user": host.user, "app_dir": self.app_dir(host)}
         statics = {
-            key: value.format(**context, **host.context)
+            key: value.format(**context)
             for key, value in self.webserver.statics.items()
         }
         return template.render(
@@ -334,7 +332,6 @@ class Config(msgspec.Struct, kw_only=True):
             upstream=self.webserver.upstream,
             statics=statics,
             **context,
-            context=host.context,
         )
 
     @property
@@ -347,7 +344,6 @@ class HostConfig(msgspec.Struct, kw_only=True):
     ip: str | None = None
     domain_name: str
     user: str
-    context: dict[str, str] = msgspec.field(default_factory=dict)
     _env_file: str | None = msgspec.field(name="envfile", default=None)
     env_content: str | None = msgspec.field(name="env", default=None)
     apps_dir: str = ".local/share/fujin"

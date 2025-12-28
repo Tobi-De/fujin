@@ -17,18 +17,7 @@ Fujin automatically logs every deployment operation to a server-side audit file.
 - Understand what changed between deployments
 - Maintain compliance and accountability
 
-The audit log is stored on the server at ``~/.fujin/{app_name}-audit.log``, providing a single source of truth for all deployment operations.
-
-Storage Location
-----------------
-
-**Server-side:** ``~/.fujin/{app_name}-audit.log``
-
-**Benefits:**
-- ✅ Survives app removal (``fujin down``) - logs stored outside app directory
-- ✅ Works with CI/CD deployments - all operations logged on server
-- ✅ Shared across machines - same remote user sees all operations
-- ✅ Persistent history - single source of truth
+The audit log is stored on the server at ``~/.fujin/{app_name}-audit.log``.
 
 Usage
 -----
@@ -84,43 +73,6 @@ Examples
 .. code-block:: bash
 
    fujin audit --limit 50
-
-Common Use Cases
-----------------
-
-.. admonition:: Track production deployments
-
-   Quickly see what version is deployed and when, including deployments from CI/CD:
-
-   .. code-block:: bash
-
-      fujin audit --limit 10
-
-.. admonition:: Debugging deployment issues
-
-   If a deployment failed, check the audit log to see:
-
-   - When the last successful deployment was
-   - What version is currently deployed
-   - If there were recent rollbacks
-   - Git commit hashes for each deploy
-
-.. admonition:: CI/CD visibility
-
-   See all deployments across all sources (local, CI/CD, other developers):
-
-   .. code-block:: bash
-
-      fujin audit --limit 20
-
-.. admonition:: Compliance and accountability
-
-   The audit log provides a permanent record of all deployment activities on the server, useful for:
-
-   - Compliance requirements
-   - Change management
-   - Post-incident analysis
-   - Understanding deployment patterns
 
 Audit Log Format
 -----------------

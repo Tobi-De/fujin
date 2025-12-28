@@ -54,8 +54,8 @@ Below is an example of the layout and structure of a deployed application:
             ├── .version                          # Current deployed version
             ├── .venv/                            # Virtual environment
             └── .versions/                        # Stored deployment bundles
-                ├── app-1.2.3.tar.gz
-                └── app-1.2.2.tar.gz
+                ├── app-1.2.3.pyz
+                └── app-1.2.2.pyz
 
     .. tab-item:: binary
 
@@ -67,5 +67,5 @@ Below is an example of the layout and structure of a deployed application:
             ├── .version                          # Current deployed version
             ├── app_binary                        # Installed binary
             └── .versions/                        # Stored deployment bundles
-                ├── app-1.2.3.tar.gz
-                └── app-1.2.2.tar.gz
+                ├── app-1.2.3.pyz
+                └── app-1.2.2.pyz

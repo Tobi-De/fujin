@@ -284,11 +284,6 @@ Edit ``fujin.toml``:
    domain_name = "staging.example.com"
    user = "deploy"
    envfile = ".env.staging"
-   context = {
-       workers = "2",
-       max_requests = "500",
-       log_level = "info"
-   }
 
    # Production environment
    [[hosts]]
@@ -296,25 +291,20 @@ Edit ``fujin.toml``:
    domain_name = "example.com"
    user = "deploy"
    envfile = ".env.prod"
-   context = {
-       workers = "4",
-       max_requests = "2000",
-       log_level = "warning"
-   }
 
    # Web server (Gunicorn)
    [processes.web]
-   command = ".venv/bin/gunicorn config.wsgi:application --bind unix:/run/bookstore/bookstore.sock --workers {{ context.workers }} --max-requests {{ context.max_requests }} --access-logfile - --error-logfile -"
+   command = ".venv/bin/gunicorn config.wsgi:application --bind unix:/run/bookstore/bookstore.sock --workers 4 --max-requests 1000 --access-logfile - --error-logfile -"
    socket = true
 
    # Background workers (2 replicas for redundancy)
    [processes.worker]
-   command = ".venv/bin/celery -A config worker --loglevel={{ context.log_level }} --concurrency=4"
+   command = ".venv/bin/celery -A config worker --loglevel=info --concurrency=4"
    replicas = 2
 
    # Celery Beat scheduler
    [processes.beat]
-   command = ".venv/bin/celery -A config beat --loglevel={{ context.log_level }}"
+   command = ".venv/bin/celery -A config beat --loglevel=info"
 
    # Health check every 5 minutes
    [processes.healthcheck]
@@ -812,12 +802,12 @@ Edit ``.fujin/web.service.j2``:
    WorkingDirectory={{ app_dir }}
    EnvironmentFile={{ app_dir }}/.env
 
-   # Custom: Use context variables for per-environment config
+   # Custom Gunicorn configuration
    ExecStart={{ app_dir }}/.venv/bin/gunicorn \
        config.wsgi:application \
        --bind unix:/run/{{ app_name }}/{{ app_name }}.sock \
-       --workers {{ context.workers }} \
-       --max-requests {{ context.max_requests }} \
+       --workers 4 \
+       --max-requests 1000 \
        --timeout 60 \
        --access-logfile - \
        --error-logfile -
@@ -917,12 +907,6 @@ Here's the complete ``fujin.toml`` with all features:
    envfile = ".env.staging"
    ssh_port = 22
    apps_dir = "/opt/apps"
-   context = {
-       workers = "2",
-       max_requests = "500",
-       log_level = "info",
-       env_name = "staging"
-   }
 
    # Production environment
    [[hosts]]
@@ -932,24 +916,17 @@ Here's the complete ``fujin.toml`` with all features:
    envfile = ".env.prod"
    ssh_port = 22
    apps_dir = "/opt/apps"
-   context = {
-       workers = "4",
-       max_requests = "2000",
-       log_level = "warning",
-       env_name = "production"
-   }
-
    # Process definitions
    [processes.web]
-   command = ".venv/bin/gunicorn config.wsgi:application --bind unix:/run/bookstore/bookstore.sock --workers {{ context.workers }} --max-requests {{ context.max_requests }} --access-logfile - --error-logfile -"
+   command = ".venv/bin/gunicorn config.wsgi:application --bind unix:/run/bookstore/bookstore.sock --workers 4 --max-requests 1000 --access-logfile - --error-logfile -"
    socket = true
 
    [processes.worker]
-   command = ".venv/bin/celery -A config worker --loglevel={{ context.log_level }} --concurrency=4"
+   command = ".venv/bin/celery -A config worker --loglevel=info --concurrency=4"
    replicas = 2
 
    [processes.beat]
-   command = ".venv/bin/celery -A config beat --loglevel={{ context.log_level }}"
+   command = ".venv/bin/celery -A config beat --loglevel=info"
 
    [processes.healthcheck]
    command = ".venv/bin/bookstore healthcheck"

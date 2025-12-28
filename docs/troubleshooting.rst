@@ -1,5 +1,5 @@
-Troubleshooting Guide
-=====================
+Troubleshooting
+===============
 
 Common issues and solutions when deploying with fujin.
 
@@ -637,59 +637,6 @@ Secrets not resolving
       # Install Bitwarden CLI
       # See: https://bitwarden.com/help/cli/
 
-Performance Issues
-------------------
-
-Slow deployments
-~~~~~~~~~~~~~~~~
-
-**Solutions:**
-
-1. **Large dependencies:**
-
-   Use ``requirements.txt`` with pinned versions to speed up installs.
-
-2. **Slow network:**
-
-   Deploy from a server closer to your VPS, or use CI/CD from cloud providers.
-
-3. **Many old versions:**
-
-   .. code-block:: bash
-
-      # Clean up old versions
-      fujin prune --keep 2
-
-High memory usage
-~~~~~~~~~~~~~~~~~
-
-**Symptoms:**
-- Server runs out of memory
-- OOM (Out of Memory) killer terminates processes
-
-**Solutions:**
-
-1. **Reduce worker count:**
-
-   .. code-block:: toml
-
-      # In fujin.toml
-      [[hosts]]
-      context = { workers = "2" }  # Reduce from 4
-
-2. **Limit Gunicorn workers:**
-
-   Rule of thumb: ``workers = (2 × CPU cores) + 1``
-
-3. **Add swap space:**
-
-   .. code-block:: bash
-
-      ssh user@server
-      sudo fallocate -l 2G /swapfile
-      sudo chmod 600 /swapfile
-      sudo mkswap /swapfile
-      sudo swapon /swapfile
 
 Getting Help
 ------------
