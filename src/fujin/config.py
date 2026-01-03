@@ -335,6 +335,7 @@ class Config(msgspec.Struct, kw_only=True):
         return template.render(
             domain_name=host.domain_name,
             upstream=self.webserver.upstream,
+            routes=self.webserver.routes,
             statics=statics,
             **context,
         )
@@ -400,11 +401,36 @@ class HostConfig(msgspec.Struct, kw_only=True):
         return value
 
 
-class Webserver(msgspec.Struct):
+class RouteConfig(msgspec.Struct):
+    """Configuration for path-based routing to different upstreams."""
+    path: str
     upstream: str
+    strip_path: bool = False
+
+    def __post_init__(self):
+        if not self.path.startswith("/"):
+            raise ImproperlyConfiguredError(
+                f"Route path '{self.path}' must start with '/'"
+            )
+
+
+class Webserver(msgspec.Struct):
+    upstream: str | None = None
     enabled: bool = True
     statics: dict[str, str] = msgspec.field(default_factory=dict)
+    routes: list[RouteConfig] = msgspec.field(default_factory=list)
     config_dir: str = "/etc/caddy/conf.d"
+
+    def __post_init__(self):
+        if not self.upstream and not self.routes:
+            raise ImproperlyConfiguredError(
+                "Webserver must have either 'upstream' or 'routes' configured"
+            )
+        if self.upstream and self.routes:
+            raise ImproperlyConfiguredError(
+                "Webserver cannot have both 'upstream' and 'routes' configured. "
+                "Use 'routes' for multiple upstreams or 'upstream' for a single target."
+            )
 
 
 def read_version_from_pyproject():

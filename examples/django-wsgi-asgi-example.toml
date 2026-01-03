@@ -1,0 +1,41 @@
+# Example: Django app with both WSGI (Gunicorn) and ASGI (Daphne) servers
+# This configuration demonstrates routing WebSocket connections to Daphne
+# while serving regular HTTP requests through Gunicorn
+
+app = "myapp"
+requirements = "requirements.txt"
+python_version = "3.13"
+versions_to_keep = 3
+build_command = "uv build && uv pip compile pyproject.toml -o requirements.txt"
+release_command = "myapp migrate && myapp collectstatic --no-input"
+distfile = "dist/myapp-{version}-py3-none-any.whl"
+installation_mode = "python-package"
+
+[webserver]
+# Use routes instead of upstream for path-based routing
+statics = { "/static/*" = "/var/www/myapp/static/" }
+
+# Route WebSocket connections to Daphne (ASGI server)
+[[webserver.routes]]
+path = "/ws"
+upstream = "localhost:8001"
+
+# Route all other traffic to Gunicorn (WSGI server)
+[[webserver.routes]]
+path = "/"
+upstream = "unix//run/myapp/gunicorn.sock"
+
+[processes]
+# Gunicorn for WSGI (regular HTTP requests)
+web = { command = ".venv/bin/gunicorn myapp.wsgi:application --bind unix:/run/myapp/gunicorn.sock --access-logfile - --error-logfile -" }
+
+# Daphne for ASGI (WebSocket connections)
+asgi = { command = ".venv/bin/daphne -b 127.0.0.1 -p 8001 myapp.asgi:application" }
+
+# Background worker
+worker = { command = ".venv/bin/myapp worker", replicas = 2 }
+
+[[hosts]]
+domain_name = "example.com"
+envfile = ".env.prod"
+user = "ubuntu"

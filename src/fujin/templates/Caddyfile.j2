@@ -5,5 +5,19 @@
 		file_server
 	}
 	{%- endfor %}
+
+	{%- if routes %}
+	{%- for route in routes %}
+	handle {{ route.path }}* {
+		{%- if route.strip_path %}
+		uri strip_prefix {{ route.path }}
+		{%- endif %}
+		reverse_proxy {{ route.upstream }}
+	}
+	{%- endfor %}
+	{%- endif %}
+
+	{%- if upstream %}
 	reverse_proxy {{ upstream }}
+	{%- endif %}
 }
