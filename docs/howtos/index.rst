@@ -9,6 +9,7 @@ This section contains practical, step-by-step guides for deploying applications 
 
    django
    binary
+   multiple-upstreams
 
 Prerequisites
 -------------

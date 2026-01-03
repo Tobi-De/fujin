@@ -71,6 +71,36 @@ The address where your web application listens for requests. Supports any value 
 - HTTP address (e.g., *localhost:8000* )
 - Unix socket caddy (e.g., *unix//run/project.sock* )
 
+**Note:** You must configure either ``upstream`` (for a single backend) or ``routes`` (for multiple backends with path-based routing), but not both.
+
+routes
+~~~~~~
+Advanced path-based routing to different upstream servers. Use this when you need to route specific paths to different backends (e.g., ASGI server for WebSockets, WSGI server for regular requests).
+
+Each route is a table with the following fields:
+
+- **path** (required): The URL path to match (must start with ``/``)
+- **upstream** (required): The backend address to proxy to
+- **strip_path** (optional, default: false): Whether to remove the matched path before proxying
+
+**Example:**
+
+.. code-block:: toml
+    :caption: fujin.toml
+
+    # Route WebSocket connections to Daphne (ASGI), everything else to Gunicorn (WSGI)
+    [[webserver.routes]]
+    path = "/ws"
+    upstream = "localhost:8001"
+
+    [[webserver.routes]]
+    path = "/admin"
+    upstream = "unix//run/app/gunicorn.sock"
+
+    [[webserver.routes]]
+    path = "/"
+    upstream = "unix//run/app/gunicorn.sock"
+
 config_dir
 ~~~~~~~~~~
 The directory where the Caddyfile for the project will be stored on the host. Default: **/etc/caddy/conf.d/**
