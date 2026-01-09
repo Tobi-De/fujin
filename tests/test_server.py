@@ -26,16 +26,16 @@ def base_config(tmp_path, monkeypatch):
         "installation_mode": "python-package",
         "python_version": "3.11",
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
-        "processes": {"web": {"command": "gunicorn"}},
+        "processes": {"web": {"command": "gunicorn", "listen": "localhost:8000"}},
         "hosts": [{"address": "example.com", "user": "deploy"}],
-        "webserver": {"enabled": True, "upstream": "localhost:8000"},
+        "sites": [{"domains": ["example.com"], "routes": {"/": "web"}}],
     }
 
 
 @pytest.fixture
 def config_without_webserver(base_config):
     """Config without webserver enabled."""
-    base_config["webserver"]["enabled"] = False
+    base_config.pop("sites", None)
     return base_config
 
 
