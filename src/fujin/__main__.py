@@ -14,6 +14,7 @@ from fujin.commands.docs import Docs
 from fujin.commands.down import Down
 from fujin.commands.exec import Exec
 from fujin.commands.init import Init
+from fujin.commands.migrate import Migrate
 from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
 from fujin.commands.server import Server
@@ -50,6 +51,7 @@ class Fujin:
         | Server
         | Show
         | Templates
+        | Migrate
         | Audit
         | Exec
         | Docs
