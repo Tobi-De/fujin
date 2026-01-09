@@ -105,22 +105,22 @@ Configuration
 
         [[hosts]]
         user = "fujin"
-        domain_name = "your-domain.com"
+        address = "your-domain.com"
         envfile = ".env.prod"
 
-        [processes]
         # Define the web process. We bind Gunicorn to a Unix socket for better performance.
-        web = { command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix//run/bookstore.sock" }
+        [processes.web]
+        command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore.sock"
+        listen = "unix//run/bookstore.sock"
 
-        [webserver]
-        # Tell Caddy to proxy requests to the Gunicorn socket
-        upstream = "unix//run/bookstore.sock"
-
-        [webserver.statics]
-        # Map static files to be served directly by Caddy
-        # Using variable interpolation with app_dir for cleaner paths
-        "/static/*" = "{app_dir}/staticfiles/"
-        "/media/*" = "{app_dir}/media/"
+        # Configure routing and static files
+        [[sites]]
+        domains = ["your-domain.com"]
+        routes = {
+            "/static/*" = { static = "{app_dir}/staticfiles/" },
+            "/media/*" = { static = "{app_dir}/media/" },
+            "/" = "web"
+        }
 
 3.  **Release Command**:
 

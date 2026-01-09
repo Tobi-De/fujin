@@ -103,7 +103,7 @@ class Deploy(BaseCommand):
             for name, content in new_units.items():
                 (units_dir / name).write_text(content)
 
-            if self.config.webserver.enabled:
+            if self.config.sites:
                 (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
 
             # Create installer config
@@ -116,7 +116,7 @@ class Deploy(BaseCommand):
                 "requirements": bool(self.config.requirements),
                 "distfile_name": distfile_path.name,
                 "release_command": self.config.release_command,
-                "webserver_enabled": self.config.webserver.enabled,
+                "webserver_enabled": bool(self.config.sites),
                 "caddy_config_path": self.config.caddy_config_path,
                 "app_bin": self.config.app_bin,
                 "active_units": self.config.systemd_units,
@@ -264,14 +264,16 @@ class Deploy(BaseCommand):
                     connection=conn,
                     app_name=self.config.app_name,
                     operation="deploy",
-                    host=self.selected_host.name or self.selected_host.domain_name,
+                    host=self.selected_host.name or self.selected_host.address,
                     version=version,
                     git_commit=git_commit,
                 )
 
         self.output.success("Deployment completed successfully!")
-        if self.config.webserver.enabled:
-            url = f"https://{self.selected_host.domain_name}"
+        if self.config.sites:
+            # Show first domain from first site
+            first_domain = self.config.sites[0].domains[0]
+            url = f"https://{first_domain}"
             self.output.info(f"Application is available at: {url}")
 
     def _show_deployment_summary(self, bundle_path: Path):
@@ -293,7 +295,7 @@ class Deploy(BaseCommand):
         table.add_row("App", self.config.app_name)
         table.add_row("Version", self.config.version)
         host_display = self.selected_host.name if self.selected_host.name else "default"
-        table.add_row("Host", f"{host_display} ({self.selected_host.domain_name})")
+        table.add_row("Host", f"{host_display} ({self.selected_host.address})")
         processes_summary = []
         for name, proc in self.config.processes.items():
             if proc.replicas > 1:

@@ -261,14 +261,14 @@ class SSH2Connection:
 def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        logger.info(f"Connecting to {host.ip}:{host.ssh_port}...")
+        logger.info(f"Connecting to {host.address}:{host.port}...")
         sock.settimeout(30)
-        sock.connect((host.ip or host.domain_name, host.ssh_port))
+        sock.connect((host.address, host.port))
         sock.settimeout(None)
         # disable Nagle's algorithm for lower latency
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except socket.error as e:
-        raise ConnectionError(f"Failed to connect to {host.ip}:{host.ssh_port}") from e
+        raise ConnectionError(f"Failed to connect to {host.address}:{host.port}") from e
 
     session = Session()
     try:
@@ -359,7 +359,7 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
     if not authenticated:
         sock.close()
         methods_str = ", ".join(auth_methods_tried) if auth_methods_tried else "none"
-        host_str = f"{host.user}@{host.domain_name or host.ip}"
+        host_str = f"{host.user}@{host.address}"
 
         error_msg = (
             f"Authentication failed for {host_str}\n"

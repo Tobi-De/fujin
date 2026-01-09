@@ -78,8 +78,39 @@ class TimerConfig(msgspec.Struct):
             )
 
 
+class RouteConfig(msgspec.Struct):
+    """Route configuration with options."""
+
+    process: str | None = None
+    static: str | None = None
+    strip_prefix: str | None = None
+
+    def __post_init__(self):
+        route_types = [self.process, self.static]
+        if sum(x is not None for x in route_types) != 1:
+            raise ImproperlyConfiguredError(
+                "Route must specify exactly one of: process, static"
+            )
+        if self.strip_prefix and not self.process:
+            raise ImproperlyConfiguredError(
+                "strip_prefix only works with process routes"
+            )
+
+
+class SiteConfig(msgspec.Struct):
+    """Site configuration for one or more domains with routing rules."""
+
+    domains: list[str]
+    routes: dict[str, str | RouteConfig]
+
+    def __post_init__(self):
+        if not self.routes:
+            raise ImproperlyConfiguredError("Site must have at least one route")
+
+
 class ProcessConfig(msgspec.Struct):
     command: str
+    listen: str | None = None
     replicas: int = 1
     socket: bool = False
     timer: TimerConfig | None = None
@@ -92,6 +123,11 @@ class ProcessConfig(msgspec.Struct):
         if self.replicas > 1 and (self.socket or self.timer):
             raise ImproperlyConfiguredError(
                 "A process cannot have replicas > 1 and either 'socket' or 'timer' enabled."
+            )
+        if self.replicas > 1 and self.listen:
+            raise ImproperlyConfiguredError(
+                "A process with replicas > 1 cannot have 'listen' field. "
+                "Which replica would Caddy route to?"
             )
 
         if self.replicas < 1:
@@ -110,7 +146,7 @@ class Config(msgspec.Struct, kw_only=True):
     aliases: dict[str, str] = msgspec.field(default_factory=dict)
     hosts: list[HostConfig]
     processes: dict[str, ProcessConfig] = msgspec.field(default_factory=dict)
-    webserver: Webserver
+    sites: list[SiteConfig] = msgspec.field(default_factory=list)
     requirements: str | None = None
     local_config_dir: Path = Path(".fujin")
     secret_config: SecretConfig | None = msgspec.field(
@@ -151,10 +187,29 @@ class Config(msgspec.Struct, kw_only=True):
                     f"Process name '{process_name}' is reserved and cannot be used"
                 )
 
-        if "web" not in self.processes and self.webserver.enabled:
-            raise ImproperlyConfiguredError(
-                "Missing web process or set the proxy enabled to False to disable the use of a proxy"
-            )
+        # Validate routes reference processes with listen
+        for site in self.sites:
+            for path, target in site.routes.items():
+                # Extract process name from string or RouteConfig
+                if isinstance(target, str):
+                    process_name = target
+                elif isinstance(target, RouteConfig) and target.process:
+                    process_name = target.process
+                else:
+                    continue  # It's a static route, skip
+
+                # Validate process exists
+                if process_name not in self.processes:
+                    raise ImproperlyConfiguredError(
+                        f"Route '{path}' references unknown process '{process_name}'"
+                    )
+
+                # Validate process has listen (routable)
+                if not self.processes[process_name].listen:
+                    raise ImproperlyConfiguredError(
+                        f"Process '{process_name}' must have 'listen' field to be used in routes. "
+                        f"Background processes cannot be routed to."
+                    )
 
     def select_host(self, host_name: str | None = None) -> HostConfig:
         """
@@ -328,32 +383,32 @@ class Config(msgspec.Struct, kw_only=True):
         env = self._template_env()
         template = env.get_template("Caddyfile.j2")
         context = {"user": host.user, "app_dir": self.app_dir(host)}
-        statics = {
-            key: value.format(**context)
-            for key, value in self.webserver.statics.items()
-        }
+
         return template.render(
-            domain_name=host.domain_name,
-            upstream=self.webserver.upstream,
-            statics=statics,
+            sites=self.sites,
+            processes=self.processes,
             **context,
         )
 
     @property
+    def caddy_config_dir(self) -> str:
+        """Get Caddy config directory. Defaults to /etc/caddy/conf.d"""
+        return "/etc/caddy/conf.d"
+
+    @property
     def caddy_config_path(self) -> str:
-        return f"{self.webserver.config_dir}/{self.app_name}.caddy"
+        return f"{self.caddy_config_dir}/{self.app_name}.caddy"
 
 
 class HostConfig(msgspec.Struct, kw_only=True):
     name: str | None = None
-    ip: str | None = None
-    domain_name: str
+    address: str
     user: str
     _env_file: str | None = msgspec.field(name="envfile", default=None)
     env_content: str = msgspec.field(name="env", default="")
     apps_dir: str = ".local/share/fujin"
     password_env: str | None = None
-    ssh_port: int = 22
+    port: int = 22
     _key_filename: str | None = msgspec.field(name="key_filename", default=None)
     key_passphrase_env: str | None = None
 
@@ -371,7 +426,6 @@ class HostConfig(msgspec.Struct, kw_only=True):
         # Only prepend /home/{user} if apps_dir is a relative path
         if not self.apps_dir.startswith("/"):
             self.apps_dir = f"/home/{self.user}/{self.apps_dir}"
-        self.ip = self.ip or self.domain_name
 
     @property
     def key_filename(self) -> Path | None:
@@ -398,13 +452,6 @@ class HostConfig(msgspec.Struct, kw_only=True):
                 f"Env {self.key_passphrase_env} can not be found"
             )
         return value
-
-
-class Webserver(msgspec.Struct):
-    upstream: str
-    enabled: bool = True
-    statics: dict[str, str] = msgspec.field(default_factory=dict)
-    config_dir: str = "/etc/caddy/conf.d"
 
 
 def read_version_from_pyproject():

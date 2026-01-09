@@ -65,16 +65,20 @@ def simple_config(app_name) -> dict:
         "distfile": f"dist/{app_name}-{{version}}-py3-none-any.whl",
         "requirements": "requirements.txt",
         "python_version": "3.12",
-        "webserver": {
-            "upstream": f"unix//run/{app_name}/{app_name}.sock",
-        },
         "installation_mode": InstallationMode.PY_PACKAGE,
         "processes": {
             "web": {
                 "command": f".venv/bin/gunicorn {app_name}.wsgi:application --bind unix:/run/{app_name}/{app_name}.sock",
+                "listen": f"unix//run/{app_name}/{app_name}.sock",
                 "socket": True,
             }
         },
+        "sites": [
+            {
+                "domains": [f"{app_name}.com"],
+                "routes": {"/": "web"},
+            }
+        ],
         "aliases": {
             "shell": "app shell",
             "status": "app info",
@@ -84,7 +88,7 @@ def simple_config(app_name) -> dict:
         "hosts": [
             {
                 "user": "root",
-                "domain_name": f"{app_name}.com",
+                "address": f"{app_name}.com",
                 "envfile": ".env.prod",
             }
         ],
@@ -100,18 +104,24 @@ def django_config(app_name) -> dict:
         "distfile": f"dist/{app_name}-{{version}}-py3-none-any.whl",
         "requirements": "requirements.txt",
         "python_version": "3.12",
-        "webserver": {
-            "upstream": f"unix//run/{app_name}/{app_name}.sock",
-            "statics": {"/static/*": f"/var/www/{app_name}/static/"},
-        },
         "release_command": f"{app_name} migrate && {app_name} collectstatic --no-input && sudo mkdir -p /var/www/{app_name}/static/ && sudo rsync  -a --delete staticfiles/ /var/www/{app_name}/static/",
         "installation_mode": InstallationMode.PY_PACKAGE,
         "processes": {
             "web": {
                 "command": f".venv/bin/gunicorn {app_name}.wsgi:application --bind unix:/run/{app_name}/{app_name}.sock",
+                "listen": f"unix//run/{app_name}/{app_name}.sock",
                 "socket": True,
             }
         },
+        "sites": [
+            {
+                "domains": [f"{app_name}.com"],
+                "routes": {
+                    "/static/*": {"static": f"/var/www/{app_name}/static/"},
+                    "/": "web",
+                },
+            }
+        ],
         "aliases": {
             "shell": "server exec --appenv -i bash",
             "status": "app info",
@@ -119,7 +129,7 @@ def django_config(app_name) -> dict:
         "hosts": [
             {
                 "user": "root",
-                "domain_name": f"{app_name}.com",
+                "address": f"{app_name}.com",
                 "envfile": ".env.prod",
             }
         ],
@@ -133,12 +143,18 @@ def falco_config(app_name: str) -> dict:
         {
             "release_command": f"{app_name} setup",
             "processes": {
-                "web": {"command": f".venv/bin/{app_name} prodserver"},
+                "web": {
+                    "command": f".venv/bin/{app_name} prodserver",
+                    "listen": "localhost:8000",
+                },
                 "worker": {"command": f".venv/bin/{app_name} db_worker"},
             },
-            "webserver": {
-                "upstream": "localhost:8000",
-            },
+            "sites": [
+                {
+                    "domains": [f"{app_name}.com"],
+                    "routes": {"/": "web"},
+                }
+            ],
             "aliases": {
                 "console": f"app shell '{app_name} shell'",
                 "dbconsole": f"app shell '{app_name} dbshell'",
@@ -149,7 +165,7 @@ def falco_config(app_name: str) -> dict:
             "hosts": [
                 {
                     "user": "root",
-                    "domain_name": f"{app_name}.com",
+                    "address": f"{app_name}.com",
                     "envfile": ".env.prod",
                 }
             ],
@@ -164,12 +180,20 @@ def binary_config(app_name: str) -> dict:
         "version": "0.0.1",
         "build_command": "just build-bin",
         "distfile": f"dist/bin/{app_name}-{{version}}",
-        "webserver": {
-            "upstream": "localhost:8000",
-        },
         "release_command": f"{app_name} migrate",
         "installation_mode": InstallationMode.BINARY,
-        "processes": {"web": {"command": f"{app_name} prodserver"}},
+        "processes": {
+            "web": {
+                "command": f"{app_name} prodserver",
+                "listen": "localhost:8000",
+            }
+        },
+        "sites": [
+            {
+                "domains": [f"{app_name}.com"],
+                "routes": {"/": "web"},
+            }
+        ],
         "aliases": {
             "shell": "app shell",
             "status": "app info",
@@ -177,7 +201,7 @@ def binary_config(app_name: str) -> dict:
         "hosts": [
             {
                 "user": "root",
-                "domain_name": f"{app_name}.com",
+                "address": f"{app_name}.com",
                 "envfile": ".env.prod",
             }
         ],
