@@ -4,7 +4,7 @@ requires = [ "uv-build>=0.9.18,<0.10" ]
 
 [project]
 name = "fujin-secrets-1password"
-version = "0.16.0"
+version = "0.17.0"
 description = "1Password secret adapter for Fujin"
 readme = "README.md"
 authors = [
@@ -20,7 +20,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "fujin-cli>=0.16",
+  "fujin-cli>=0.17",
   "python-dotenv>=1.0.1",
 ]
 
