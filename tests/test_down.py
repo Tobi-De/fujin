@@ -24,7 +24,7 @@ def minimal_config(tmp_path, monkeypatch):
         "python_version": "3.11",
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
         "processes": {"web": {"command": "gunicorn"}},
-        "hosts": [{"domain_name": "example.com", "user": "deploy"}],
+        "hosts": [{"address": "example.com", "user": "deploy"}],
         "webserver": {"enabled": False, "upstream": "localhost:8000"},
     }
 

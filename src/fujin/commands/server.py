@@ -56,7 +56,7 @@ class Server(BaseCommand):
                     "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool update-shell"
                 )
             conn.run("uv tool install fastfetch-bin-edge")
-            if self.config.webserver.enabled:
+            if self.config.sites:
                 self.output.info("Setting up Caddy web server...")
 
                 _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
@@ -197,7 +197,7 @@ class Server(BaseCommand):
         hosts = config_data.get("hosts", [])
         if len(hosts) == 0:
             hosts = [{}]
-        hosts[0] = {"domain_name": f"{ip}.nip.io", "user": username}
+        hosts[0] = {"address": ip, "user": username}
         config_data["hosts"] = hosts
 
         # Write back to fujin.toml

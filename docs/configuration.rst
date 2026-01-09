@@ -59,27 +59,51 @@ password_env
 ~~~~~~~~~~~~
 Environment variable containing the password for the service account. This is only required for certain adapters.
 
-Webserver
----------
+Sites
+-----
 
-Caddy web server configurations.
+Caddy web server routing configuration. Each site defines one or more domains and how traffic should be routed.
 
-upstream
-~~~~~~~~
-The address where your web application listens for requests. Supports any value compatible with your chosen web proxy:
-
-- HTTP address (e.g., *localhost:8000* )
-- Unix socket caddy (e.g., *unix//run/project.sock* )
-
-config_dir
-~~~~~~~~~~
-The directory where the Caddyfile for the project will be stored on the host. Default: **/etc/caddy/conf.d/**
-
-statics
+domains
 ~~~~~~~
+List of domain names this site will serve. Used for Caddy reverse proxy configuration and SSL certificate generation.
 
-Defines the mapping of URL paths to local directories for serving static files. The directories you map should be accessible by caddy, meaning
-with read permissions for the *www-data* group; a reliable choice is **/var/www**.
+.. code-block:: toml
+    :caption: fujin.toml
+
+    [[sites]]
+    domains = ["example.com", "www.example.com"]
+
+routes
+~~~~~~
+
+Defines how incoming requests are routed based on URL paths. Routes are evaluated in order (top-to-bottom), so place more specific routes first.
+
+**Route Types:**
+
+- **Process route** (string): Route to a process by name. The process must have a ``listen`` field.
+- **Process route with options** (dict): Route to a process with additional options like ``strip_prefix``.
+- **Static files** (dict): Serve static files from a directory using ``{ static = "path" }``.
+
+**Route Syntax:**
+
+Simple process route:
+
+.. code-block:: toml
+
+    routes = { "/" = "web" }
+
+Process route with path stripping:
+
+.. code-block:: toml
+
+    routes = { "/api/*" = { process = "api", strip_prefix = "/api" } }
+
+Static files route:
+
+.. code-block:: toml
+
+    routes = { "/static/*" = { static = "/var/www/app/static/" } }
 
 **Variable Interpolation:**
 
@@ -87,41 +111,37 @@ Static file paths support variable interpolation using Python's ``str.format()``
 
 - ``{app_name}`` - Your application name
 - ``{app_dir}`` - Full path to application directory
-- ``{domain_name}`` - Host's domain name
+- ``{user}`` - Host user
 
-**Examples:**
-
-Basic static files mapping:
+**Complete Example:**
 
 .. code-block:: toml
     :caption: fujin.toml
 
-    [webserver]
-    upstream = "unix//run/project.sock"
-    statics = { "/static/*" = "/var/www/myproject/static/" }
-
-Using variable interpolation:
-
-.. code-block:: toml
-    :caption: fujin.toml
-
-    [webserver]
-    statics = {
-        "/static/*" = "/var/www/{app_name}/static/",
-        "/media/*" = "/var/www/{app_name}/media/"
+    [[sites]]
+    domains = ["example.com", "www.example.com"]
+    routes = {
+        "/ws/*" = "websocket",                          # WebSocket to daphne
+        "/api/*" = { process = "api", strip_prefix = "/api" },  # API with path stripping
+        "/static/*" = { static = "/var/www/{app_name}/static/" },
+        "/media/*" = { static = "/var/www/{app_name}/media/" },
+        "/" = "web"                                      # Default to main process
     }
 
-Multiple static paths:
+**Multiple Sites:**
+
+You can define multiple sites for different domains:
 
 .. code-block:: toml
     :caption: fujin.toml
 
-    [webserver]
-    statics = {
-        "/static/*" = "/var/www/{app_name}/static/",
-        "/media/*" = "/var/www/{app_name}/media/",
-        "/assets/*" = "{app_dir}/public/"
-    }
+    [[sites]]
+    domains = ["example.com"]
+    routes = { "/" = "web" }
+
+    [[sites]]
+    domains = ["api.example.com"]
+    routes = { "/" = "api" }
 
 processes
 ---------
@@ -134,7 +154,12 @@ Each entry in the `processes` dictionary represents a service that will be manag
 **Configuration Options:**
 
 - **command** (required): The command to execute. Relative paths are resolved against the application directory on the host.
-- **replicas** (optional, default: 1): The number of instances to run. If > 1, a template unit (e.g., `app-worker@.service`) is generated.
+- **listen** (optional): The address where this process listens for requests. Required if the process is referenced in site routes. Supports:
+
+  - HTTP address (e.g., ``localhost:8000``)
+  - Unix socket (e.g., ``unix//run/project.sock``)
+
+- **replicas** (optional, default: 1): The number of instances to run. If > 1, a template unit (e.g., `app-worker@.service`) is generated. Cannot be used with ``listen`` (which replica would Caddy route to?).
 - **socket** (optional, default: false): If true, enables socket activation. Fujin will look for a corresponding socket template.
 - **timer** (optional): Configuration for systemd timer-based scheduling. Accepts a dictionary with the following options:
 
@@ -163,12 +188,20 @@ Example:
 .. code-block:: toml
     :caption: fujin.toml
 
-    [processes]
-    # Uses web.service.j2 if it exists, otherwise default.service.j2
-    web = { command = ".venv/bin/gunicorn myproject.wsgi:application" }
+    # Web process - routable via Caddy
+    [processes.web]
+    command = ".venv/bin/gunicorn myproject.wsgi:application --bind unix:/run/myapp/web.sock"
+    listen = "unix//run/myapp/web.sock"
 
-    # Uses default.service.j2, generating a template unit for multiple instances
-    worker = { command = ".venv/bin/celery -A myproject worker", replicas = 2 }
+    # WebSocket process - routable via Caddy
+    [processes.websocket]
+    command = ".venv/bin/daphne -u /run/myapp/ws.sock myproject.asgi:application"
+    listen = "unix//run/myapp/ws.sock"
+
+    # Background worker - not routable (no listen field)
+    [processes.worker]
+    command = ".venv/bin/celery -A myproject worker"
+    replicas = 2
 
     # Simple timer - run daily
     [processes.beat]
@@ -201,7 +234,7 @@ Fujin supports deploying to multiple hosts (servers) from a single configuration
 .. code-block:: toml
 
    [[hosts]]
-   domain_name = "example.com"
+   address = "example.com"
    user = "deploy"
    envfile = ".env.prod"
 
@@ -211,13 +244,13 @@ Fujin supports deploying to multiple hosts (servers) from a single configuration
 
    [[hosts]]
    name = "staging"
-   domain_name = "staging.example.com"
+   address = "staging.example.com"
    user = "deploy"
    envfile = ".env.staging"
 
    [[hosts]]
    name = "production"
-   domain_name = "example.com"
+   address = "example.com"
    user = "deploy"
    envfile = ".env.prod"
 
@@ -247,29 +280,24 @@ Unique identifier for the host. Use this with the ``-H`` flag to target specific
    [[hosts]]
    name = "production"  # Required when you have multiple hosts
 
-ip
-^^
+address
+^^^^^^^
 
-**(Optional)**
+**(Required)**
 
-The IP address or hostname to connect via SSH. If omitted, defaults to ``domain_name``.
+The IP address or hostname to connect to via SSH. This is purely for SSH connection purposes.
 
 .. code-block:: toml
 
    [[hosts]]
-   ip = "192.168.1.100"        # Connect via IP
-   domain_name = "example.com"  # Used for Caddy/SSL
+   address = "192.168.1.100"  # Connect via IP
 
-domain_name
-^^^^^^^^^^^
+   [[hosts]]
+   address = "example.com"    # Connect via hostname
 
-**(Required)**
+.. note::
 
-The domain name pointing to this host. Used for:
-
-- Caddy reverse proxy configuration
-- SSL certificate generation
-- SSH connection (if ``ip`` not specified)
+   Domain names for Caddy/SSL are now configured in the ``sites`` section, not in host configuration.
 
 user
 ^^^^
@@ -347,8 +375,8 @@ Environment variable containing the user's password. Only needed if the user can
    [[hosts]]
    password_env = "DEPLOY_PASSWORD"
 
-ssh_port
-^^^^^^^^
+port
+^^^^
 
 **(Optional, default: 22)**
 
@@ -357,7 +385,7 @@ SSH port for connecting to the host.
 .. code-block:: toml
 
    [[hosts]]
-   ssh_port = 2222
+   port = 2222
 
 key_filename
 ^^^^^^^^^^^^

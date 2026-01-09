@@ -27,7 +27,7 @@ def base_config(tmp_path, monkeypatch):
         "python_version": "3.11",
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
         "processes": {"web": {"command": "gunicorn"}},
-        "hosts": [{"domain_name": "example.com", "user": "deploy"}],
+        "hosts": [{"address": "example.com", "user": "deploy"}],
         "webserver": {"enabled": True, "upstream": "localhost:8000"},
     }
 
@@ -102,9 +102,9 @@ def test_info_fallback_to_os_release_when_fastfetch_unavailable(base_config):
 # ============================================================================
 
 
-def test_bootstrap_installs_dependencies(base_config):
+def test_bootstrap_installs_dependencies(config_with_sites):
     """bootstrap installs system dependencies."""
-    config = msgspec.convert(base_config, type=Config)
+    config = config_with_sites
     mock_conn = MagicMock()
 
     mock_conn.run.side_effect = [
@@ -176,9 +176,9 @@ def test_bootstrap_without_webserver_skips_caddy(config_without_webserver):
         assert not any("caddy" in cmd for cmd in calls)
 
 
-def test_bootstrap_skips_uv_when_already_installed(base_config):
+def test_bootstrap_skips_uv_when_already_installed(config_with_sites):
     """bootstrap skips uv installation when already present."""
-    config = msgspec.convert(base_config, type=Config)
+    config = config_with_sites
     mock_conn = MagicMock()
 
     mock_conn.run.side_effect = [
@@ -453,7 +453,7 @@ user = "olduser"
 
         # Verify fujin.toml was updated
         config = tomllib.loads(fujin_toml.read_text())
-        assert config["hosts"][0]["domain_name"] == "10.0.0.5.nip.io"
+        assert config["hosts"][0]["address"] == "10.0.0.5"
         assert config["hosts"][0]["user"] == "deploy"
 
         # Verify update message
@@ -492,7 +492,7 @@ def test_setup_ssh_creates_new_fujin_toml(tmp_path, monkeypatch):
 
         # Verify config content
         config = tomllib.loads(fujin_toml.read_text())
-        assert config["hosts"][0]["domain_name"] == "server.example.com.nip.io"
+        assert config["hosts"][0]["address"] == "server.example.com"
         assert config["hosts"][0]["user"] == "admin"
 
         # Verify creation message

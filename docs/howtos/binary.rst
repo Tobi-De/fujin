@@ -61,17 +61,19 @@ Edit ``fujin.toml`` to match your binary's requirements.
     distfile = "pocketbase"
     installation_mode = "binary"
 
-    [host]
+    [[hosts]]
     user = "fujin"
-    domain_name = "your-domain.com"
+    address = "your-domain.com"
 
-    [processes]
     # Command to run the binary. PocketBase listens on port 8090 by default.
-    web = { command = "./pocketbase serve --http 0.0.0.0:8090" }
+    [processes.web]
+    command = "./pocketbase serve --http 0.0.0.0:8090"
+    listen = "localhost:8090"
 
-    [webserver]
     # Tell Caddy to proxy requests to the local port where the binary is listening
-    upstream = "localhost:8090"
+    [[sites]]
+    domains = ["your-domain.com"]
+    routes = { "/" = "web" }
 
 Deploy
 ------

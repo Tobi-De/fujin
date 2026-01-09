@@ -48,8 +48,8 @@ Instead of using an environment file, use the ``env`` property in your host conf
 .. code-block:: toml
     :caption: fujin.toml
 
-    [host]
-    domain_name = "example.com"
+    [[hosts]]
+    address = "example.com"
     user = "deploy"
     # Use this instead of envfile for CI/CD environments
     env = """

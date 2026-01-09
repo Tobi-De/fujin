@@ -12,6 +12,8 @@ from fujin.config import (
     Config,
     InstallationMode,
     ProcessConfig,
+    RouteConfig,
+    SiteConfig,
     TimerConfig,
     read_version_from_pyproject,
 )
@@ -120,8 +122,8 @@ def test_config_requires_at_least_one_host(minimal_config_dict):
 
 def test_config_with_multiple_hosts_requires_names(minimal_config_dict):
     minimal_config_dict["hosts"] = [
-        {"domain_name": "host1.com", "user": "user1"},
-        {"domain_name": "host2.com", "user": "user2"},
+        {"address": "host1.com", "user": "user1"},
+        {"address": "host2.com", "user": "user2"},
     ]
 
     with pytest.raises(ImproperlyConfiguredError) as exc_info:
@@ -132,8 +134,8 @@ def test_config_with_multiple_hosts_requires_names(minimal_config_dict):
 
 def test_config_with_multiple_named_hosts_succeeds(minimal_config_dict):
     minimal_config_dict["hosts"] = [
-        {"name": "prod", "domain_name": "host1.com", "user": "user1"},
-        {"name": "staging", "domain_name": "host2.com", "user": "user2"},
+        {"name": "prod", "address": "host1.com", "user": "user1"},
+        {"name": "staging", "address": "host2.com", "user": "user2"},
     ]
 
     config = msgspec.convert(minimal_config_dict, type=Config)
@@ -142,8 +144,8 @@ def test_config_with_multiple_named_hosts_succeeds(minimal_config_dict):
 
 def test_config_requires_unique_host_names(minimal_config_dict):
     minimal_config_dict["hosts"] = [
-        {"name": "prod", "domain_name": "host1.com", "user": "user1"},
-        {"name": "prod", "domain_name": "host2.com", "user": "user2"},
+        {"name": "prod", "address": "host1.com", "user": "user1"},
+        {"name": "prod", "address": "host2.com", "user": "user2"},
     ]
 
     with pytest.raises(ImproperlyConfiguredError) as exc_info:
@@ -157,24 +159,24 @@ def test_select_host_returns_first_when_no_name_specified(minimal_config_dict):
 
     host = config.select_host()
     assert host == config.hosts[0]
-    assert host.domain_name == "example.com"
+    assert host.address == "example.com"
 
 
 def test_select_host_by_name(minimal_config_dict):
     minimal_config_dict["hosts"] = [
-        {"name": "prod", "domain_name": "prod.com", "user": "user1"},
-        {"name": "staging", "domain_name": "staging.com", "user": "user2"},
+        {"name": "prod", "address": "prod.com", "user": "user1"},
+        {"name": "staging", "address": "staging.com", "user": "user2"},
     ]
     config = msgspec.convert(minimal_config_dict, type=Config)
 
     host = config.select_host("staging")
     assert host.name == "staging"
-    assert host.domain_name == "staging.com"
+    assert host.address == "staging.com"
 
 
 def test_select_host_raises_when_name_not_found(minimal_config_dict):
     minimal_config_dict["hosts"] = [
-        {"name": "prod", "domain_name": "prod.com", "user": "user1"},
+        {"name": "prod", "address": "prod.com", "user": "user1"},
     ]
     config = msgspec.convert(minimal_config_dict, type=Config)
 
@@ -268,27 +270,230 @@ def test_timer_config_accepts_valid_configurations(timer_config):
 
 
 # ============================================================================
-# Webserver and Web Process Validation
+# Sites and Routes Validation
 # ============================================================================
 
 
-def test_config_requires_web_process_when_webserver_enabled(minimal_config_dict):
+def test_route_config_requires_exactly_one_type():
+    """RouteConfig must specify exactly one of: process or static."""
+    # No type specified
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert({}, type=RouteConfig)
+    assert "exactly one of" in exc_info.value.message.lower()
+
+    # Both types specified
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(
+            {"process": "web", "static": "/var/www/static"}, type=RouteConfig
+        )
+    assert "exactly one of" in exc_info.value.message.lower()
+
+
+def test_route_config_strip_prefix_only_with_process():
+    """strip_prefix only works with process routes."""
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(
+            {"static": "/var/www/static", "strip_prefix": "/api"}, type=RouteConfig
+        )
+    assert "strip_prefix only works with process" in exc_info.value.message.lower()
+
+
+def test_route_config_process_route():
+    """Process route is valid."""
+    route = msgspec.convert({"process": "web"}, type=RouteConfig)
+    assert route.process == "web"
+    assert route.static is None
+    assert route.strip_prefix is None
+
+
+def test_route_config_process_route_with_strip_prefix():
+    """Process route with strip_prefix is valid."""
+    route = msgspec.convert({"process": "api", "strip_prefix": "/v1"}, type=RouteConfig)
+    assert route.process == "api"
+    assert route.strip_prefix == "/v1"
+
+
+def test_route_config_static_route():
+    """Static route is valid."""
+    route = msgspec.convert({"static": "/var/www/static"}, type=RouteConfig)
+    assert route.static == "/var/www/static"
+    assert route.process is None
+
+
+def test_site_config_requires_at_least_one_route():
+    """SiteConfig must have at least one route."""
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert({"domains": ["example.com"], "routes": {}}, type=SiteConfig)
+    assert "at least one route" in exc_info.value.message.lower()
+
+
+def test_site_config_with_string_routes():
+    """SiteConfig accepts string routes (process names)."""
+    site = msgspec.convert(
+        {"domains": ["example.com"], "routes": {"/": "web"}}, type=SiteConfig
+    )
+    assert site.domains == ["example.com"]
+    assert site.routes["/"] == "web"
+
+
+def test_site_config_with_dict_routes():
+    """SiteConfig accepts dict routes (RouteConfig)."""
+    site = msgspec.convert(
+        {
+            "domains": ["example.com"],
+            "routes": {"/api/*": {"process": "api", "strip_prefix": "/api"}},
+        },
+        type=SiteConfig,
+    )
+    assert site.domains == ["example.com"]
+    assert isinstance(site.routes["/api/*"], RouteConfig)
+    assert site.routes["/api/*"].process == "api"
+    assert site.routes["/api/*"].strip_prefix == "/api"
+
+
+def test_site_config_with_mixed_routes():
+    """SiteConfig accepts mixed string and dict routes."""
+    site = msgspec.convert(
+        {
+            "domains": ["example.com", "www.example.com"],
+            "routes": {
+                "/api/*": {"process": "api", "strip_prefix": "/api"},
+                "/static/*": {"static": "/var/www/static"},
+                "/": "web",
+            },
+        },
+        type=SiteConfig,
+    )
+    assert len(site.domains) == 2
+    assert len(site.routes) == 3
+    assert site.routes["/"] == "web"
+    assert site.routes["/api/*"].process == "api"
+    assert site.routes["/static/*"].static == "/var/www/static"
+
+
+def test_config_validates_routes_reference_existing_processes(minimal_config_dict):
+    """Routes must reference existing processes."""
     minimal_config_dict["processes"] = {"worker": {"command": "celery"}}
-    minimal_config_dict["webserver"]["enabled"] = True
+    minimal_config_dict["sites"] = [
+        {"domains": ["example.com"], "routes": {"/": "web"}}  # web doesn't exist
+    ]
 
     with pytest.raises(ImproperlyConfiguredError) as exc_info:
         msgspec.convert(minimal_config_dict, type=Config)
 
-    assert "web process" in exc_info.value.message.lower()
+    assert "unknown process" in exc_info.value.message.lower()
 
 
-def test_config_allows_no_web_process_when_webserver_disabled(minimal_config_dict):
-    minimal_config_dict["processes"] = {"worker": {"command": "celery"}}
-    minimal_config_dict["webserver"]["enabled"] = False
+def test_config_validates_routed_processes_have_listen(minimal_config_dict):
+    """Routed processes must have listen field."""
+    minimal_config_dict["processes"] = {"worker": {"command": "celery"}}  # No listen
+    minimal_config_dict["sites"] = [
+        {"domains": ["example.com"], "routes": {"/": "worker"}}
+    ]
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(minimal_config_dict, type=Config)
+
+    assert "must have 'listen'" in exc_info.value.message.lower()
+
+
+def test_config_allows_processes_without_listen_when_not_routed(minimal_config_dict):
+    """Background processes don't need listen if not routed."""
+    minimal_config_dict["processes"] = {
+        "web": {"command": "gunicorn", "listen": "localhost:8000"},
+        "worker": {"command": "celery", "replicas": 2},  # No listen, not routed
+    }
+    minimal_config_dict["sites"] = [
+        {"domains": ["example.com"], "routes": {"/": "web"}}
+    ]
 
     config = msgspec.convert(minimal_config_dict, type=Config)
-    assert "web" not in config.processes
-    assert not config.webserver.enabled
+    assert "worker" in config.processes
+    assert config.processes["worker"].listen is None
+
+
+def test_config_multiple_sites():
+    """Config supports multiple sites."""
+    config_dict = {
+        "app": "testapp",
+        "version": "1.0.0",
+        "build_command": "echo building",
+        "installation_mode": "python-package",
+        "python_version": "3.11",
+        "distfile": "dist/testapp-{version}-py3-none-any.whl",
+        "processes": {
+            "web": {"command": "gunicorn", "listen": "localhost:8000"},
+            "api": {"command": "uvicorn", "listen": "localhost:8001"},
+        },
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "sites": [
+            {"domains": ["example.com"], "routes": {"/": "web"}},
+            {"domains": ["api.example.com"], "routes": {"/": "api"}},
+        ],
+    }
+
+    config = msgspec.convert(config_dict, type=Config)
+    assert len(config.sites) == 2
+    assert config.sites[0].domains == ["example.com"]
+    assert config.sites[1].domains == ["api.example.com"]
+
+
+def test_config_validates_dict_routes_reference_existing_processes(minimal_config_dict):
+    """Dict routes (RouteConfig) must also reference existing processes."""
+    minimal_config_dict["processes"] = {
+        "web": {"command": "gunicorn", "listen": "localhost:8000"}
+    }
+    minimal_config_dict["sites"] = [
+        {
+            "domains": ["example.com"],
+            "routes": {
+                "/api/*": {"process": "api", "strip_prefix": "/api"}
+            },  # api doesn't exist
+        }
+    ]
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(minimal_config_dict, type=Config)
+
+    assert "unknown process" in exc_info.value.message.lower()
+
+
+def test_config_validates_dict_routes_have_listen(minimal_config_dict):
+    """Dict routes must reference processes with listen."""
+    minimal_config_dict["processes"] = {
+        "web": {"command": "gunicorn", "listen": "localhost:8000"},
+        "api": {"command": "uvicorn"},  # No listen
+    }
+    minimal_config_dict["sites"] = [
+        {
+            "domains": ["example.com"],
+            "routes": {"/api/*": {"process": "api", "strip_prefix": "/api"}},
+        }
+    ]
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(minimal_config_dict, type=Config)
+
+    assert "must have 'listen'" in exc_info.value.message.lower()
+
+
+def test_config_static_routes_dont_require_process(minimal_config_dict):
+    """Static routes don't need to reference a process."""
+    minimal_config_dict["processes"] = {
+        "web": {"command": "gunicorn", "listen": "localhost:8000"}
+    }
+    minimal_config_dict["sites"] = [
+        {
+            "domains": ["example.com"],
+            "routes": {
+                "/static/*": {"static": "/var/www/static"},
+                "/": "web",
+            },
+        }
+    ]
+
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    assert len(config.sites[0].routes) == 2
 
 
 # ============================================================================
@@ -382,11 +587,11 @@ def test_app_dir_and_release_dir_paths(minimal_config_dict):
     minimal_config_dict["hosts"] = [
         {
             "name": "prod",
-            "domain_name": "prod.com",
+            "address": "prod.com",
             "user": "user1",
             "apps_dir": "/apps",
         },
-        {"name": "staging", "domain_name": "staging.com", "user": "user2"},
+        {"name": "staging", "address": "staging.com", "user": "user2"},
     ]
     config = msgspec.convert(minimal_config_dict, type=Config)
 
@@ -482,14 +687,17 @@ def test_caddyfile_statics_interpolates_variables(
     minimal_config_dict, temp_project_dir
 ):
     """Caddyfile statics values can use variables like {app_dir} and {user}."""
-    minimal_config_dict["webserver"] = {
-        "enabled": True,
-        "upstream": "localhost:8000",
-        "statics": {
-            "/static/*": "{app_dir}/static/",
-            "/media/*": "/var/www/{user}/media/",
-        },
-    }
+    minimal_config_dict["processes"]["web"]["listen"] = "localhost:8000"
+    minimal_config_dict["sites"] = [
+        {
+            "domains": ["example.com"],
+            "routes": {
+                "/static/*": {"static": "{app_dir}/static/"},
+                "/media/*": {"static": "/var/www/{user}/media/"},
+                "/": "web",
+            },
+        }
+    ]
 
     config = msgspec.convert(minimal_config_dict, type=Config)
     caddyfile = config.render_caddyfile()

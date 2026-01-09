@@ -100,7 +100,7 @@ class Rollback(BaseCommand):
                 connection=conn,
                 app_name=self.config.app_name,
                 operation="rollback",
-                host=self.selected_host.name or self.selected_host.domain_name,
+                host=self.selected_host.name or self.selected_host.address,
                 from_version=current_version,
                 to_version=version,
             )
