@@ -115,7 +115,6 @@ def test_show_env_without_env_file_shows_warning(tmp_path, monkeypatch):
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
         "processes": {"web": {"command": "gunicorn"}},
         "hosts": [{"address": "example.com", "user": "deploy"}],
-        "webserver": {"enabled": False, "upstream": "localhost:8000"},
     }
 
     config = msgspec.convert(config_dict, type=Config)

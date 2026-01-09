@@ -25,7 +25,6 @@ def minimal_config(tmp_path, monkeypatch):
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
         "processes": {"web": {"command": "gunicorn"}},
         "hosts": [{"address": "example.com", "user": "deploy"}],
-        "webserver": {"enabled": False, "upstream": "localhost:8000"},
     }
 
 

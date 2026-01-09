@@ -83,15 +83,13 @@ with socketserver.TCPServer(("", PORT), Handler) as httpd:
         "installation_mode": "binary",
         "hosts": [
             {
-                "domain_name": f"{vps_container['ip']}.nip.io",
+                "address": vps_container["ip"],
                 "user": vps_container["user"],
-                "ip": vps_container["ip"],
-                "ssh_port": vps_container["port"],
+                "port": vps_container["port"],
                 "key_filename": ssh_key,
             }
         ],
         "processes": {"web": {"command": "myapp"}},  # Binary name matches app_bin
-        "webserver": {"enabled": False, "upstream": "localhost:8000"},
     }
 
     config = msgspec.convert(config_dict, type=Config)
@@ -167,10 +165,9 @@ def test_python_package_deployment(vps_container, ssh_key, tmp_path, monkeypatch
         "requirements": str(requirements_file),
         "hosts": [
             {
-                "domain_name": f"{vps_container['ip']}.nip.io",
+                "address": vps_container["ip"],
                 "user": vps_container["user"],
-                "ip": vps_container["ip"],
-                "ssh_port": vps_container["port"],
+                "port": vps_container["port"],
                 "key_filename": ssh_key,
                 "envfile": str(env_file),
             }
@@ -181,7 +178,6 @@ def test_python_package_deployment(vps_container, ssh_key, tmp_path, monkeypatch
                 "command": ".venv/bin/python3 -c 'import time; print(\"worker running\"); time.sleep(99999)'"
             },
         },
-        "webserver": {"enabled": False, "upstream": "localhost:8000"},
     }
 
     config = msgspec.convert(config_dict, type=Config)
@@ -235,19 +231,19 @@ def test_deployment_with_webserver(vps_container, ssh_key, tmp_path, monkeypatch
         "installation_mode": "binary",
         "hosts": [
             {
-                "domain_name": "example.com",
+                "address": vps_container["ip"],
                 "user": vps_container["user"],
-                "ip": vps_container["ip"],
-                "ssh_port": vps_container["port"],
+                "port": vps_container["port"],
                 "key_filename": ssh_key,
             }
         ],
-        "processes": {"web": {"command": "webapp"}},  # Binary name matches app_bin
-        "webserver": {
-            "enabled": True,
-            "upstream": "localhost:8000",
-            "statics": {"/static/*": "/var/www/static/"},
-        },
+        "processes": {"web": {"command": "webapp", "listen": "localhost:8000"}},
+        "sites": [
+            {
+                "domains": ["example.com"],
+                "routes": {"/static/*": {"static": "/var/www/static/"}, "/": "web"},
+            }
+        ],
     }
 
     config = msgspec.convert(config_dict, type=Config)
@@ -300,17 +296,13 @@ def test_rollback_to_previous_version(vps_container, ssh_key, tmp_path, monkeypa
                 "installation_mode": "binary",
                 "hosts": [
                     {
-                        "domain_name": f"{vps_container['ip']}.nip.io",
+                        "address": vps_container["ip"],
                         "user": vps_container["user"],
-                        "ip": vps_container["ip"],
-                        "ssh_port": vps_container["port"],
+                        "port": vps_container["port"],
                         "key_filename": ssh_key,
                     }
                 ],
-                "processes": {
-                    "web": {"command": "rollapp"}
-                },  # Binary name matches app_bin
-                "webserver": {"enabled": False, "upstream": "localhost:8000"},
+                "processes": {"web": {"command": "rollapp"}},
             },
             type=Config,
         )
@@ -389,15 +381,13 @@ def test_down_command(vps_container, ssh_key, tmp_path, monkeypatch):
         "installation_mode": "binary",
         "hosts": [
             {
-                "domain_name": f"{vps_container['ip']}.nip.io",
+                "address": vps_container["ip"],
                 "user": vps_container["user"],
-                "ip": vps_container["ip"],
-                "ssh_port": vps_container["port"],
+                "port": vps_container["port"],
                 "key_filename": ssh_key,
             }
         ],
-        "processes": {"web": {"command": "downapp"}},  # Binary name matches app_bin
-        "webserver": {"enabled": False, "upstream": "localhost:8000"},
+        "processes": {"web": {"command": "downapp"}},
     }
 
     config = msgspec.convert(config_dict, type=Config)

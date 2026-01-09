@@ -73,8 +73,9 @@ class Show(BaseCommand):
             return
 
         caddyfile = self.config.render_caddyfile(self.selected_host)
-        domains = ", ".join(self.config.sites[0].domains)
-        self.output.info(f"[bold cyan]# Caddyfile for {domains}[/bold cyan]")
+        self.output.info(
+            f"[bold cyan]# Caddyfile for {self.config.app_name}[/bold cyan]"
+        )
         self.output.output(caddyfile)
 
     def _show_env(self, plain: bool = False):

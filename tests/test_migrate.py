@@ -248,6 +248,46 @@ def test_migrate_webserver_type_is_dropped():
     assert "type" not in str(migrated)
 
 
+def test_migrate_webserver_enabled_false_no_sites():
+    """When webserver.enabled is False, don't create sites."""
+    old_config = {
+        "app": "myapp",
+        "build_command": "true",
+        "distfile": "app.whl",
+        "installation_mode": "binary",
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "processes": {"web": {"command": "gunicorn", "listen": "localhost:8000"}},
+        "webserver": {"enabled": False, "upstream": "localhost:8000"},
+    }
+
+    migrated = migrate_config(old_config)
+
+    # Should not create sites when enabled was False
+    assert "sites" not in migrated
+    # But webserver should still be removed
+    assert "webserver" not in migrated
+
+
+def test_migrate_webserver_enabled_true_creates_sites():
+    """When webserver.enabled is True (or omitted), create sites."""
+    old_config = {
+        "app": "myapp",
+        "build_command": "true",
+        "distfile": "app.whl",
+        "installation_mode": "binary",
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "processes": {"web": {"command": "gunicorn", "listen": "localhost:8000"}},
+        "webserver": {"enabled": True, "upstream": "localhost:8000"},
+    }
+
+    migrated = migrate_config(old_config)
+
+    # Should create sites when enabled was True
+    assert "sites" in migrated
+    assert migrated["sites"][0]["domains"] == ["example.com"]
+    assert migrated["sites"][0]["routes"]["/"] == "web"
+
+
 def test_migrate_preserves_existing_sites():
     """If sites already exists, don't create from webserver."""
     old_config = {
@@ -490,3 +530,5 @@ def test_migrate_config_without_hosts_uses_default_domain():
 
     # Should not create sites if no hosts
     assert "sites" not in migrated
+    # But webserver should still be removed
+    assert "webserver" not in migrated

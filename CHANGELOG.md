@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Added migrate command
 - Rewrite config for better webserver flexibility
 
 ## [0.16.0] - 2025-12-28

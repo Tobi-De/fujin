@@ -92,4 +92,22 @@ def system(env_content: str, secret_config: SecretConfig) -> str:
             if resolved is not None:
                 env_dict[key] = resolved
 
-    return "\n".join(f'{key}="{value}"' for key, value in env_dict.items())
+    # Format env vars - only quote values that need it
+    lines = []
+    for key, value in env_dict.items():
+        if value is None:
+            lines.append(f"{key}=")
+        elif _needs_quotes(value):
+            lines.append(f'{key}="{value}"')
+        else:
+            lines.append(f"{key}={value}")
+    return "\n".join(lines)
+
+
+def _needs_quotes(value: str) -> bool:
+    """Check if a value needs to be quoted in env file."""
+    if not value:
+        return False
+    # Quote if contains spaces, special chars, or starts with quote
+    special_chars = {" ", "\t", "#", "$", "\\", '"', "'", "`", "&", "|", ";", "<", ">"}
+    return any(char in value for char in special_chars)
