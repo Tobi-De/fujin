@@ -127,9 +127,9 @@ def migrate_config(config_dict: dict) -> dict:
     - host.ip/domain_name → host.address
     - host.ssh_port → host.port
     - Simple process strings → process dicts
-    - webserver config → sites array
+    - webserver config → sites array (only if enabled != False)
     - webserver.upstream → processes.web.listen
-    - Drop webserver.type if present
+    - Drop webserver.type and webserver.enabled fields
     """
     # Work on a copy to avoid mutating the original
     config = dict(config_dict)
@@ -173,11 +173,12 @@ def migrate_config(config_dict: dict) -> dict:
     if "webserver" in config:
         webserver = config.pop("webserver")
 
-        # Drop deprecated type field
+        # Drop deprecated type and enabled fields
         webserver.pop("type", None)
+        enabled = webserver.pop("enabled", True)
 
-        # Build sites config if not already present
-        if "sites" not in config and config.get("hosts"):
+        # Only build sites config if webserver was enabled
+        if enabled and "sites" not in config and config.get("hosts"):
             # Get domain from first host address
             domain = config["hosts"][0].get("address", "example.com")
 

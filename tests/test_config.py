@@ -327,6 +327,13 @@ def test_site_config_requires_at_least_one_route():
     assert "at least one route" in exc_info.value.message.lower()
 
 
+def test_site_config_requires_at_least_one_domain():
+    """SiteConfig must have at least one domain."""
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert({"domains": [], "routes": {"/": "web"}}, type=SiteConfig)
+    assert "at least one domain" in exc_info.value.message.lower()
+
+
 def test_site_config_with_string_routes():
     """SiteConfig accepts string routes (process names)."""
     site = msgspec.convert(
@@ -706,3 +713,87 @@ def test_caddyfile_statics_interpolates_variables(
     expected_app_dir = config.app_dir(config.hosts[0])
     assert f"{expected_app_dir}/static/" in caddyfile
     assert f"/var/www/{config.hosts[0].user}/media/" in caddyfile
+
+
+def test_caddyfile_renders_with_valid_listen_fields(
+    minimal_config_dict, temp_project_dir
+):
+    """Caddyfile successfully renders when all routed processes have listen."""
+    minimal_config_dict["processes"]["web"]["listen"] = "unix//run/app/app.sock"
+    minimal_config_dict["processes"]["api"] = {
+        "command": "fastapi run",
+        "listen": "localhost:8001",
+    }
+    minimal_config_dict["sites"] = [
+        {
+            "domains": ["example.com"],
+            "routes": {
+                "/api/*": {"process": "api", "strip_prefix": "/api"},
+                "/": "web",
+            },
+        }
+    ]
+
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    caddyfile = config.render_caddyfile()
+
+    # Should render without errors and include both upstreams
+    assert "unix//run/app/app.sock" in caddyfile
+    assert "localhost:8001" in caddyfile
+    assert "reverse_proxy" in caddyfile
+
+
+def test_route_order_preserved_from_toml(tmp_path, monkeypatch):
+    """Route order from TOML is preserved in rendered Caddyfile."""
+    monkeypatch.chdir(tmp_path)
+
+    # Create TOML with specific route order (most specific first)
+    toml_content = """
+app = "testapp"
+version = "1.0.0"
+build_command = "true"
+distfile = "app.whl"
+installation_mode = "binary"
+
+[[hosts]]
+address = "example.com"
+user = "deploy"
+
+[processes.web]
+command = "gunicorn"
+listen = "localhost:8000"
+
+[processes.api]
+command = "fastapi"
+listen = "localhost:8001"
+
+[processes.admin]
+command = "admin-server"
+listen = "localhost:8002"
+
+[[sites]]
+domains = ["example.com"]
+
+# Order matters: most specific routes first
+[sites.routes]
+"/api/v2/*" = "api"
+"/api/*" = "api"
+"/admin/*" = "admin"
+"/" = "web"
+"""
+
+    fujin_toml = tmp_path / "fujin.toml"
+    fujin_toml.write_text(toml_content)
+
+    from fujin.config import Config
+
+    config = Config.read()
+    caddyfile = config.render_caddyfile()
+
+    # Extract route paths in order they appear in Caddyfile
+    import re
+
+    handles = re.findall(r"handle(?:_path)? (/.*?) \{", caddyfile)
+
+    # Routes should appear in the same order as TOML
+    assert handles == ["/api/v2/*", "/api/*", "/admin/*", "/"]

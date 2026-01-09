@@ -104,6 +104,8 @@ class SiteConfig(msgspec.Struct):
     routes: dict[str, str | RouteConfig]
 
     def __post_init__(self):
+        if not self.domains:
+            raise ImproperlyConfiguredError("Site must have at least one domain")
         if not self.routes:
             raise ImproperlyConfiguredError("Site must have at least one route")
 
