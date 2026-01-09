@@ -26,15 +26,15 @@ def base_config(minimal_config_dict, tmp_path):
 
     minimal_config_dict["processes"]["worker"] = {"command": "celery", "replicas": 2}
     minimal_config_dict["hosts"][0]["envfile"] = str(env_file)
-    minimal_config_dict["webserver"]["enabled"] = True
+    # No sites needed for env/units tests
 
     return minimal_config_dict
 
 
 @pytest.fixture
-def config_without_webserver(minimal_config_dict):
-    """Config without webserver enabled."""
-    minimal_config_dict["webserver"]["enabled"] = False
+def config_without_sites(minimal_config_dict):
+    """Config without sites configured."""
+    # No sites = no webserver
     return minimal_config_dict
 
 
@@ -114,7 +114,7 @@ def test_show_env_without_env_file_shows_warning(tmp_path, monkeypatch):
         "python_version": "3.11",
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
         "processes": {"web": {"command": "gunicorn"}},
-        "hosts": [{"domain_name": "example.com", "user": "deploy"}],
+        "hosts": [{"address": "example.com", "user": "deploy"}],
         "webserver": {"enabled": False, "upstream": "localhost:8000"},
     }
 
@@ -136,9 +136,9 @@ def test_show_env_without_env_file_shows_warning(tmp_path, monkeypatch):
 # ============================================================================
 
 
-def test_show_caddy_displays_caddyfile(base_config):
+def test_show_caddy_displays_caddyfile(config_with_sites):
     """show caddy displays rendered Caddyfile."""
-    config = msgspec.convert(base_config, type=Config)
+    config = config_with_sites
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -155,9 +155,9 @@ def test_show_caddy_displays_caddyfile(base_config):
         assert len(output_calls) > 0
 
 
-def test_show_caddy_without_webserver_shows_warning(config_without_webserver):
-    """show caddy without webserver enabled shows warning."""
-    config = msgspec.convert(config_without_webserver, type=Config)
+def test_show_caddy_without_sites_shows_warning(config_without_sites):
+    """show caddy without sites configured shows warning."""
+    config = msgspec.convert(config_without_sites, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -167,9 +167,7 @@ def test_show_caddy_without_webserver_shows_warning(config_without_webserver):
         show()
 
         # Should show warning
-        mock_output.warning.assert_called_with(
-            "Webserver is not enabled in configuration"
-        )
+        mock_output.warning.assert_called_with("No sites configured")
 
 
 # ============================================================================

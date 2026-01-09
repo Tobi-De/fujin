@@ -24,8 +24,7 @@ def minimal_config_dict(tmp_path, monkeypatch):
         "python_version": "3.11",
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
         "processes": {"web": {"command": "gunicorn"}},
-        "hosts": [{"domain_name": "example.com", "user": "deploy"}],
-        "webserver": {"enabled": False, "upstream": "localhost:8000"},
+        "hosts": [{"address": "example.com", "user": "deploy"}],
     }
 
 
@@ -36,9 +35,12 @@ def minimal_config(minimal_config_dict):
 
 
 @pytest.fixture
-def config_with_webserver(minimal_config_dict):
-    """Config with webserver enabled."""
-    minimal_config_dict["webserver"]["enabled"] = True
+def config_with_sites(minimal_config_dict):
+    """Config with sites configured."""
+    minimal_config_dict["processes"]["web"]["listen"] = "localhost:8000"
+    minimal_config_dict["sites"] = [
+        {"domains": ["example.com"], "routes": {"/": "web"}}
+    ]
     return msgspec.convert(minimal_config_dict, type=Config)
 
 

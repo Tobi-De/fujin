@@ -36,7 +36,7 @@ class Down(BaseCommand):
     def __call__(self):
         msg = (
             f"[red]You are about to delete all project files, stop all services,\n"
-            f"and remove all configurations on the host {self.selected_host.ip} for the project {self.config.app_name}.\n"
+            f"and remove all configurations on the host {self.selected_host.address} for the project {self.config.app_name}.\n"
             f"Any assets in your project folder will be lost.\n"
             f"Are you sure you want to proceed? This action is irreversible.[/red]"
         )
@@ -81,7 +81,7 @@ class Down(BaseCommand):
                 connection=conn,
                 app_name=self.config.app_name,
                 operation="full-down" if self.full else "down",
-                host=self.selected_host.name or self.selected_host.domain_name,
+                host=self.selected_host.name or self.selected_host.address,
                 version=version,
             )
 

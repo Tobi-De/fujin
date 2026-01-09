@@ -45,7 +45,7 @@ The process involves three steps:
 
         [[hosts]]
         user = "root"
-        domain_name = "your-domain.com"
+        address = "your-domain.com"
 
 2.  **Create the user**: Run the following command to create a new user (e.g., ``fujin``) on the server.
     This command creates the user, grants passwordless sudo access, and copies your SSH keys from the root user to the new user.
@@ -60,7 +60,7 @@ The process involves three steps:
 
         [[hosts]]
         user = "fujin"
-        domain_name = "your-domain.com"
+        address = "your-domain.com"
 
 Now you are ready to deploy your application using this dedicated user.
 

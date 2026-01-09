@@ -7,34 +7,38 @@ release_command = "bookstore migrate && bookstore collectstatic --no-input && su
 distfile = "./../../../dist/bookstore-{version}-py3-none-any.whl"
 installation_mode = "python-package"
 
-[webserver]
-upstream = "unix//run/bookstore/bookstore.sock"
-statics = { "/static/*" = "{app_dir}/static/" }
-
 [aliases]
 console = "app exec -i shell"
 dbconsole = "app exec -i dbshell"
 shell = "server exec --appenv -i bash"
 
-[processes]
-web = { command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -" }
-worker = { command = ".venv/bin/bookstore db_worker", replicas = 2 }
+[processes.web]
+command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -"
+listen = "unix//run/bookstore/bookstore.sock"
+
+[processes.worker]
+command = ".venv/bin/bookstore db_worker"
+replicas = 2
 
 [processes.health]
 command = ".venv/bin/bookstore health"
 timer = { on_calendar = "*:*:00" }
 
+[[sites]]
+domains = ["book.13.204.64.39.nip.io"]
+routes = { "/static/*" = { static = "{app_dir}/static/" }, "/" = "web" }
+
 [[hosts]]
 name = "default"
-domain_name = "book.13.204.64.39.nip.io"
+address = "13.204.64.39"
 envfile = ".env.prod"
 user = "ubuntu"
 key_filename = "/var/home/tobi/bluefin.pem"
 
 [[hosts]]
 name = "vagrant"
-domain_name = "localhost"
+address = "localhost"
 envfile = ".env.prod"
 user = "vagrant"
 key_filename = "../../../.vagrant/machines/default/virtualbox/private_key"
-ssh_port = 2222
+port = 2222

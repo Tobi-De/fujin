@@ -67,8 +67,9 @@ class App(BaseCommand):
             if self.config.installation_mode == InstallationMode.PY_PACKAGE:
                 infos["python_version"] = self.config.python_version
 
-            if self.config.webserver.enabled:
-                infos["running_at"] = f"https://{self.selected_host.domain_name}"
+            if self.config.sites:
+                first_domain = self.config.sites[0].domains[0]
+                infos["running_at"] = f"https://{first_domain}"
 
             services_status = {}
             statuses = parts[2].strip().split("\n")
@@ -136,10 +137,10 @@ class App(BaseCommand):
         ] = "$SHELL",
     ):
         host = self.selected_host
-        ssh_target = f"{host.user}@{host.ip or host.domain_name}"
+        ssh_target = f"{host.user}@{host.address}"
         ssh_cmd = ["ssh", "-t"]
-        if host.ssh_port:
-            ssh_cmd.extend(["-p", str(host.ssh_port)])
+        if host.port != 22:
+            ssh_cmd.extend(["-p", str(host.port)])
         if host.key_filename:
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
@@ -285,7 +286,7 @@ class App(BaseCommand):
             return
 
         with self.connection() as conn:
-            if name == "caddy" and self.config.webserver.enabled:
+            if name == "caddy" and self.config.sites:
                 self.output.output(f"[cyan]# {self.config.caddy_config_path}[/cyan]")
                 print()
                 conn.run(f"cat {self.config.caddy_config_path}")

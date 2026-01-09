@@ -40,7 +40,7 @@ def mock_ssh_components():
 @pytest.fixture
 def connection(mock_ssh_components):
     mock_session, _, mock_sock = mock_ssh_components
-    host = HostConfig(domain_name="example.com", user="testuser")
+    host = HostConfig(address="example.com", user="testuser")
     return SSH2Connection(mock_session, host, mock_sock)
 
 
@@ -190,7 +190,7 @@ def test_sudo_password_injection(mock_ssh_components, prompt_text, command):
 
     with patch.dict(os.environ, {"MY_PASSWORD": "secret123"}):
         host = HostConfig(
-            domain_name="example.com", user="testuser", password_env="MY_PASSWORD"
+            address="example.com", user="testuser", password_env="MY_PASSWORD"
         )
         conn = SSH2Connection(mock_session, host, mock_sock)
 

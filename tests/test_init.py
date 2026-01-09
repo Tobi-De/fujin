@@ -232,7 +232,7 @@ def test_init_config_has_required_fields(tmp_path, monkeypatch):
         assert "installation_mode" in config
         assert "processes" in config
         assert "hosts" in config
-        assert "webserver" in config
+        assert "sites" in config
 
 
 def test_init_config_has_aliases(tmp_path, monkeypatch):

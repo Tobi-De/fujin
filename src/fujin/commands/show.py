@@ -68,14 +68,13 @@ class Show(BaseCommand):
                 self.output.output(units[filename])
 
     def _show_caddy(self):
-        if not self.config.webserver.enabled:
-            self.output.warning("Webserver is not enabled in configuration")
+        if not self.config.sites:
+            self.output.warning("No sites configured")
             return
 
         caddyfile = self.config.render_caddyfile(self.selected_host)
-        self.output.info(
-            f"[bold cyan]# Caddyfile for {self.selected_host.domain_name}[/bold cyan]"
-        )
+        domains = ", ".join(self.config.sites[0].domains)
+        self.output.info(f"[bold cyan]# Caddyfile for {domains}[/bold cyan]")
         self.output.output(caddyfile)
 
     def _show_env(self, plain: bool = False):
