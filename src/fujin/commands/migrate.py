@@ -20,7 +20,7 @@ class Migrate(BaseCommand):
             long="--backup",
             help="Create backup of original file (fujin.toml.backup)",
         ),
-    ] = True
+    ] = False
     dry_run: Annotated[
         bool,
         cappa.Arg(
