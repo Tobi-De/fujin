@@ -5,24 +5,23 @@ distfile = "pocketbase"
 release_command = "pocketbase migrate"
 installation_mode = "binary"
 
-[webserver]
-upstream = "localhost:8090"
-
-[processes]
-web = { command = "pocketbase serve --http 0.0.0.0:8090" }
+[processes.web]
+command = "pocketbase serve --http 0.0.0.0:8090"
+listen = "localhost:8090"
 
 [aliases]
 shell = "server exec --appenv bash"
 
-# [host]
-# domain_name = "localhost"
-# envfile = ".env.prod"
-# user = "vagrant"
-# key_filename = "../../../.vagrant/machines/default/virtualbox/private_key"
-# ssh_port = 2222
-
-[host]
-domain_name = "pocket.13.204.64.39.nip.io"
+[[hosts]]
 envfile = ".env.prod"
 user = "ubuntu"
 key_filename = "/var/home/tobi/bluefin.pem"
+address = "pocket.13.204.64.39.nip.io"
+
+[[sites]]
+domains = [
+    "pocket.13.204.64.39.nip.io",
+]
+
+[sites.routes]
+"/" = "web"
