@@ -112,6 +112,30 @@ class Migrate(BaseCommand):
             if old["webserver"].get("statics"):
                 changes.append("• Converted 'webserver.statics' to static routes")
 
+        # Check for route "/" → "/*" migration
+        for old_site in old.get("sites", []):
+            if "/" in old_site.get("routes", {}):
+                changes.append("• Fixed route '/' → '/*' for proper Caddy matching")
+                break
+
+        # Check for alias migrations
+        old_aliases = old.get("aliases", {})
+        new_aliases = new.get("aliases", {})
+        if old_aliases != new_aliases:
+            for key, old_value in old_aliases.items():
+                if not isinstance(old_value, str):
+                    continue
+                new_value = new_aliases.get(key, "")
+                if old_value != new_value:
+                    if "app exec" in old_value or "server exec" in old_value:
+                        changes.append(
+                            "• Updated alias command format (app/server exec)"
+                        )
+                        break
+                    elif "-i" in old_value:
+                        changes.append("• Removed -i options from aliases")
+                        break
+
         if changes:
             self.output.info("[bold]Migration changes:[/bold]")
             for change in changes:
@@ -130,6 +154,9 @@ def migrate_config(config_dict: dict) -> dict:
     - webserver config → sites array (only if enabled != False)
     - webserver.upstream → processes.web.listen
     - Drop webserver.type and webserver.enabled fields
+    - Route "/" → "/*" in sites (Caddy handle fix)
+    - Alias migrations: "app exec" → "exec --app", "server exec" → "exec"
+    - Remove -i options from aliases
     """
     # Work on a copy to avoid mutating the original
     config = dict(config_dict)
@@ -190,9 +217,36 @@ def migrate_config(config_dict: dict) -> dict:
 
             # Add web process route if web process exists
             if "web" in processes:
-                routes["/"] = "web"
+                routes["/*"] = "web"
 
             if routes:
                 config["sites"] = [{"domains": [domain], "routes": routes}]
+
+    # 6. Migrate route "/" to "/*" in sites
+    for site in config.get("sites", []):
+        routes = site.get("routes", {})
+        if "/" in routes:
+            # Move "/" route to "/*"
+            routes["/*"] = routes.pop("/")
+
+    # 7. Migrate aliases
+    if "aliases" in config:
+        aliases = config["aliases"]
+        for key, value in list(aliases.items()):
+            if not isinstance(value, str):
+                continue
+
+            # Remove -i options (they don't exist anymore)
+            migrated = value.replace(" -i ", " ").replace(" -i", "")
+
+            # app exec ... → exec --app ...
+            if migrated.startswith("app exec "):
+                migrated = "exec --app " + migrated[len("app exec ") :]
+
+            # server exec ... → exec ...
+            elif migrated.startswith("server exec "):
+                migrated = "exec " + migrated[len("server exec ") :]
+
+            aliases[key] = migrated
 
     return config
