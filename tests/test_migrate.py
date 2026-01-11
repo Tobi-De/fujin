@@ -200,7 +200,7 @@ def test_migrate_webserver_to_sites():
     assert "sites" in migrated
     assert len(migrated["sites"]) == 1
     assert migrated["sites"][0]["domains"] == ["example.com"]
-    assert migrated["sites"][0]["routes"]["/"] == "web"
+    assert migrated["sites"][0]["routes"]["/*"] == "web"
 
 
 def test_migrate_webserver_statics_to_static_routes():
@@ -226,7 +226,7 @@ def test_migrate_webserver_statics_to_static_routes():
     routes = migrated["sites"][0]["routes"]
     assert routes["/static/*"] == {"static": "{app_dir}/static/"}
     assert routes["/media/*"] == {"static": "{app_dir}/media/"}
-    assert routes["/"] == "web"
+    assert routes["/*"] == "web"
 
 
 def test_migrate_webserver_type_is_dropped():
@@ -285,7 +285,7 @@ def test_migrate_webserver_enabled_true_creates_sites():
     # Should create sites when enabled was True
     assert "sites" in migrated
     assert migrated["sites"][0]["domains"] == ["example.com"]
-    assert migrated["sites"][0]["routes"]["/"] == "web"
+    assert migrated["sites"][0]["routes"]["/*"] == "web"
 
 
 def test_migrate_preserves_existing_sites():
@@ -303,9 +303,10 @@ def test_migrate_preserves_existing_sites():
 
     migrated = migrate_config(old_config)
 
-    # Should preserve existing sites, not create new one
+    # Should preserve existing sites, not create new one (but still migrate "/" to "/*")
     assert len(migrated["sites"]) == 1
     assert migrated["sites"][0]["domains"] == ["custom.com"]
+    assert migrated["sites"][0]["routes"]["/*"] == "web"
 
 
 def test_migrate_no_changes_returns_same_config():
@@ -317,7 +318,7 @@ def test_migrate_no_changes_returns_same_config():
         "installation_mode": "binary",
         "hosts": [{"address": "example.com", "user": "deploy", "port": 22}],
         "processes": {"web": {"command": "gunicorn", "listen": "localhost:8000"}},
-        "sites": [{"domains": ["example.com"], "routes": {"/": "web"}}],
+        "sites": [{"domains": ["example.com"], "routes": {"/*": "web"}}],
     }
 
     migrated = migrate_config(new_config)
@@ -368,7 +369,7 @@ def test_migrate_combined_scenario():
     assert migrated["sites"][0]["routes"]["/static/*"] == {
         "static": "{app_dir}/static/"
     }
-    assert migrated["sites"][0]["routes"]["/"] == "web"
+    assert migrated["sites"][0]["routes"]["/*"] == "web"
 
 
 def test_migrate_does_not_mutate_original():
@@ -532,3 +533,134 @@ def test_migrate_config_without_hosts_uses_default_domain():
     assert "sites" not in migrated
     # But webserver should still be removed
     assert "webserver" not in migrated
+
+
+def test_migrate_alias_app_exec_to_exec_app():
+    """Alias 'app exec ...' should be migrated to 'exec --app ...'."""
+    old_config = {
+        "app": "myapp",
+        "build_command": "true",
+        "distfile": "app.whl",
+        "installation_mode": "binary",
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "processes": {"web": {"command": "run"}},
+        "aliases": {
+            "shell": "app exec shell",
+            "console": "app exec python manage.py shell",
+        },
+    }
+
+    migrated = migrate_config(old_config)
+
+    assert migrated["aliases"]["shell"] == "exec --app shell"
+    assert migrated["aliases"]["console"] == "exec --app python manage.py shell"
+
+
+def test_migrate_alias_server_exec_to_exec():
+    """Alias 'server exec ...' should be migrated to 'exec ...'."""
+    old_config = {
+        "app": "myapp",
+        "build_command": "true",
+        "distfile": "app.whl",
+        "installation_mode": "binary",
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "processes": {"web": {"command": "run"}},
+        "aliases": {
+            "bash": "server exec bash",
+            "check": "server exec systemctl status myapp",
+        },
+    }
+
+    migrated = migrate_config(old_config)
+
+    assert migrated["aliases"]["bash"] == "exec bash"
+    assert migrated["aliases"]["check"] == "exec systemctl status myapp"
+
+
+def test_migrate_alias_removes_i_option():
+    """Alias with -i option should have it removed."""
+    old_config = {
+        "app": "myapp",
+        "build_command": "true",
+        "distfile": "app.whl",
+        "installation_mode": "binary",
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "processes": {"web": {"command": "run"}},
+        "aliases": {
+            "shell": "server exec -i bash",
+            "console": "app exec -i python",
+        },
+    }
+
+    migrated = migrate_config(old_config)
+
+    # -i should be removed
+    assert migrated["aliases"]["shell"] == "exec bash"
+    assert migrated["aliases"]["console"] == "exec --app python"
+
+
+def test_migrate_alias_combined_transformations():
+    """Alias migration with both exec conversion and -i removal."""
+    old_config = {
+        "app": "myapp",
+        "build_command": "true",
+        "distfile": "app.whl",
+        "installation_mode": "binary",
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "processes": {"web": {"command": "run"}},
+        "aliases": {
+            "shell": "server exec --appenv -i bash",
+            "django_shell": "app exec -i python manage.py shell",
+        },
+    }
+
+    migrated = migrate_config(old_config)
+
+    assert migrated["aliases"]["shell"] == "exec --appenv bash"
+    assert migrated["aliases"]["django_shell"] == "exec --app python manage.py shell"
+
+
+def test_migrate_alias_preserves_other_commands():
+    """Alias migration should only affect 'app exec' and 'server exec'."""
+    old_config = {
+        "app": "myapp",
+        "build_command": "true",
+        "distfile": "app.whl",
+        "installation_mode": "binary",
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "processes": {"web": {"command": "run"}},
+        "aliases": {
+            "status": "app info",
+            "logs": "app logs",
+            "restart": "app restart",
+            "shell": "app exec shell",
+        },
+    }
+
+    migrated = migrate_config(old_config)
+
+    # These should not be changed
+    assert migrated["aliases"]["status"] == "app info"
+    assert migrated["aliases"]["logs"] == "app logs"
+    assert migrated["aliases"]["restart"] == "app restart"
+    # But this one should
+    assert migrated["aliases"]["shell"] == "exec --app shell"
+
+
+def test_migrate_route_slash_to_slash_star():
+    """Route '/' should be migrated to '/*' for proper Caddy matching."""
+    old_config = {
+        "app": "myapp",
+        "build_command": "true",
+        "distfile": "app.whl",
+        "installation_mode": "binary",
+        "hosts": [{"address": "example.com", "user": "deploy"}],
+        "processes": {"web": {"command": "gunicorn", "listen": "localhost:8000"}},
+        "sites": [{"domains": ["example.com"], "routes": {"/": "web"}}],
+    }
+
+    migrated = migrate_config(old_config)
+
+    # "/" should be converted to "/*"
+    assert "/" not in migrated["sites"][0]["routes"]
+    assert migrated["sites"][0]["routes"]["/*"] == "web"

@@ -76,7 +76,7 @@ def simple_config(app_name) -> dict:
         "sites": [
             {
                 "domains": [f"{app_name}.com"],
-                "routes": {"/": "web"},
+                "routes": {"/*": "web"},
             }
         ],
         "aliases": {
@@ -118,7 +118,7 @@ def django_config(app_name) -> dict:
                 "domains": [f"{app_name}.com"],
                 "routes": {
                     "/static/*": {"static": f"/var/www/{app_name}/static/"},
-                    "/": "web",
+                    "/*": "web",
                 },
             }
         ],
@@ -152,7 +152,7 @@ def falco_config(app_name: str) -> dict:
             "sites": [
                 {
                     "domains": [f"{app_name}.com"],
-                    "routes": {"/": "web"},
+                    "routes": {"/*": "web"},
                 }
             ],
             "aliases": {
@@ -191,7 +191,7 @@ def binary_config(app_name: str) -> dict:
         "sites": [
             {
                 "domains": [f"{app_name}.com"],
-                "routes": {"/": "web"},
+                "routes": {"/*": "web"},
             }
         ],
         "aliases": {
