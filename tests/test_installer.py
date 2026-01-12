@@ -19,12 +19,14 @@ def bundle_dir(tmp_path):
     # Create .env file
     (bundle / ".env").write_text("DATABASE_URL=postgres://localhost/db\n")
 
-    # Create units directory with fake systemd units
-    units_dir = bundle / "units"
-    units_dir.mkdir()
-    (units_dir / "testapp.service").write_text("[Unit]\nDescription=Test App\n")
-    (units_dir / "testapp-worker.service").write_text(
-        "[Unit]\nDescription=Test Worker\n"
+    # Create systemd directory with fake systemd units
+    systemd_dir = bundle / "systemd"
+    systemd_dir.mkdir()
+    (systemd_dir / "web.service").write_text(
+        "[Unit]\nDescription=Test App\n[Service]\nExecStart=/bin/true\n"
+    )
+    (systemd_dir / "worker.service").write_text(
+        "[Unit]\nDescription=Test Worker\n[Service]\nExecStart=/bin/true\n"
     )
 
     # Create fake distfile
@@ -57,9 +59,23 @@ def python_package_config(tmp_path):
         webserver_enabled=False,
         caddy_config_path="/etc/caddy/conf.d/testapp.caddy",
         app_bin=".venv/bin/testapp",
-        active_units=["testapp.service", "testapp-worker.service"],
-        valid_units=["testapp.service", "testapp-worker.service"],
-        user_units=[],
+        active_units=["testapp-web.service", "testapp-worker.service"],
+        unit_metadata=[
+            {
+                "name": "web",
+                "is_template": False,
+                "service_file": "web.service",
+                "deployed_service": "testapp-web.service",
+            },
+            {
+                "name": "worker",
+                "is_template": False,
+                "service_file": "worker.service",
+                "deployed_service": "testapp-worker.service",
+            },
+        ],
+        common_dropins=[],
+        service_dropins={},
     )
 
 
@@ -79,9 +95,17 @@ def binary_config(tmp_path):
         webserver_enabled=False,
         caddy_config_path="/etc/caddy/conf.d/testapp.caddy",
         app_bin="testapp",
-        active_units=["testapp.service"],
-        valid_units=["testapp.service"],
-        user_units=[],
+        active_units=["testapp-web.service"],
+        unit_metadata=[
+            {
+                "name": "web",
+                "is_template": False,
+                "service_file": "web.service",
+                "deployed_service": "testapp-web.service",
+            },
+        ],
+        common_dropins=[],
+        service_dropins={},
     )
 
 
@@ -179,14 +203,14 @@ def test_install_binary(bundle_dir, binary_config):
 
 
 def test_install_removes_stale_units(bundle_dir, python_package_config):
-    """Install stops and removes stale systemd units not in valid_units."""
+    """Install stops and removes stale systemd units not in systemd/ directory."""
 
     def run_side_effect(cmd, **kwargs):
         # Return stale units from systemctl list command
         if "list-unit-files" in cmd:
             mock_result = MagicMock()
             mock_result.stdout = (
-                "testapp.service\ntestapp-worker.service\ntestapp-old.service\n"
+                "testapp-web.service\ntestapp-worker.service\ntestapp-old.service\n"
             )
             mock_result.returncode = 0
             return mock_result
@@ -232,8 +256,11 @@ def test_install_with_webserver_configures_caddy(bundle_dir, python_package_conf
         calls = [call[0][0] for call in mock_run.call_args_list]
         all_cmds = " ".join(calls)
         assert "mkdir -p /etc/caddy/conf.d" in all_cmds
-        assert "caddy validate --config Caddyfile" in all_cmds
-        assert f"mv Caddyfile {python_package_config.caddy_config_path}" in all_cmds
+        assert "caddy validate --config" in all_cmds
+        # Caddyfile is already resolved locally, no .processed file
+        assert "Caddyfile" in all_cmds
+        assert f"cp" in all_cmds
+        assert python_package_config.caddy_config_path in all_cmds
         assert "systemctl reload caddy" in all_cmds
 
 
@@ -242,37 +269,39 @@ def test_install_with_webserver_configures_caddy(bundle_dir, python_package_conf
 # ============================================================================
 
 
-def test_uninstall_stops_and_disables_services(python_package_config):
+def test_uninstall_stops_and_disables_services(bundle_dir, python_package_config):
     """Uninstall stops and disables all services."""
     with (
         patch("fujin._installer.__main__.run") as mock_run,
         patch("fujin._installer.__main__.log"),
     ):
-        uninstall(python_package_config)
+        uninstall(python_package_config, bundle_dir)
 
         # Verify services are disabled and stopped
         calls = [call[0][0] for call in mock_run.call_args_list]
         disable_cmd = next((c for c in calls if "systemctl disable --now" in c), None)
         assert disable_cmd is not None
-        assert "testapp.service" in disable_cmd
+        assert "testapp-web.service" in disable_cmd
         assert "testapp-worker.service" in disable_cmd
 
 
-def test_uninstall_removes_unit_files(python_package_config):
+def test_uninstall_removes_unit_files(bundle_dir, python_package_config):
     """Uninstall removes systemd unit files."""
     with (
         patch("fujin._installer.__main__.run") as mock_run,
         patch("fujin._installer.__main__.log"),
     ):
-        uninstall(python_package_config)
+        uninstall(python_package_config, bundle_dir)
 
         # Verify exact rm commands for unit files
         calls = [call[0][0] for call in mock_run.call_args_list]
-        assert "sudo rm -f /etc/systemd/system/testapp.service" in calls
+        assert "sudo rm -f /etc/systemd/system/testapp-web.service" in calls
         assert "sudo rm -f /etc/systemd/system/testapp-worker.service" in calls
 
 
-def test_uninstall_with_webserver_removes_caddy_config(python_package_config):
+def test_uninstall_with_webserver_removes_caddy_config(
+    bundle_dir, python_package_config
+):
     """Uninstall removes Caddy configuration when webserver was enabled."""
     python_package_config.webserver_enabled = True
 
@@ -280,7 +309,7 @@ def test_uninstall_with_webserver_removes_caddy_config(python_package_config):
         patch("fujin._installer.__main__.run") as mock_run,
         patch("fujin._installer.__main__.log"),
     ):
-        uninstall(python_package_config)
+        uninstall(python_package_config, bundle_dir)
 
         # Verify Caddy config removal and reload (may be combined)
         calls = [call[0][0] for call in mock_run.call_args_list]

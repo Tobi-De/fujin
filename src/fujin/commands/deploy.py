@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import hashlib
 import importlib.util
 import json
@@ -14,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
+from fujin.discovery import ServiceUnit
+import configparser
 import cappa
 from rich.console import Console
 from rich.panel import Panel
@@ -22,9 +23,10 @@ from rich.table import Table
 
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
-from fujin.errors import BuildError
+from fujin.errors import BuildError, DeploymentError
 from fujin.errors import UploadError
 from fujin.secrets import resolve_secrets
+from fujin.formatting import safe_format
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,10 @@ class Deploy(BaseCommand):
         version = self.config.version
         distfile_path = self.config.get_distfile_path(version)
 
+        discovered_services = self.config.discovered_services
+        if not discovered_services:
+            raise DeploymentError("No systemd units found, nothing to deploy")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             self.output.info("Preparing deployment bundle...")
             bundle_dir = Path(tmpdir) / f"{self.config.app_name}-bundle"
@@ -97,16 +103,104 @@ class Deploy(BaseCommand):
 
             (bundle_dir / ".env").write_text(parsed_env)
 
-            units_dir = bundle_dir / "units"
-            units_dir.mkdir()
-            new_units, user_units = self.config.render_systemd_units(self.selected_host)
-            for name, content in new_units.items():
-                (units_dir / name).write_text(content)
+            # Discover and resolve systemd units locally
+            context = {
+                "app_name": self.config.app_name,
+                "version": version,
+                "app_dir": self.config.app_dir(self.selected_host),
+                "user": self.selected_host.user,
+            }
 
-            if self.config.sites:
-                (bundle_dir / "Caddyfile").write_text(self.config.render_caddyfile())
+            unit_metadata = []
+            logger.debug("Validating and resolving systemd units")
+            systemd_bundle = bundle_dir / "systemd"
+            systemd_bundle.mkdir()
 
-            # Create installer config
+            # Process each service and build metadata
+            for svc in discovered_services:
+                # Validate and resolve main service file
+                service_content = svc.service_file.read_text()
+                # Use safe_format for everything to handle both legacy (double brace)
+                # and new (single brace) templates, while correctly ignoring non-matching
+                # braces in Caddyfiles.
+                resolved_content = safe_format(service_content, **context)
+
+                # Validate with configparser
+                parser = configparser.ConfigParser(strict=False, allow_no_value=True)
+                try:
+                    parser.read_string(resolved_content, source=str(svc.service_file))
+                except Exception as e:
+                    raise BuildError(
+                        f"Unit validation failed: {svc.service_file.name}"
+                    ) from e
+
+                (systemd_bundle / svc.service_file.name).write_text(resolved_content)
+
+                # Build metadata entry
+                metadata = {
+                    "name": svc.name,
+                    "is_template": svc.is_template,
+                    "service_file": svc.service_file.name,
+                    "deployed_service": f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.service",
+                }
+
+                # Process and add socket file if exists
+                if svc.socket_file:
+                    socket_content = svc.socket_file.read_text()
+                    resolved_socket = safe_format(socket_content, **context)
+                    (systemd_bundle / svc.socket_file.name).write_text(resolved_socket)
+                    metadata["socket_file"] = svc.socket_file.name
+                    metadata["deployed_socket"] = (
+                        f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.socket"
+                    )
+
+                # Process and add timer file if exists
+                if svc.timer_file:
+                    timer_content = svc.timer_file.read_text()
+                    resolved_timer = safe_format(timer_content, **context)
+                    (systemd_bundle / svc.timer_file.name).write_text(resolved_timer)
+                    metadata["timer_file"] = svc.timer_file.name
+                    metadata["deployed_timer"] = (
+                        f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.timer"
+                    )
+
+                unit_metadata.append(metadata)
+
+            # Process common drop-ins
+            common_dropins = []
+            common_dir = self.config.local_config_dir / "systemd" / "common.d"
+            if common_dir.exists():
+                common_bundle = systemd_bundle / "common.d"
+                common_bundle.mkdir(exist_ok=True)
+                for dropin in common_dir.glob("*.conf"):
+                    dropin_content = dropin.read_text()
+                    resolved_dropin = safe_format(dropin_content, **context)
+                    (common_bundle / dropin.name).write_text(resolved_dropin)
+                    common_dropins.append(dropin.name)
+
+            # Process service-specific drop-ins
+            service_dropins = {}
+            for service_dropin_dir in (self.config.local_config_dir / "systemd").glob(
+                "*.service.d"
+            ):
+                bundle_dropin_dir = systemd_bundle / service_dropin_dir.name
+                bundle_dropin_dir.mkdir()
+                dropins = []
+                for dropin in service_dropin_dir.glob("*.conf"):
+                    dropin_content = dropin.read_text()
+                    resolved_dropin = safe_format(dropin_content, **context)
+                    (bundle_dropin_dir / dropin.name).write_text(resolved_dropin)
+                    dropins.append(dropin.name)
+                service_dropins[service_dropin_dir.name] = dropins
+
+            # Resolve and bundle Caddyfile from .fujin/
+            if self.config.caddyfile_exists:
+                logger.debug("Resolving and bundling Caddyfile")
+                caddyfile_content = self.config.caddyfile_path.read_text()
+                resolved_caddyfile = safe_format(caddyfile_content, **context)
+                (bundle_dir / "Caddyfile").write_text(resolved_caddyfile)
+
+            # Create installer config with unit metadata
             installer_config = {
                 "app_name": self.config.app_name,
                 "app_dir": self.config.app_dir(self.selected_host),
@@ -116,14 +210,13 @@ class Deploy(BaseCommand):
                 "requirements": bool(self.config.requirements),
                 "distfile_name": distfile_path.name,
                 "release_command": self.config.release_command,
-                "webserver_enabled": bool(self.config.sites),
+                "webserver_enabled": self.config.caddyfile_exists,
                 "caddy_config_path": self.config.caddy_config_path,
                 "app_bin": self.config.app_bin,
                 "active_units": self.config.systemd_units,
-                "valid_units": sorted(
-                    set(self.config.systemd_units) | set(new_units.keys())
-                ),
-                "user_units": user_units,
+                "unit_metadata": unit_metadata,
+                "common_dropins": common_dropins if discovered_services else [],
+                "service_dropins": service_dropins if discovered_services else {},
             }
 
             # Create zipapp
@@ -164,7 +257,7 @@ class Deploy(BaseCommand):
             with open(zipapp_path, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
-            self._show_deployment_summary(zipapp_path)
+            self._show_deployment_summary(discovered_services, zipapp_path)
 
             remote_bundle_dir = (
                 Path(self.config.app_dir(self.selected_host)) / ".versions"
@@ -270,13 +363,16 @@ class Deploy(BaseCommand):
                 )
 
         self.output.success("Deployment completed successfully!")
-        if self.config.sites:
-            # Show first domain from first site
-            first_domain = self.config.sites[0].domains[0]
-            url = f"https://{first_domain}"
-            self.output.info(f"Application is available at: {url}")
 
-    def _show_deployment_summary(self, bundle_path: Path):
+        if self.config.caddyfile_exists:
+            domain = self.config.get_domain_name()
+            if domain:
+                url = f"https://{domain}"
+                self.output.info(f"Application is available at: {url}")
+
+    def _show_deployment_summary(
+        self, discovered_services: list[ServiceUnit], bundle_path: Path
+    ):
         console = Console()
 
         bundle_size = bundle_path.stat().st_size
@@ -296,13 +392,17 @@ class Deploy(BaseCommand):
         table.add_row("Version", self.config.version)
         host_display = self.selected_host.name if self.selected_host.name else "default"
         table.add_row("Host", f"{host_display} ({self.selected_host.address})")
-        processes_summary = []
-        for name, proc in self.config.processes.items():
-            if proc.replicas > 1:
-                processes_summary.append(f"{name} ({proc.replicas})")
+
+        # Build services summary from discovered services
+        services_summary = []
+        for svc in discovered_services:
+            replicas = self.config.replicas.get(svc.name, 1)
+            if replicas > 1:
+                services_summary.append(f"{svc.name} ({replicas})")
             else:
-                processes_summary.append(name)
-        table.add_row("Processes", ", ".join(processes_summary))
+                services_summary.append(svc.name)
+        if services_summary:
+            table.add_row("Services", ", ".join(services_summary))
         table.add_row("Bundle", size_str)
 
         # Display in a panel

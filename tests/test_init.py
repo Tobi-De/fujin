@@ -26,19 +26,29 @@ def test_init_creates_fujin_toml_with_simple_profile(tmp_path, monkeypatch):
         init = Init()
         init()
 
-        # Verify file was created
+        # Verify fujin.toml was created
         assert (clean_dir / "fujin.toml").exists()
 
-        # Verify config content
+        # Verify config content (minimal, no processes/sites)
         config = tomllib.loads((clean_dir / "fujin.toml").read_text())
         assert config["app"] == clean_dir.name
         assert config["installation_mode"] == "python-package"
-        assert "processes" in config
-        assert "web" in config["processes"]
+        assert "processes" not in config
+        assert "sites" not in config
 
-        # Verify success message
-        mock_output.success.assert_called_with(
-            "Sample configuration file generated successfully!"
+        # Verify .fujin/ directory structure
+        assert (clean_dir / ".fujin").exists()
+        assert (clean_dir / ".fujin/systemd").exists()
+        assert (clean_dir / ".fujin/systemd/web.service").exists()
+        assert (clean_dir / ".fujin/systemd/web.socket").exists()
+        assert (clean_dir / ".fujin/systemd/common.d").exists()
+        assert (clean_dir / ".fujin/systemd/common.d/base.conf").exists()
+        assert (clean_dir / ".fujin/Caddyfile").exists()
+
+        # Verify success messages (includes file creation messages)
+        mock_output.success.assert_any_call("Generated fujin.toml")
+        mock_output.success.assert_any_call(
+            "Generated .fujin/ directory with simple profile"
         )
 
 
@@ -51,14 +61,33 @@ def test_init_with_profiles(tmp_path, monkeypatch, profile):
         init = Init(profile=profile)
         init()
 
-        # Verify file was created and config is valid
+        # Verify fujin.toml was created with minimal structure
         assert (tmp_path / "fujin.toml").exists()
         config = tomllib.loads((tmp_path / "fujin.toml").read_text())
-
-        # All configs should have basic structure
         assert "app" in config
-        assert "processes" in config
         assert "hosts" in config
+        assert "processes" not in config
+        assert "sites" not in config
+
+        # Verify .fujin/ directory structure
+        assert (tmp_path / ".fujin").exists()
+        assert (tmp_path / ".fujin/systemd").exists()
+        assert (tmp_path / ".fujin/Caddyfile").exists()
+
+        # Profile-specific checks
+        if profile == "django":
+            # Django has web service with migrations
+            web_service = (tmp_path / ".fujin/systemd/web.service").read_text()
+            assert "migrate" in web_service
+            assert "collectstatic" in web_service
+        elif profile == "falco":
+            # Falco has web + worker
+            assert (tmp_path / ".fujin/systemd/web.service").exists()
+            assert (tmp_path / ".fujin/systemd/worker.service").exists()
+        elif profile == "binary":
+            # Binary has web service without .venv
+            web_service = (tmp_path / ".fujin/systemd/web.service").read_text()
+            assert ".venv" not in web_service
 
 
 # ============================================================================
@@ -82,6 +111,27 @@ def test_init_skips_when_fujin_toml_exists(tmp_path, monkeypatch):
         # Should show warning
         mock_output.warning.assert_called_with(
             "fujin.toml file already exists, skipping generation"
+        )
+
+
+def test_init_skips_when_fujin_dir_exists(tmp_path, monkeypatch):
+    """init skips and shows warning when .fujin/ directory already exists."""
+    monkeypatch.chdir(tmp_path)
+    # Create existing directory
+    (tmp_path / ".fujin").mkdir()
+    (tmp_path / ".fujin/test.txt").write_text("existing content")
+
+    with patch.object(Init, "output", MagicMock()) as mock_output:
+        init = Init()
+        init()
+
+        # Should not create fujin.toml or modify .fujin/
+        assert not (tmp_path / "fujin.toml").exists()
+        assert (tmp_path / ".fujin/test.txt").read_text() == "existing content"
+
+        # Should show warning
+        mock_output.warning.assert_called_with(
+            ".fujin/ directory already exists, skipping generation"
         )
 
 
@@ -161,10 +211,10 @@ def test_init_adds_python_version_when_no_python_version_file(tmp_path, monkeypa
         assert config["python_version"] == "3.12"
 
 
-def test_init_keeps_profile_python_version_when_python_version_file_exists(
+def test_init_omits_python_version_when_python_version_file_exists(
     tmp_path, monkeypatch
 ):
-    """init keeps profile's python_version when .python-version file exists."""
+    """init omits python_version when .python-version file exists."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".python-version").write_text("3.11.5")
 
@@ -173,8 +223,8 @@ def test_init_keeps_profile_python_version_when_python_version_file_exists(
         init()
 
         config = tomllib.loads((tmp_path / "fujin.toml").read_text())
-        # Profile's python_version is kept (from simple_config)
-        assert config["python_version"] == "3.12"
+        # python_version should NOT be in config (fujin will read from .python-version)
+        assert "python_version" not in config
 
 
 # ============================================================================
@@ -225,14 +275,20 @@ def test_init_config_has_required_fields(tmp_path, monkeypatch):
 
         config = tomllib.loads((tmp_path / "fujin.toml").read_text())
 
-        # Required top-level fields
+        # Required top-level fields (minimal config, no processes/sites)
         assert "app" in config
         assert "build_command" in config
         assert "distfile" in config
         assert "installation_mode" in config
-        assert "processes" in config
         assert "hosts" in config
-        assert "sites" in config
+
+        # These should NOT be in the minimal config
+        assert "processes" not in config
+        assert "sites" not in config
+
+        # Verify .fujin/ directory has the actual service/site definitions
+        assert (tmp_path / ".fujin/systemd").exists()
+        assert (tmp_path / ".fujin/Caddyfile").exists()
 
 
 def test_init_config_has_aliases(tmp_path, monkeypatch):

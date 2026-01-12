@@ -47,28 +47,31 @@ class BaseCommand:
             yield conn
 
     def _get_available_options(self) -> str:
-        """Get formatted, colored list of available process and unit options."""
+        """Get formatted, colored list of available service and unit options."""
         options = []
 
         # Special values
         options.extend(["env", "caddy", "units"])
 
-        # Unit type keywords
-        if any(p.timer for p in self.config.processes.values()):
+        # Get discovered services from .fujin/systemd/
+        discovered = self.config.discovered_services
+
+        has_timer = any(svc.timer_file for svc in discovered)
+        has_socket = any(svc.socket_file for svc in discovered)
+
+        if has_timer:
             options.append("timer")
-        if any(p.socket for p in self.config.processes.values()):
+        if has_socket:
             options.append("socket")
 
-        # Process names
-        options.extend(self.config.processes.keys())
-
-        # Process name variations with suffixes
-        for process_name, process_config in self.config.processes.items():
-            options.append(f"{process_name}.service")
-            if process_config.socket:
-                options.append(f"{process_name}.socket")
-            if process_config.timer:
-                options.append(f"{process_name}.timer")
+        # Service names and variations
+        for svc in discovered:
+            options.append(svc.name)
+            options.append(f"{svc.name}.service")
+            if svc.socket_file:
+                options.append(f"{svc.name}.socket")
+            if svc.timer_file:
+                options.append(f"{svc.name}.timer")
 
         # Apply uniform color to all options
         colored_options = [f"[cyan]{opt}[/cyan]" for opt in options]
@@ -78,14 +81,14 @@ class BaseCommand:
         self, name: str | None, use_templates: bool = False
     ) -> list[str]:
         """
-        Resolve a process name to systemd unit names.
+        Resolve a service name to systemd unit names.
 
-        Accepts process names (e.g., "web") and process names with suffixes
+        Accepts service names (e.g., "web") and service names with suffixes
         (e.g., "web.service", "health.timer"). Does NOT accept full systemd
         names like "bookstore.service" or instance names like "bookstore-worker@1.service".
 
         Args:
-            name: Process name or process name with suffix (.service/.timer/.socket)
+            name: Service name or service name with suffix (.service/.timer/.socket)
                   Special keywords: "timer", "socket"
             use_templates: If True, return template names (for show/cat)
                           If False, return instance names (for start/stop/restart/logs)
@@ -94,84 +97,77 @@ class BaseCommand:
             List of systemd unit names
         """
 
-        if not name:
-            return self.config.systemd_units
+        systemd_units = self.config.systemd_units
 
-        # Extract base process name and suffix type
+        if not name:
+            return systemd_units
+
+        # Extract base service name and suffix type
         suffix_type = None
         if name.endswith(".service"):
-            process_name = name[:-8]
+            service_name = name[:-8]
             suffix_type = "service"
         elif name.endswith(".timer"):
-            process_name = name[:-6]
+            service_name = name[:-6]
             suffix_type = "timer"
         elif name.endswith(".socket"):
-            process_name = name[:-7]
+            service_name = name[:-7]
             suffix_type = "socket"
         else:
-            process_name = name
+            service_name = name
 
         # Handle special keywords
-        if process_name == "timer":
-            return [n for n in self.config.systemd_units if n.endswith(".timer")]
+        if service_name == "timer":
+            return [n for n in systemd_units if n.endswith(".timer")]
 
-        if process_name == "socket":
-            has_socket = any(config.socket for config in self.config.processes.values())
-            if has_socket:
-                return [f"{self.config.app_name}.socket"]
-            return []
+        if service_name == "socket":
+            return [n for n in systemd_units if n.endswith(".socket")]
 
-        # Validate process exists
-        if process_name not in self.config.processes:
-            available = ", ".join(self.config.processes.keys())
+        # Get discovered services
+        discovered = self.config.discovered_services
+        svc = next((s for s in discovered if s.name == service_name), None)
+        if not svc:
+            available = ", ".join(s.name for s in discovered)
             raise cappa.Exit(
-                f"Unknown process '{process_name}'. Available processes: {available}",
+                f"Unknown service '{service_name}'. Available services: {available}",
                 code=1,
             )
 
-        process_config = self.config.processes[process_name]
         units = []
+        replicas = self.config.replicas.get(svc.name, 1)
 
-        # If specific suffix requested, only return that unit type
-        if suffix_type == "service":
-            # Just the service unit(s)
-            if use_templates:
-                units.append(self.config.get_unit_template_name(process_name))
+        # Build deployed unit names
+        if suffix_type == "service" or suffix_type is None:
+            if use_templates and svc.is_template:
+                units.append(f"{self.config.app_name}-{svc.name}@.service")
             else:
-                units.extend(self.config.get_unit_names(process_name))
+                if svc.is_template:
+                    base = f"{self.config.app_name}-{svc.name}"
+                    units.extend(
+                        [f"{base}@{i}.service" for i in range(1, replicas + 1)]
+                    )
+                else:
+                    units.append(f"{self.config.app_name}-{svc.name}.service")
 
-        elif suffix_type == "socket":
-            # Just the socket unit
-            if not process_config.socket:
+        if suffix_type == "socket" or (suffix_type is None and svc.socket_file):
+            if not svc.socket_file and suffix_type == "socket":
                 raise cappa.Exit(
-                    f"Process '{process_name}' does not have a socket enabled.", code=1
+                    f"Service '{service_name}' does not have a socket.", code=1
                 )
-            units.append(f"{self.config.app_name}.socket")
+            if svc.socket_file:
+                units.append(
+                    f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.socket"
+                )
 
-        elif suffix_type == "timer":
-            # Just the timer unit
-            if not process_config.timer:
+        if suffix_type == "timer" or (suffix_type is None and svc.timer_file):
+            if not svc.timer_file and suffix_type == "timer":
                 raise cappa.Exit(
-                    f"Process '{process_name}' does not have a timer enabled.", code=1
+                    f"Service '{service_name}' does not have a timer.", code=1
                 )
-            service_name = self.config.get_unit_template_name(process_name)
-            timer_name = f"{service_name.replace('.service', '')}.timer"
-            units.append(timer_name)
-
-        else:
-            # No suffix - return service + socket/timer if they exist
-            if use_templates:
-                units.append(self.config.get_unit_template_name(process_name))
-            else:
-                units.extend(self.config.get_unit_names(process_name))
-
-            if process_config.socket:
-                units.append(f"{self.config.app_name}.socket")
-
-            if process_config.timer:
-                service_name = self.config.get_unit_template_name(process_name)
-                timer_name = f"{service_name.replace('.service', '')}.timer"
-                units.append(timer_name)
+            if svc.timer_file:
+                units.append(
+                    f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.timer"
+                )
 
         return units
 

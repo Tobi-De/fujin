@@ -15,11 +15,12 @@ from fujin.commands.down import Down
 from fujin.commands.exec import Exec
 from fujin.commands.init import Init
 from fujin.commands.migrate import Migrate
+from fujin.commands.new import New
 from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
+from fujin.commands.scale import Scale
 from fujin.commands.server import Server
 from fujin.commands.show import Show
-from fujin.commands.templates import Templates
 from fujin.commands.up import Up
 
 if sys.version_info >= (3, 11):
@@ -50,7 +51,6 @@ class Fujin:
         | App
         | Server
         | Show
-        | Templates
         | Migrate
         | Audit
         | Exec
@@ -58,6 +58,8 @@ class Fujin:
         | Down
         | Rollback
         | Prune
+        | New
+        | Scale
     ]
     verbose: Annotated[
         int,

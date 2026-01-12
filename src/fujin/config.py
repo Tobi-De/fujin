@@ -1,15 +1,12 @@
 from __future__ import annotations
+from contextlib import suppress
 
-import importlib.util
 import os
 import sys
 from pathlib import Path
 
 import msgspec
-from jinja2 import Environment
-from jinja2 import FileSystemLoader
-from jinja2 import Template
-from jinja2 import TemplateNotFound
+from fujin.discovery import discover_services
 
 from .errors import ImproperlyConfiguredError
 
@@ -32,9 +29,6 @@ class InstallationMode(StrEnum):
     BINARY = "binary"
 
 
-RESERVED_PROCESS_NAMES = {"env", "caddy", "units", "socket", "timer"}
-
-
 class SecretConfig(msgspec.Struct):
     adapter: str
     password_env: str | None = None
@@ -49,93 +43,6 @@ class SecretConfig(msgspec.Struct):
             )
 
 
-class TimerConfig(msgspec.Struct):
-    """Configuration for systemd timer units.
-
-    Supports various systemd timer options for flexible scheduling.
-    See systemd.timer(5) for detailed documentation.
-    """
-
-    on_calendar: str | None = None
-    on_boot_sec: str | None = None
-    on_unit_active_sec: str | None = None
-    on_active_sec: str | None = None
-    persistent: bool = True
-    randomized_delay_sec: str | None = None
-    accuracy_sec: str | None = None
-
-    def __post_init__(self):
-        triggers = [
-            self.on_calendar,
-            self.on_boot_sec,
-            self.on_unit_active_sec,
-            self.on_active_sec,
-        ]
-        if not any(triggers):
-            raise ImproperlyConfiguredError(
-                "Timer must specify at least one trigger: on_calendar, on_boot_sec, "
-                "on_unit_active_sec, or on_active_sec"
-            )
-
-
-class RouteConfig(msgspec.Struct):
-    """Route configuration with options."""
-
-    process: str | None = None
-    static: str | None = None
-    strip_prefix: str | None = None
-
-    def __post_init__(self):
-        route_types = [self.process, self.static]
-        if sum(x is not None for x in route_types) != 1:
-            raise ImproperlyConfiguredError(
-                "Route must specify exactly one of: process, static"
-            )
-        if self.strip_prefix and not self.process:
-            raise ImproperlyConfiguredError(
-                "strip_prefix only works with process routes"
-            )
-
-
-class SiteConfig(msgspec.Struct):
-    """Site configuration for one or more domains with routing rules."""
-
-    domains: list[str]
-    routes: dict[str, str | RouteConfig]
-
-    def __post_init__(self):
-        if not self.domains:
-            raise ImproperlyConfiguredError("Site must have at least one domain")
-        if not self.routes:
-            raise ImproperlyConfiguredError("Site must have at least one route")
-
-
-class ProcessConfig(msgspec.Struct):
-    command: str
-    listen: str | None = None
-    replicas: int = 1
-    socket: bool = False
-    timer: TimerConfig | None = None
-
-    def __post_init__(self):
-        if self.socket and self.timer:
-            raise ImproperlyConfiguredError(
-                "A process cannot have both 'socket' and 'timer' enabled."
-            )
-        if self.replicas > 1 and (self.socket or self.timer):
-            raise ImproperlyConfiguredError(
-                "A process cannot have replicas > 1 and either 'socket' or 'timer' enabled."
-            )
-        if self.replicas > 1 and self.listen:
-            raise ImproperlyConfiguredError(
-                "A process with replicas > 1 cannot have 'listen' field. "
-                "Which replica would Caddy route to?"
-            )
-
-        if self.replicas < 1:
-            raise ImproperlyConfiguredError("A process must have at least 1 replica.")
-
-
 class Config(msgspec.Struct, kw_only=True):
     app_name: str = msgspec.field(name="app")
     version: str = msgspec.field(default_factory=lambda: read_version_from_pyproject())
@@ -147,8 +54,9 @@ class Config(msgspec.Struct, kw_only=True):
     distfile: str
     aliases: dict[str, str] = msgspec.field(default_factory=dict)
     hosts: list[HostConfig]
-    processes: dict[str, ProcessConfig] = msgspec.field(default_factory=dict)
-    sites: list[SiteConfig] = msgspec.field(default_factory=list)
+    replicas: dict[str, int] = msgspec.field(
+        default_factory=dict
+    )  # Service name -> replica count (for template units)
     requirements: str | None = None
     local_config_dir: Path = Path(".fujin")
     secret_config: SecretConfig | None = msgspec.field(
@@ -175,43 +83,6 @@ class Config(msgspec.Struct, kw_only=True):
         if self.installation_mode == InstallationMode.PY_PACKAGE:
             if not self.python_version:
                 self.python_version = find_python_version()
-
-        if len(self.processes) == 0:
-            raise ImproperlyConfiguredError("At least one process must be defined")
-
-        for process_name in self.processes:
-            if process_name.strip() == "":
-                raise ImproperlyConfiguredError("Process names cannot be empty strings")
-            elif process_name.count(" ") > 0:
-                raise ImproperlyConfiguredError("Process names cannot contain spaces")
-            elif process_name in RESERVED_PROCESS_NAMES:
-                raise ImproperlyConfiguredError(
-                    f"Process name '{process_name}' is reserved and cannot be used"
-                )
-
-        # Validate routes reference processes with listen
-        for site in self.sites:
-            for path, target in site.routes.items():
-                # Extract process name from string or RouteConfig
-                if isinstance(target, str):
-                    process_name = target
-                elif isinstance(target, RouteConfig) and target.process:
-                    process_name = target.process
-                else:
-                    continue  # It's a static route, skip
-
-                # Validate process exists
-                if process_name not in self.processes:
-                    raise ImproperlyConfiguredError(
-                        f"Route '{path}' references unknown process '{process_name}'"
-                    )
-
-                # Validate process has listen (routable)
-                if not self.processes[process_name].listen:
-                    raise ImproperlyConfiguredError(
-                        f"Process '{process_name}' must have 'listen' field to be used in routes. "
-                        f"Background processes cannot be routed to."
-                    )
 
     def select_host(self, host_name: str | None = None) -> HostConfig:
         """
@@ -269,128 +140,36 @@ class Config(msgspec.Struct, kw_only=True):
         except msgspec.ValidationError as e:
             raise ImproperlyConfiguredError(f"Improperly configured, {e}") from e
 
-    def get_unit_template_name(self, process_name: str) -> str:
-        config = self.processes[process_name]
-        suffix = "@.service" if config.replicas > 1 else ".service"
-        if process_name == "web":
-            return f"{self.app_name}{suffix}"
-        return f"{self.app_name}-{process_name}{suffix}"
-
-    def get_unit_names(self, process_name: str) -> list[str]:
-        config = self.processes[process_name]
-        service_name = self.get_unit_template_name(process_name)
-        if config.replicas > 1:
-            base = service_name.replace("@.service", "")
-            return [f"{base}@{i}.service" for i in range(1, config.replicas + 1)]
-        return [service_name]
+    @property
+    def caddyfile_path(self) -> Path:
+        return self.local_config_dir / "Caddyfile"
 
     @property
-    def systemd_units(self) -> list[str]:
-        services = []
-        for name in self.processes:
-            services.extend(self.get_unit_names(name))
-        for name, config in self.processes.items():
-            if config.socket:
-                services.append(f"{self.app_name}.socket")
-            if config.timer:
-                service_name = self.get_unit_template_name(name)
-                services.append(f"{service_name.replace('.service', '')}.timer")
-        return services
+    def caddyfile_exists(self) -> bool:
+        return self.caddyfile_path.exists()
 
-    def _template_env(self) -> Environment:
-        package_templates = self._package_templates_path()
-        search_paths = [self.local_config_dir, package_templates]
-        return Environment(loader=FileSystemLoader(search_paths))
+    def get_domain_name(self) -> str | None:
+        if not self.caddyfile_exists:
+            return None
+        with suppress(OSError, UnicodeError):
+            content = self.caddyfile_path.read_text()
+            # Look for domain pattern: domain.com {
+            # Match lines that look like domain blocks (simple heuristic)
+            for line in content.splitlines():
+                line = line.strip()
+                # Skip comments and empty lines
+                if not line or line.startswith("#"):
+                    continue
+                # Look for pattern: something.something {
+                if "{" in line and not line.startswith("handle"):
+                    # Extract domain (before the {)
+                    # Handle multiple domains: "example.com, www.example.com {" -> "example.com"
+                    domain_part = line.split("{")[0]
+                    domain = domain_part.split(",")[0].strip()
 
-    def _package_templates_path(self) -> Path:
-        return Path(importlib.util.find_spec("fujin").origin).parent / "templates"
-
-    def render_systemd_units(
-        self, host: HostConfig | None = None
-    ) -> tuple[dict[str, str], list[str]]:
-        """Render systemd units for the given host (or default host)."""
-        host = host or self.select_host()
-        env = self._template_env()
-        package_templates = self._package_templates_path()
-
-        context = {
-            "app_name": self.app_name,
-            "user": host.user,
-            "app_dir": self.app_dir(host),
-        }
-
-        files = {}
-        user_template_units = []
-
-        def _get_template(name: str, default: str) -> tuple[Template, bool]:
-            try:
-                template = env.get_template(name)
-                is_user_template = Path(template.filename).parent != package_templates
-                return template, is_user_template
-            except TemplateNotFound:
-                template = env.get_template(default)
-                return template, False
-
-        for name, config in self.processes.items():
-            service_name = self.get_unit_template_name(name)
-            process_name = service_name.replace(".service", "")
-            command = config.command
-            process_config = config
-
-            template, is_user_template = _get_template(
-                f"{name}.service.j2", "default.service.j2"
-            )
-            if is_user_template:
-                user_template_units.append(service_name)
-
-            body = template.render(
-                **context,
-                command=command,
-                process_name=process_name,
-                process=process_config,
-            )
-            files[service_name] = body
-
-            if process_config.socket:
-                socket_name = f"{self.app_name}.socket"
-                template, is_user_template = _get_template(
-                    f"{name}.socket.j2", "default.socket.j2"
-                )
-                if is_user_template:
-                    user_template_units.append(socket_name)
-
-                body = template.render(**context)
-                files[socket_name] = body
-
-            if process_config.timer:
-                timer_name = f"{service_name.replace('.service', '')}.timer"
-                template, is_user_template = _get_template(
-                    f"{name}.timer.j2", "default.timer.j2"
-                )
-                if is_user_template:
-                    user_template_units.append(timer_name)
-
-                body = template.render(
-                    **context,
-                    process_name=process_name,
-                    process=process_config,
-                )
-                files[timer_name] = body
-
-        return files, user_template_units
-
-    def render_caddyfile(self, host: HostConfig | None = None) -> str:
-        """Render Caddyfile for the given host (or default host)."""
-        host = host or self.select_host()
-        env = self._template_env()
-        template = env.get_template("Caddyfile.j2")
-        context = {"user": host.user, "app_dir": self.app_dir(host)}
-
-        return template.render(
-            sites=self.sites,
-            processes=self.processes,
-            **context,
-        )
+                    # Basic validation: has a dot and doesn't start with special chars
+                    if "." in domain and not domain.startswith(("@", "*", "http")):
+                        return domain
 
     @property
     def caddy_config_dir(self) -> str:
@@ -400,6 +179,31 @@ class Config(msgspec.Struct, kw_only=True):
     @property
     def caddy_config_path(self) -> str:
         return f"{self.caddy_config_dir}/{self.app_name}.caddy"
+
+    @property
+    def discovered_services(self):
+        return discover_services(self.local_config_dir)
+
+    @property
+    def systemd_units(self) -> list[str]:
+        """
+        Get list of systemd units that should be enabled/started.
+        Handles replicas for template units.
+        """
+        units = []
+        for svc in self.discovered_services:
+            if svc.is_template:
+                # Handle replicas
+                count = self.replicas.get(svc.name, 1)
+                for i in range(1, count + 1):
+                    units.append(f"{self.app_name}-{svc.name}@{i}.service")
+            else:
+                units.append(f"{self.app_name}-{svc.name}.service")
+                if svc.socket_file:
+                    units.append(f"{self.app_name}-{svc.name}.socket")
+                if svc.timer_file:
+                    units.append(f"{self.app_name}-{svc.name}.timer")
+        return units
 
 
 class HostConfig(msgspec.Struct, kw_only=True):

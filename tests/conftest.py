@@ -13,7 +13,7 @@ from fujin.config import Config
 
 @pytest.fixture
 def minimal_config_dict(tmp_path, monkeypatch):
-    """Minimal valid configuration dict used across all tests."""
+    """Minimal valid configuration dict for file-based structure."""
     monkeypatch.chdir(tmp_path)
 
     return {
@@ -23,7 +23,6 @@ def minimal_config_dict(tmp_path, monkeypatch):
         "installation_mode": "python-package",
         "python_version": "3.11",
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
-        "processes": {"web": {"command": "gunicorn"}},
         "hosts": [{"address": "example.com", "user": "deploy"}],
     }
 
@@ -31,16 +30,6 @@ def minimal_config_dict(tmp_path, monkeypatch):
 @pytest.fixture
 def minimal_config(minimal_config_dict):
     """Convert minimal_config_dict to Config object."""
-    return msgspec.convert(minimal_config_dict, type=Config)
-
-
-@pytest.fixture
-def config_with_sites(minimal_config_dict):
-    """Config with sites configured."""
-    minimal_config_dict["processes"]["web"]["listen"] = "localhost:8000"
-    minimal_config_dict["sites"] = [
-        {"domains": ["example.com"], "routes": {"/": "web"}}
-    ]
     return msgspec.convert(minimal_config_dict, type=Config)
 
 

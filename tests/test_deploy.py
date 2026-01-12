@@ -26,6 +26,13 @@ def minimal_deploy_config(tmp_path, monkeypatch):
     dist_dir.mkdir()
     (dist_dir / "testapp-1.0.0-py3-none-any.whl").write_text("fake wheel")
 
+    # Create .fujin/systemd directory with a sample service
+    fujin_systemd = Path(".fujin/systemd")
+    fujin_systemd.mkdir(parents=True)
+    (fujin_systemd / "web.service").write_text(
+        "[Unit]\nDescription={app_name}\n[Service]\nExecStart=/bin/true\n"
+    )
+
     return {
         "app": "testapp",
         "version": "1.0.0",
@@ -248,7 +255,7 @@ def test_deploy_fails_after_max_retry_attempts(minimal_deploy_config):
 
 
 def test_bundle_includes_required_files(minimal_deploy_config, tmp_path):
-    """Zipapp bundle includes distfile, env, units, and installer."""
+    """Zipapp bundle includes distfile, env, systemd, and installer."""
     minimal_deploy_config["requirements"] = str(tmp_path / "requirements.txt")
     (tmp_path / "requirements.txt").write_text("django>=4.0\n")
 
@@ -268,7 +275,7 @@ def test_bundle_includes_required_files(minimal_deploy_config, tmp_path):
             "env": (source_path / ".env").exists(),
             "config": (source_path / "config.json").exists(),
             "main": (source_path / "__main__.py").exists(),
-            "units_dir": (source_path / "units").is_dir(),
+            "systemd_dir": (source_path / "systemd").is_dir(),
         }
         # Create a dummy zipapp file so the code can calculate checksum
         Path(target).write_bytes(b"fake zipapp")
@@ -307,7 +314,7 @@ def test_bundle_includes_required_files(minimal_deploy_config, tmp_path):
         assert captured_files["env"]
         assert captured_files["config"]
         assert captured_files["main"]
-        assert captured_files["units_dir"]
+        assert captured_files["systemd_dir"]
 
 
 def test_installer_config_has_correct_structure(minimal_deploy_config):
@@ -359,5 +366,107 @@ def test_installer_config_has_correct_structure(minimal_deploy_config):
         assert captured_config["installation_mode"] == "python-package"
         assert captured_config["python_version"] == "3.11"
         assert captured_config["distfile_name"] == "testapp-1.0.0-py3-none-any.whl"
-        assert isinstance(captured_config["active_units"], list)
-        assert isinstance(captured_config["valid_units"], list)
+
+
+def test_deploy_handles_caddyfile_braces(minimal_deploy_config, tmp_path):
+    """Test that Caddyfile with braces is rendered correctly using safe_format."""
+    # Create Caddyfile with curly braces (Caddy syntax)
+    # This should work with safe_format
+    (tmp_path / ".fujin" / "Caddyfile").write_text(
+        'example.com {\n    respond "Hello"\n}'
+    )
+
+    config = msgspec.convert(minimal_deploy_config, type=Config)
+    mock_conn = MagicMock()
+    mock_conn.run.return_value = ("abcd1234", True)
+
+    captured_caddyfile = None
+
+    def capture_zipapp(source_dir, target, *args, **kwargs):
+        nonlocal captured_caddyfile
+        caddyfile_path = Path(str(source_dir)) / "Caddyfile"
+        if caddyfile_path.exists():
+            captured_caddyfile = caddyfile_path.read_text()
+
+        # Create a dummy zipapp file so the code can calculate checksum
+        Path(target).write_bytes(b"fake zipapp")
+
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch("fujin.commands.deploy.subprocess.run") as mock_subprocess,
+        patch.object(Deploy, "connection") as mock_connection,
+        patch("fujin.commands.deploy.log_operation"),
+        patch(
+            "fujin.commands.deploy.zipapp.create_archive", side_effect=capture_zipapp
+        ),
+        patch("fujin.commands.deploy.hashlib.file_digest") as mock_digest,
+        patch.object(Deploy, "output", MagicMock()),
+        patch("fujin.commands.deploy.Console", MagicMock()),
+    ):
+        mock_connection.return_value.__enter__.return_value = mock_conn
+        mock_connection.return_value.__exit__.return_value = None
+
+        # Mock subprocess.run
+        mock_subprocess.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="abc123\n", stderr=""
+        )
+
+        # Mock checksum
+        mock_digest_obj = MagicMock()
+        mock_digest_obj.hexdigest.return_value = "abcd1234"
+        mock_digest.return_value = mock_digest_obj
+
+        deploy = Deploy(no_input=True)
+        deploy()
+
+        # Verify Caddyfile content
+        assert "example.com {" in captured_caddyfile
+        assert 'respond "Hello"' in captured_caddyfile
+        assert "}" in captured_caddyfile
+
+
+def test_deploy_safe_format_substitutes_variables(minimal_deploy_config, tmp_path):
+    """Test that variables are still substituted by safe_format."""
+    # Create Caddyfile with variable
+    (tmp_path / ".fujin" / "Caddyfile").write_text(
+        'example.com {\n    respond "Hello {app_name}"\n}'
+    )
+
+    config = msgspec.convert(minimal_deploy_config, type=Config)
+    mock_conn = MagicMock()
+    mock_conn.run.return_value = ("abcd1234", True)
+
+    captured_caddyfile = None
+
+    def capture_zipapp(source_dir, target, *args, **kwargs):
+        nonlocal captured_caddyfile
+        caddyfile_path = Path(str(source_dir)) / "Caddyfile"
+        if caddyfile_path.exists():
+            captured_caddyfile = caddyfile_path.read_text()
+
+        Path(target).write_bytes(b"fake zipapp")
+
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch("fujin.commands.deploy.subprocess.run") as mock_subprocess,
+        patch.object(Deploy, "connection") as mock_connection,
+        patch("fujin.commands.deploy.log_operation"),
+        patch(
+            "fujin.commands.deploy.zipapp.create_archive", side_effect=capture_zipapp
+        ),
+        patch("fujin.commands.deploy.hashlib.file_digest") as mock_digest,
+        patch.object(Deploy, "output", MagicMock()),
+        patch("fujin.commands.deploy.Console", MagicMock()),
+    ):
+        mock_connection.return_value.__enter__.return_value = mock_conn
+        mock_connection.return_value.__exit__.return_value = None
+        mock_subprocess.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="abc123\n", stderr=""
+        )
+        mock_digest.return_value.hexdigest.return_value = "abcd1234"
+
+        deploy = Deploy(no_input=True)
+        deploy()
+
+        # Verify variable substitution
+        assert 'respond "Hello testapp"' in captured_caddyfile
