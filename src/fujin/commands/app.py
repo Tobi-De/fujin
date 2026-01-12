@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from pathlib import Path
 from typing import Annotated
 
 import cappa
@@ -16,10 +17,54 @@ from fujin.config import InstallationMode
 )
 class App(BaseCommand):
     @cappa.command(help="Display application information and process status")
-    def info(self):
+    def info(
+        self,
+        service: Annotated[
+            str | None,
+            cappa.Arg(
+                help="Optional service name to show detailed info for a specific service"
+            ),
+        ] = None,
+    ):
+        # Discover services from .fujin/systemd/ directory
+        discovered_services = self.config.discovered_services
+
+        if not discovered_services:
+            self.output.warning(
+                "No services found in .fujin/systemd/\n"
+                "Run 'fujin init' or 'fujin new service' to create services."
+            )
+            return
+
+        # If service specified, show detailed info for that service only
+        if service:
+            return self._show_service_detail(service, discovered_services)
+
+        # Build systemd unit names with app prefix
+        names = []
+        for svc in discovered_services:
+            if svc.is_template:
+                # For templates, check replicas config or default to single instance
+                replicas = self.config.replicas.get(svc.name, 1)
+                for i in range(1, replicas + 1):
+                    names.append(f"{self.config.app_name}-{svc.name}@{i}")
+            else:
+                names.append(f"{self.config.app_name}-{svc.name}")
+
+            # Add associated socket/timer
+            if svc.socket_file:
+                if svc.is_template:
+                    names.append(f"{self.config.app_name}-{svc.name}@.socket")
+                else:
+                    names.append(f"{self.config.app_name}-{svc.name}.socket")
+            if svc.timer_file:
+                if svc.is_template:
+                    names.append(f"{self.config.app_name}-{svc.name}@.timer")
+                else:
+                    names.append(f"{self.config.app_name}-{svc.name}.timer")
+
         with self.connection() as conn:
             app_dir = shlex.quote(self.config.app_dir(self.selected_host))
-            names = self.config.systemd_units
             delimiter = "___FUJIN_DELIM___"
 
             # Combine commands to reduce SSH roundtrips
@@ -29,7 +74,7 @@ class App(BaseCommand):
             cmds = [
                 f"cat {app_dir}/.version 2>/dev/null || true",
                 f"ls -1t {app_dir}/.versions 2>/dev/null || true",
-                f"sudo systemctl is-active {' '.join(names)}",
+                f"sudo systemctl is-active {' '.join(names)} 2>/dev/null || true",
             ]
             full_cmd = f"; echo '{delimiter}'; ".join(cmds)
             result_stdout, _ = conn.run(full_cmd, warn=True, hide=True)
@@ -65,34 +110,53 @@ class App(BaseCommand):
                 ),
             }
             if self.config.installation_mode == InstallationMode.PY_PACKAGE:
-                infos["python_version"] = self.config.python_version
+                if self.config.python_version:
+                    infos["python_version"] = self.config.python_version
 
-            if self.config.sites:
-                first_domain = self.config.sites[0].domains[0]
-                infos["running_at"] = f"https://{first_domain}"
+            if self.config.caddyfile_exists:
+                domain = self.config.get_domain_name()
+                if domain:
+                    infos["running_at"] = f"https://{domain}"
 
             services_status = {}
-            statuses = parts[2].strip().split("\n")
+            statuses = parts[2].strip().split("\n") if parts[2].strip() else []
             services_status = dict(zip(names, statuses))
 
+            # Build services table from discovered services
             services = {}
-            for process_name in self.config.processes:
-                unit_names = self.config.get_unit_names(process_name)
-                running_count = sum(
-                    1 for name in unit_names if services_status.get(name) == "active"
-                )
-                total_count = len(unit_names)
-
-                if total_count == 1:
-                    services[process_name] = services_status.get(
-                        unit_names[0], "unknown"
+            for svc in discovered_services:
+                if svc.is_template:
+                    # Count running instances for templated services
+                    replicas = self.config.replicas.get(svc.name, 1)
+                    unit_names = [
+                        f"{self.config.app_name}-{svc.name}@{i}"
+                        for i in range(1, replicas + 1)
+                    ]
+                    running_count = sum(
+                        1
+                        for name in unit_names
+                        if services_status.get(name) == "active"
                     )
+                    total_count = len(unit_names)
+                    if total_count == 1:
+                        services[svc.name] = services_status.get(
+                            unit_names[0], "unknown"
+                        )
+                    else:
+                        services[svc.name] = f"{running_count}/{total_count}"
                 else:
-                    services[process_name] = f"{running_count}/{total_count}"
+                    unit_name = f"{self.config.app_name}-{svc.name}"
+                    services[svc.name] = services_status.get(unit_name, "unknown")
 
-            socket_name = f"{self.config.app_name}.socket"
-            if socket_name in services_status:
-                services["socket"] = services_status[socket_name]
+                # Add socket status if exists
+                if svc.socket_file:
+                    if svc.is_template:
+                        socket_name = f"{self.config.app_name}-{svc.name}@.socket"
+                    else:
+                        socket_name = f"{self.config.app_name}-{svc.name}.socket"
+                    socket_status = services_status.get(socket_name)
+                    if socket_status:
+                        services[f"{svc.name}.socket"] = socket_status
 
         # Format info text with clickable URL
         info_lines = [f"{key}: {value}" for key, value in infos.items()]
@@ -123,6 +187,126 @@ class App(BaseCommand):
 
         self.output.output(infos_text)
         self.output.output(table)
+
+    def _show_service_detail(self, service_name: str, discovered_services):
+        """Show detailed information for a specific service."""
+        # Find the service in discovered services
+        service = None
+        for svc in discovered_services:
+            if svc.name == service_name:
+                service = svc
+                break
+
+        if not service:
+            self.output.error(
+                f"Service '{service_name}' not found.\n"
+                f"Available services: {', '.join(s.name for s in discovered_services)}"
+            )
+            return
+
+        # Build info about the service
+        source_file = (
+            f"{service.name}@.service"
+            if service.is_template
+            else f"{service.name}.service"
+        )
+        deployed_file = f"{self.config.app_name}-{source_file}"
+        replicas = (
+            self.config.replicas.get(service.name, 1) if service.is_template else 1
+        )
+
+        self.output.output(f"[bold]Service:[/bold] {service.name}")
+        self.output.output(f"[bold]Source:[/bold] {source_file}")
+        self.output.output(f"[bold]Deployed as:[/bold] {deployed_file}")
+        if service.is_template:
+            self.output.output(f"[bold]Replicas:[/bold] {replicas}")
+
+        # Get status from server
+        with self.connection() as conn:
+            unit_names = []
+            if service.is_template:
+                for i in range(1, replicas + 1):
+                    unit_names.append(f"{self.config.app_name}-{service.name}@{i}")
+            else:
+                unit_names.append(f"{self.config.app_name}-{service.name}")
+
+            # Get detailed status for each instance
+            self.output.output("\n[bold]Status:[/bold]")
+            for unit_name in unit_names:
+                # Get status with uptime info
+                status_cmd = f"sudo systemctl show {unit_name} --property=ActiveState,SubState,LoadState,ActiveEnterTimestamp --no-pager"
+                status_output, success = conn.run(status_cmd, warn=True, hide=True)
+
+                if success:
+                    # Parse systemctl show output
+                    props = {}
+                    for line in status_output.strip().split("\n"):
+                        if "=" in line:
+                            key, value = line.split("=", 1)
+                            props[key] = value
+
+                    active_state = props.get("ActiveState", "unknown")
+                    load_state = props.get("LoadState", "unknown")
+                    active_since = props.get("ActiveEnterTimestamp", "")
+
+                    # Format status with color
+                    if active_state == "active":
+                        status_str = f"[bold green]{active_state}[/bold green]"
+                    elif active_state == "failed":
+                        status_str = f"[bold red]{active_state}[/bold red]"
+                    else:
+                        status_str = f"[dim]{active_state}[/dim]"
+
+                    if load_state == "not-found":
+                        self.output.output(f"  {unit_name}: [dim]not deployed[/dim]")
+                    else:
+                        time_info = (
+                            f" (since {active_since})"
+                            if active_since and active_state == "active"
+                            else ""
+                        )
+                        self.output.output(f"  {unit_name}: {status_str}{time_info}")
+                else:
+                    self.output.output(f"  {unit_name}: [dim]unknown[/dim]")
+
+        # Show drop-ins if any
+        drop_ins = []
+        # Common drop-ins
+        common_dir = Path(".fujin/systemd/common.d")
+        if common_dir.exists():
+            common_files = list(common_dir.glob("*.conf"))
+            drop_ins.extend([f"common.d/{f.name}" for f in common_files])
+
+        # Service-specific drop-ins
+        service_dropin_dir = Path(f".fujin/systemd/{source_file}.d")
+        if service_dropin_dir.exists():
+            service_files = list(service_dropin_dir.glob("*.conf"))
+            drop_ins.extend([f"{source_file}.d/{f.name}" for f in service_files])
+
+        if drop_ins:
+            self.output.output("\n[bold]Drop-ins:[/bold]")
+            for dropin in drop_ins:
+                self.output.output(f"  - {dropin}")
+
+        # Show associated socket/timer if exists
+        if service.socket_file:
+            self.output.output(f"\n[bold]Socket:[/bold] {service.socket_file.name}")
+        if service.timer_file:
+            self.output.output(f"\n[bold]Timer:[/bold] {service.timer_file.name}")
+            # Get timer status
+            with self.connection() as conn:
+                timer_name = f"{self.config.app_name}-{service.name}.timer"
+                timer_cmd = f"sudo systemctl show {timer_name} --property=NextElapseUSecRealtime,LastTriggerUSec --no-pager"
+                timer_output, success = conn.run(timer_cmd, warn=True, hide=True)
+                if success:
+                    props = {}
+                    for line in timer_output.strip().split("\n"):
+                        if "=" in line:
+                            key, value = line.split("=", 1)
+                            props[key] = value
+                    next_run = props.get("NextElapseUSecRealtime", "")
+                    if next_run and next_run != "0":
+                        self.output.output(f"  Next run: {next_run}")
 
     @cappa.command(
         help="Start an interactive shell session using the system SSH client"
@@ -182,12 +366,27 @@ class App(BaseCommand):
         self._run_service_command("stop", name)
 
     def _run_service_command(self, command: str, name: str | None):
+        from pathlib import Path
+
         with self.connection() as conn:
             # Use instances for start/stop/restart (operates on running services)
             names = self._resolve_units(name, use_templates=False)
             if not names:
                 self.output.warning("No services found")
                 return
+
+            # When stopping a service, also stop associated sockets
+            # Check for socket files in .fujin/systemd/ directory
+            if command == "stop" and name:
+                systemd_dir = Path(".fujin/systemd")
+                if systemd_dir.exists():
+                    # Check for socket file matching the service name
+                    socket_file = systemd_dir / f"{name}.socket"
+                    if socket_file.exists():
+                        socket_unit = f"{self.config.app_name}-{name}.socket"
+                        if socket_unit not in names:
+                            names.append(socket_unit)
+                            self.output.info(f"Also stopping socket: {socket_unit}")
 
             self.output.output(
                 f"Running [cyan]{command}[/cyan] on: [cyan]{', '.join(names)}[/cyan]"
@@ -286,7 +485,7 @@ class App(BaseCommand):
             return
 
         with self.connection() as conn:
-            if name == "caddy" and self.config.sites:
+            if name == "caddy" and self.config.caddyfile_exists:
                 self.output.output(f"[cyan]# {self.config.caddy_config_path}[/cyan]")
                 print()
                 conn.run(f"cat {self.config.caddy_config_path}")

@@ -6,12 +6,19 @@ from pathlib import Path
 from typing import Annotated
 
 import cappa
-import msgspec
 
 from fujin.commands import BaseCommand
+from fujin.config import tomllib
+from fujin.templates import BASE_DROPIN_TEMPLATE
+from fujin.templates import CADDY_HANDLE_PROXY
+from fujin.templates import CADDY_HANDLE_STATIC
+from fujin.templates import CADDYFILE_HEADER
+from fujin.templates import SERVICE_TEMPLATE
+from fujin.templates import SOCKET_TEMPLATE
+from fujin.templates import TIMER_TEMPLATE
 
 
-@cappa.command(help="Migrate fujin.toml to latest configuration format")
+@cappa.command(help="Migrate fujin.toml and generate .fujin/ directory structure")
 @dataclass
 class Migrate(BaseCommand):
     backup: Annotated[
@@ -20,12 +27,12 @@ class Migrate(BaseCommand):
             long="--backup",
             help="Create backup of original file (fujin.toml.backup)",
         ),
-    ] = False
+    ] = True
     dry_run: Annotated[
         bool,
         cappa.Arg(
             long="--dry-run",
-            help="Show what would change without writing to file",
+            help="Show what would change without writing files",
         ),
     ] = False
 
@@ -35,23 +42,39 @@ class Migrate(BaseCommand):
             self.output.error("No fujin.toml file found in the current directory")
             raise cappa.Exit(code=1)
 
-        # Read raw TOML (don't validate yet - it might be in old format)
+        # Read raw TOML
         try:
-            config_dict = msgspec.toml.decode(fujin_toml.read_text())
+            config_dict = tomllib.loads(fujin_toml.read_text())
         except Exception as e:
             self.output.error(f"Failed to parse fujin.toml: {e}")
             raise cappa.Exit(code=1)
 
-        # Apply migrations
-        migrated = migrate_config(config_dict)
+        # Check if already file-based
+        if "processes" not in config_dict and "sites" not in config_dict:
+            fujin_dir = Path(".fujin")
+            if fujin_dir.exists() and (fujin_dir / "systemd").exists():
+                self.output.info("Configuration is already file-based")
+                return
 
-        # Check if anything changed
-        if migrated == config_dict:
-            self.output.info("Configuration is already in the latest format")
+        # Check if migration is needed
+        needs_migration = bool(
+            config_dict.get("processes")
+            or config_dict.get("sites")
+            or config_dict.get("webserver")
+            or config_dict.get("release_command")
+        )
+
+        if not needs_migration:
+            self.output.info("No migration needed - configuration is up to date")
             return
 
-        # Show changes
-        self._show_changes(config_dict, migrated)
+        self.output.info("[bold]File-Based Migration[/bold]")
+        self.output.info(
+            "Converting template-based config to file-based structure (.fujin/ directory)"
+        )
+
+        # Show what will be created
+        self._preview_changes(config_dict)
 
         if self.dry_run:
             self.output.info("\n[dim]Dry run - no changes written[/dim]")
@@ -60,193 +83,332 @@ class Migrate(BaseCommand):
         # Create backup if requested
         if self.backup:
             backup_path = Path("fujin.toml.backup")
-            shutil.copy2(fujin_toml, backup_path)
-            self.output.info(f"Backup created: {backup_path}")
+            if backup_path.exists():
+                self.output.warning(f"Backup already exists: {backup_path}")
+            else:
+                shutil.copy2(fujin_toml, backup_path)
+                self.output.success(f"Backup created: {backup_path}")
 
-        # Write migrated config
-        migrated_toml = msgspec.toml.encode(migrated).decode()
-        fujin_toml.write_text(migrated_toml)
-        self.output.success("Configuration migrated successfully")
+        # Perform migration
+        self._migrate_to_file_based(config_dict)
 
-        # Try to validate the new config
-        try:
-            from fujin.config import Config
+        self.output.success("\nMigration completed successfully!")
+        self.output.info(
+            "\nNext steps:\n"
+            "  1. Review generated files in .fujin/systemd/\n"
+            "  2. Customize service files if needed\n"
+            "  3. Review .fujin/Caddyfile\n"
+            "  4. Test your deployment: fujin deploy"
+        )
 
-            Config.read()
-            self.output.success("New configuration is valid")
-        except Exception as e:
-            self.output.warning(
-                f"Migration complete but validation failed: {e}\n"
-                "You may need to manually fix the configuration."
-            )
+    def _preview_changes(self, config: dict):
+        """Show what files will be created/modified."""
+        config.get("app", "app")
+        processes = config.get("processes", {})
+        sites = config.get("sites", [])
+        release_command = config.get("release_command")
 
-    def _show_changes(self, old: dict, new: dict):
-        """Show what changed during migration."""
+        self.output.output("\n[bold cyan]Files to be created:[/bold cyan]")
+
+        # Systemd units
+        if processes:
+            self.output.output("  .fujin/systemd/")
+            for name in processes:
+                self.output.output(f"    ├── {name}.service")
+                process = processes[name]
+                if isinstance(process, dict):
+                    if process.get("socket"):
+                        self.output.output(f"    ├── {name}.socket")
+                    if process.get("timer"):
+                        self.output.output(f"    ├── {name}.timer")
+            self.output.output("    ├── common.d/")
+            self.output.output("    │   └── base.conf")
+
+        # Caddyfile
+        if sites:
+            self.output.output("  .fujin/Caddyfile")
+
+        # Config changes
+        self.output.output("\n[bold cyan]fujin.toml changes:[/bold cyan]")
         changes = []
 
-        # Check for single host → hosts array
-        if "host" in old and "hosts" in new:
-            changes.append("• Converted single 'host' to 'hosts' array")
-
-        # Check for host field renames
-        for host in old.get("hosts", [old.get("host", {})]):
-            if "ip" in host or "domain_name" in host:
+        if processes:
+            replicas = {
+                name: proc.get("replicas", 1)
+                for name, proc in processes.items()
+                if isinstance(proc, dict) and proc.get("replicas", 1) > 1
+            }
+            if replicas:
                 changes.append(
-                    "• Renamed 'ip'/'domain_name' to 'address' in host config"
+                    f"  + [replicas] section with {len(replicas)} service(s)"
                 )
-                break
-            if "ssh_port" in host:
-                changes.append("• Renamed 'ssh_port' to 'port' in host config")
-                break
+            changes.append(f"  - [processes] section ({len(processes)} process(es))")
 
-        # Check for simple process strings
-        old_processes = old.get("processes", {})
-        if any(isinstance(v, str) for v in old_processes.values()):
-            changes.append("• Converted simple process strings to dict format")
+        if sites:
+            changes.append(f"  - [sites] section ({len(sites)} site(s))")
 
-        # Check for webserver migration
-        if "webserver" in old:
-            changes.append("• Migrated 'webserver' config to 'sites' array")
-            if old["webserver"].get("upstream"):
-                changes.append("• Moved 'webserver.upstream' to 'processes.web.listen'")
-            if old["webserver"].get("statics"):
-                changes.append("• Converted 'webserver.statics' to static routes")
+        if "webserver" in config:
+            changes.append("  - [webserver] section")
 
-        # Check for route "/" → "/*" migration
-        for old_site in old.get("sites", []):
-            if "/" in old_site.get("routes", {}):
-                changes.append("• Fixed route '/' → '/*' for proper Caddy matching")
-                break
+        if release_command:
+            changes.append("  - release_command (moved to ExecStartPre in service)")
 
-        # Check for alias migrations
-        old_aliases = old.get("aliases", {})
-        new_aliases = new.get("aliases", {})
-        if old_aliases != new_aliases:
-            for key, old_value in old_aliases.items():
-                if not isinstance(old_value, str):
-                    continue
-                new_value = new_aliases.get(key, "")
-                if old_value != new_value:
-                    if "app exec" in old_value or "server exec" in old_value:
-                        changes.append(
-                            "• Updated alias command format (app/server exec)"
-                        )
-                        break
-                    elif "-i" in old_value:
-                        changes.append("• Removed -i options from aliases")
-                        break
+        for change in changes:
+            self.output.output(change)
 
-        if changes:
-            self.output.info("[bold]Migration changes:[/bold]")
-            for change in changes:
-                self.output.output(f"  {change}")
+    def _migrate_to_file_based(self, config: dict):
+        """Migrate config to file-based structure."""
+        app_name = config.get("app", "app")
+        processes = config.get("processes", {})
+        sites = config.get("sites", [])
+        release_command = config.get("release_command")
 
+        # Create .fujin directory structure
+        fujin_dir = Path(".fujin")
+        systemd_dir = fujin_dir / "systemd"
+        systemd_dir.mkdir(parents=True, exist_ok=True)
 
-def migrate_config(config_dict: dict) -> dict:
-    """
-    Migrate old config format to new format.
-
-    Handles:
-    - Single host → hosts array
-    - host.ip/domain_name → host.address
-    - host.ssh_port → host.port
-    - Simple process strings → process dicts
-    - webserver config → sites array (only if enabled != False)
-    - webserver.upstream → processes.web.listen
-    - Drop webserver.type and webserver.enabled fields
-    - Route "/" → "/*" in sites (Caddy handle fix)
-    - Alias migrations: "app exec" → "exec --app", "server exec" → "exec"
-    - Remove -i options from aliases
-    """
-    # Work on a copy to avoid mutating the original
-    config = dict(config_dict)
-
-    # 1. Single host → hosts array
-    if "host" in config and "hosts" not in config:
-        config["hosts"] = [config.pop("host")]
-
-    # 2. Extract webserver.upstream before processing (needed for web.listen)
-    web_listen = None
-    if "webserver" in config:
-        web_listen = config["webserver"].get("upstream")
-
-    # 3. Migrate host fields
-    for host in config.get("hosts", []):
-        # ip or domain_name → address
-        if "ip" in host:
-            host["address"] = host.pop("ip")
-        elif "domain_name" in host:
-            host["address"] = host.pop("domain_name")
-
-        # ssh_port → port
-        if "ssh_port" in host:
-            host["port"] = host.pop("ssh_port")
-
-    # 4. Convert simple process strings → dicts and add listen to web process
-    processes = config.get("processes", {})
-    for name, value in list(processes.items()):
-        if isinstance(value, str):
-            # Simple string format: process = "command"
-            if name == "web" and web_listen:
-                processes[name] = {"command": value, "listen": web_listen}
+        # Generate systemd service files from processes
+        replicas = {}
+        for name, process_config in processes.items():
+            if isinstance(process_config, str):
+                command = process_config
+                listen = None
+                num_replicas = 1
+                socket = False
+                timer = None
             else:
-                processes[name] = {"command": value}
-        elif isinstance(value, dict):
-            # Dict format: check if web process needs listen field
-            if name == "web" and web_listen and "listen" not in value:
-                value["listen"] = web_listen
+                command = process_config.get("command", "")
+                listen = process_config.get("listen")
+                num_replicas = process_config.get("replicas", 1)
+                socket = process_config.get("socket", False)
+                timer = process_config.get("timer")
 
-    # 5. Migrate webserver config to sites
-    if "webserver" in config:
-        webserver = config.pop("webserver")
+            # Track replicas for config
+            if num_replicas > 1:
+                replicas[name] = num_replicas
 
-        # Drop deprecated type and enabled fields
-        webserver.pop("type", None)
-        enabled = webserver.pop("enabled", True)
+            # Generate service file
+            service_file = self._generate_service_file(
+                name=name,
+                command=command,
+                listen=listen,
+                replicas=num_replicas,
+                socket=socket,
+                release_command=release_command if name == "web" else None,
+            )
 
-        # Only build sites config if webserver was enabled
-        if enabled and "sites" not in config and config.get("hosts"):
-            # Get domain from first host address
-            domain = config["hosts"][0].get("address", "example.com")
+            # Write service file (templated if replicas > 1)
+            service_path = systemd_dir / (
+                f"{name}@.service" if num_replicas > 1 else f"{name}.service"
+            )
+            service_path.write_text(service_file)
+            self.output.success(f"Created {service_path}")
 
-            routes = {}
+            # Generate socket file if needed
+            if socket:
+                socket_file = self._generate_socket_file(name, num_replicas > 1)
+                socket_path = systemd_dir / (
+                    f"{name}@.socket" if num_replicas > 1 else f"{name}.socket"
+                )
+                socket_path.write_text(socket_file)
+                self.output.success(f"Created {socket_path}")
 
-            # Add static routes from webserver.statics
-            for path, directory in webserver.get("statics", {}).items():
-                routes[path] = {"static": directory}
+            # Generate timer file if needed
+            if timer:
+                timer_file = self._generate_timer_file(name, timer, num_replicas > 1)
+                timer_path = systemd_dir / (
+                    f"{name}@.timer" if num_replicas > 1 else f"{name}.timer"
+                )
+                timer_path.write_text(timer_file)
+                self.output.success(f"Created {timer_path}")
 
-            # Add web process route if web process exists
-            if "web" in processes:
-                routes["/*"] = "web"
+        # Generate common drop-ins
+        common_dir = systemd_dir / "common.d"
+        common_dir.mkdir(exist_ok=True)
+        base_conf = self._generate_base_conf(app_name)
+        (common_dir / "base.conf").write_text(base_conf)
+        self.output.success(f"Created {common_dir / 'base.conf'}")
 
-            if routes:
-                config["sites"] = [{"domains": [domain], "routes": routes}]
+        # Generate Caddyfile from sites
+        if sites:
+            caddyfile = self._generate_caddyfile(sites, processes)
+            (fujin_dir / "Caddyfile").write_text(caddyfile)
+            self.output.success(f"Created {fujin_dir / 'Caddyfile'}")
 
-    # 6. Migrate route "/" to "/*" in sites
-    for site in config.get("sites", []):
+        # Update fujin.toml
+        updated_config = dict(config)
+
+        # Add replicas section if needed
+        if replicas:
+            updated_config["replicas"] = replicas
+
+        # Remove old sections
+        updated_config.pop("processes", None)
+        updated_config.pop("sites", None)
+        updated_config.pop("webserver", None)
+        updated_config.pop("release_command", None)
+
+        # Write updated fujin.toml
+        import tomli_w
+
+        fujin_toml_content = tomli_w.dumps(updated_config, multiline_strings=True)
+        Path("fujin.toml").write_text(fujin_toml_content)
+        self.output.success("Updated fujin.toml")
+
+    def _generate_service_file(
+        self,
+        name: str,
+        command: str,
+        listen: str | None,
+        replicas: int,
+        socket: bool,
+        release_command: str | None,
+    ) -> str:
+        """Generate systemd service file content."""
+        instance_suffix = "%i" if replicas > 1 else ""
+
+        # Determine service type
+        service_type = "notify" if socket else "simple"
+
+        # Build ExecStartPre
+        exec_start_pre = ""
+        if release_command:
+            exec_start_pre = f"""# Run release command before starting
+ExecStartPre={{app_dir}}/{release_command}
+"""
+        exec_start = f"{{app_dir}}/{command}"
+        return SERVICE_TEMPLATE.format(
+            description=f"{name.capitalize()} service",
+            app_name="{app_name}",
+            description_suffix=f"{name} server{instance_suffix}",
+            service_type=service_type,
+            user="{user}",
+            exec_start_pre=exec_start_pre,
+            exec_start=exec_start,
+        )
+
+    def _generate_socket_file(self, name: str, is_template: bool) -> str:
+        """Generate systemd socket file content."""
+        instance_suffix = "%i" if is_template else ""
+        template_suffix = "@" if is_template else ""
+
+        return SOCKET_TEMPLATE.format(
+            name=name,
+            app_name="{app_name}",
+            instance_suffix=instance_suffix,
+            template_suffix=template_suffix,
+            listen_stream=f"/run/{{app_name}}/{name}{instance_suffix}.sock",
+            user="{user}",
+        )
+
+    def _generate_timer_file(
+        self, name: str, timer_config: dict, is_template: bool
+    ) -> str:
+        """Generate systemd timer file content."""
+        instance_suffix = "%i" if is_template else ""
+
+        # Build timer config section
+        timer_lines = []
+        if timer_config.get("on_calendar"):
+            timer_lines.append(f"OnCalendar={timer_config['on_calendar']}")
+        if timer_config.get("on_boot_sec"):
+            timer_lines.append(f"OnBootSec={timer_config['on_boot_sec']}")
+        if timer_config.get("on_unit_active_sec"):
+            timer_lines.append(f"OnUnitActiveSec={timer_config['on_unit_active_sec']}")
+        if timer_config.get("on_active_sec"):
+            timer_lines.append(f"OnActiveSec={timer_config['on_active_sec']}")
+
+        if timer_config.get("persistent", False):
+            timer_lines.append("Persistent=true")
+        if timer_config.get("randomized_delay_sec"):
+            timer_lines.append(
+                f"RandomizedDelaySec={timer_config['randomized_delay_sec']}"
+            )
+
+        timer_content = "\n".join(timer_lines) + "\n" if timer_lines else ""
+
+        return TIMER_TEMPLATE.format(
+            name=name,
+            app_name="{app_name}",
+            instance_suffix=instance_suffix,
+            timer_config=timer_content,
+        )
+
+    def _generate_base_conf(self, app_name: str) -> str:
+        """Generate common.d/base.conf content."""
+        return BASE_DROPIN_TEMPLATE.format(app_name=app_name, app_dir="{app_dir}")
+
+    def _generate_caddyfile(self, sites: list, processes: dict) -> str:
+        """Generate Caddyfile from sites configuration."""
+        if not sites:
+            return ""
+
+        site = sites[0]  # Use first site
+        domains = site.get("domains", [])
         routes = site.get("routes", {})
-        if "/" in routes:
-            # Move "/" route to "/*"
-            routes["/*"] = routes.pop("/")
 
-    # 7. Migrate aliases
-    if "aliases" in config:
-        aliases = config["aliases"]
-        for key, value in list(aliases.items()):
-            if not isinstance(value, str):
-                continue
+        domain = domains[0] if domains else "example.com"
 
-            # Remove -i options (they don't exist anymore)
-            migrated = value.replace(" -i ", " ").replace(" -i", "")
+        # We need {app_name} to be literal in the Caddyfile for deploy time substitution
+        content = CADDYFILE_HEADER.format(app_name="{app_name}", domain=domain)
 
-            # app exec ... → exec --app ...
-            if migrated.startswith("app exec "):
-                migrated = "exec --app " + migrated[len("app exec ") :]
+        # Process routes
+        for path, target in routes.items():
+            if isinstance(target, dict):
+                # RouteConfig format
+                if "static" in target:
+                    static_path = target["static"]
+                    content += CADDY_HANDLE_STATIC.format(path=path, root=static_path)
+                elif "process" in target:
+                    process_name = target["process"]
+                    strip_prefix = target.get("strip_prefix")
 
-            # server exec ... → exec ...
-            elif migrated.startswith("server exec "):
-                migrated = "exec " + migrated[len("server exec ") :]
+                    # Determine upstream
+                    process_config = processes.get(process_name, {})
+                    if isinstance(process_config, dict):
+                        listen = process_config.get("listen", "localhost:8000")
+                        socket = process_config.get("socket", False)
 
-            aliases[key] = migrated
+                        if socket:
+                            upstream = f"unix//run/{{app_name}}/{process_name}.sock"
+                        else:
+                            upstream = listen
+                    else:
+                        upstream = "localhost:8000"
 
-    return config
+                    extra = (
+                        f"        uri strip_prefix {strip_prefix}\n"
+                        if strip_prefix
+                        else ""
+                    )
+                    content += CADDY_HANDLE_PROXY.format(
+                        name=process_name,
+                        path=path,
+                        upstream=upstream,
+                        extra_directives=extra,
+                    )
+
+            else:
+                # Simple string format (process name)
+                process_name = target
+                process_config = processes.get(process_name, {})
+
+                if isinstance(process_config, dict):
+                    listen = process_config.get("listen", "localhost:8000")
+                    socket = process_config.get("socket", False)
+
+                    if socket:
+                        upstream = f"unix//run/{{app_name}}/{process_name}.sock"
+                    else:
+                        upstream = listen
+                else:
+                    upstream = "localhost:8000"
+
+                content += CADDY_HANDLE_PROXY.format(
+                    name=process_name, path=path, upstream=upstream, extra_directives=""
+                )
+
+        content += "}\n"
+
+        return content

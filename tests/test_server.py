@@ -26,16 +26,14 @@ def base_config(tmp_path, monkeypatch):
         "installation_mode": "python-package",
         "python_version": "3.11",
         "distfile": "dist/testapp-{version}-py3-none-any.whl",
-        "processes": {"web": {"command": "gunicorn", "listen": "localhost:8000"}},
         "hosts": [{"address": "example.com", "user": "deploy"}],
-        "sites": [{"domains": ["example.com"], "routes": {"/": "web"}}],
     }
 
 
 @pytest.fixture
 def config_without_webserver(base_config):
-    """Config without webserver enabled."""
-    base_config.pop("sites", None)
+    """Config without webserver enabled (for legacy tests)."""
+    # Same as base_config now since webserver is determined by presence of Caddyfile
     return base_config
 
 
@@ -102,9 +100,9 @@ def test_info_fallback_to_os_release_when_fastfetch_unavailable(base_config):
 # ============================================================================
 
 
-def test_bootstrap_installs_dependencies(config_with_sites):
+def test_bootstrap_installs_dependencies(base_config):
     """bootstrap installs system dependencies."""
-    config = config_with_sites
+    config = msgspec.convert(base_config, type=Config)
     mock_conn = MagicMock()
 
     mock_conn.run.side_effect = [
@@ -112,18 +110,11 @@ def test_bootstrap_installs_dependencies(config_with_sites):
         ("", False),  # command -v uv (not installed)
         ("", True),  # install uv
         ("", True),  # uv tool install fastfetch
-        ("", False),  # command -v caddy (not installed)
-        ("", True),  # install caddy
     ]
 
     with (
         patch("fujin.config.Config.read", return_value=config),
         patch.object(Server, "connection") as mock_connection,
-        patch("fujin.commands.server.caddy.get_latest_gh_tag", return_value="v2.7.6"),
-        patch(
-            "fujin.commands.server.caddy.get_install_commands",
-            return_value=["install caddy"],
-        ),
         patch.object(Server, "output", MagicMock()) as mock_output,
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
@@ -139,8 +130,8 @@ def test_bootstrap_installs_dependencies(config_with_sites):
         # Verify uv was installed
         assert any("astral.sh/uv/install.sh" in cmd for cmd in calls)
 
-        # Verify caddy was installed
-        assert any("install caddy" in cmd for cmd in calls)
+        # Caddy should NOT be installed since no sites are configured
+        assert not any("install caddy" in cmd for cmd in calls)
 
         # Verify success message
         mock_output.success.assert_called_with(
@@ -176,16 +167,15 @@ def test_bootstrap_without_webserver_skips_caddy(config_without_webserver):
         assert not any("caddy" in cmd for cmd in calls)
 
 
-def test_bootstrap_skips_uv_when_already_installed(config_with_sites):
+def test_bootstrap_skips_uv_when_already_installed(base_config):
     """bootstrap skips uv installation when already present."""
-    config = config_with_sites
+    config = msgspec.convert(base_config, type=Config)
     mock_conn = MagicMock()
 
     mock_conn.run.side_effect = [
         ("", True),  # apt update
         ("", True),  # command -v uv (already installed)
         ("", True),  # uv tool install fastfetch
-        ("", True),  # command -v caddy (already installed)
     ]
 
     with (
@@ -203,11 +193,8 @@ def test_bootstrap_skips_uv_when_already_installed(config_with_sites):
         calls = [call[0][0] for call in mock_conn.run.call_args_list]
         assert not any("astral.sh/uv/install.sh" in cmd for cmd in calls)
 
-        # Verify caddy warning was shown
-        assert any(
-            "already installed" in str(call)
-            for call in mock_output.warning.call_args_list
-        )
+        # Caddy should not be checked since no sites are configured
+        assert not any("command -v caddy" in cmd for cmd in calls)
 
 
 def test_bootstrap_warns_on_apt_failure(base_config):

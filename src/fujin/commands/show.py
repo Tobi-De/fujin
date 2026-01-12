@@ -7,6 +7,7 @@ from typing import Annotated
 import cappa
 
 from fujin.commands import BaseCommand
+from fujin.formatting import safe_format
 from fujin.secrets import resolve_secrets
 
 
@@ -42,37 +43,45 @@ class Show(BaseCommand):
             self._show_specific_units(self.name)
 
     def _show_all_units(self):
-        units, user_units = self.config.render_systemd_units(self.selected_host)
+        """Show systemd unit files from .fujin/systemd/."""
+        systemd_dir = self.config.local_config_dir / "systemd"
+        if not systemd_dir.exists():
+            self.output.warning("No systemd directory found in .fujin/")
+            return
 
-        if not units:
-            self.output.warning("No systemd units configured")
+        # Collect all unit files
+        unit_files = []
+        for pattern in ["*.service", "*.socket", "*.timer"]:
+            unit_files.extend(systemd_dir.glob(pattern))
+
+        # Also collect dropin files
+        dropin_files = []
+        for dropin_dir in systemd_dir.glob("*.d"):
+            dropin_files.extend(dropin_dir.glob("*.conf"))
+
+        all_files = sorted(unit_files + dropin_files)
+
+        if not all_files:
+            self.output.warning("No unit files found in .fujin/systemd/")
             return
 
         separator = "[dim]" + "-" * 80 + "[/dim]"
         first = True
-        for filename, content in units.items():
-            if filename not in user_units:
-                if not first:
-                    self.output.output(f"\n{separator}\n")
-                self.output.info(f"[bold cyan]# {filename}[/bold cyan]")
-                self.output.output(content)
-                first = False
-
-        if user_units:
+        for file_path in all_files:
             if not first:
                 self.output.output(f"\n{separator}\n")
-            self.output.info("[bold cyan]# User Units[/bold cyan]")
-            for filename in user_units:
-                self.output.output(f"\n{separator}\n")
-                self.output.info(f"[bold cyan]# {filename}[/bold cyan]")
-                self.output.output(units[filename])
+            # Show relative path from systemd dir
+            relative_name = file_path.relative_to(systemd_dir)
+            self.output.info(f"[bold cyan]# {relative_name}[/bold cyan]")
+            self.output.output(file_path.read_text())
+            first = False
 
     def _show_caddy(self):
-        if not self.config.sites:
-            self.output.warning("No sites configured")
+        if not self.config.caddyfile_exists:
+            self.output.warning("No Caddyfile found in .fujin/")
             return
 
-        caddyfile = self.config.render_caddyfile(self.selected_host)
+        caddyfile = self.config.caddyfile_path.read_text()
         self.output.info(
             f"[bold cyan]# Caddyfile for {self.config.app_name}[/bold cyan]"
         )
@@ -107,45 +116,90 @@ class Show(BaseCommand):
 
     def _show_specific_units(self, name: str):
         """Display specific unit(s) based on the provided process name."""
-        import cappa
-
-        # Get all rendered units
-        units, user_units = self.config.render_systemd_units(self.selected_host)
-
-        if not units:
+        # Discover services
+        discovered_services = self.config.discovered_services
+        if not discovered_services:
             self.output.warning("No systemd units configured")
             return
 
-        # Resolve the name to template unit names
-        try:
-            resolved_names = self._resolve_units(name, use_templates=True)
-        except cappa.Exit:
-            # Re-raise with colored options
+        # Filter services matching the requested name
+        matching_services = [svc for svc in discovered_services if svc.name == name]
+
+        if not matching_services:
+            # Fallback: check if the user asked for a full unit name (e.g. web.service)
+            matching_services = [
+                svc for svc in discovered_services if svc.service_file.name == name
+            ]
+
+        if not matching_services:
+            available = [s.name for s in discovered_services]
             raise cappa.Exit(
-                f"Unknown target '{name}'. Available options: {self._get_available_options()}",
+                f"Unknown target '{name}'. Available options: {', '.join(available)}",
                 code=1,
             )
 
-        # Filter to only the requested units
-        units_to_show = {
-            filename: content
-            for filename, content in units.items()
-            if filename in resolved_names
+        # Context for rendering
+        context = {
+            "app_name": self.config.app_name,
+            "version": self.config.version,
+            "app_dir": self.config.app_dir(self.selected_host),
+            "user": self.selected_host.user,
         }
 
-        if not units_to_show:
-            self.output.warning(f"No units found for '{name}'")
-            return
-
-        # Display the units with separators
         separator = "[dim]" + "-" * 80 + "[/dim]"
         first = True
-        for filename, content in units_to_show.items():
+
+        for svc in matching_services:
+            # Render and show service file
             if not first:
                 self.output.output(f"\n{separator}\n")
-            self.output.info(f"[bold cyan]# {filename}[/bold cyan]")
+
+            content = safe_format(svc.service_file.read_text(), **context)
+            self.output.info(f"[bold cyan]# {svc.service_file.name}[/bold cyan]")
             self.output.output(content)
             first = False
+
+            # Render and show socket file
+            if svc.socket_file:
+                self.output.output(f"\n{separator}\n")
+                content = safe_format(svc.socket_file.read_text(), **context)
+                self.output.info(f"[bold cyan]# {svc.socket_file.name}[/bold cyan]")
+                self.output.output(content)
+
+            # Render and show timer file
+            if svc.timer_file:
+                self.output.output(f"\n{separator}\n")
+                content = safe_format(svc.timer_file.read_text(), **context)
+                self.output.info(f"[bold cyan]# {svc.timer_file.name}[/bold cyan]")
+                self.output.output(content)
+
+            # Show associated drop-ins
+            service_dropin_dir = (
+                self.config.local_config_dir / "systemd" / f"{svc.name}.service.d"
+            )
+            if svc.is_template:
+                service_dropin_dir = (
+                    self.config.local_config_dir / "systemd" / f"{svc.name}@.service.d"
+                )
+
+            if service_dropin_dir.exists():
+                for dropin in service_dropin_dir.glob("*.conf"):
+                    self.output.output(f"\n{separator}\n")
+                    content = safe_format(dropin.read_text(), **context)
+                    self.output.info(
+                        f"[bold cyan]# {service_dropin_dir.name}/{dropin.name}[/bold cyan]"
+                    )
+                    self.output.output(content)
+
+    def _get_available_options(self) -> str:
+        """Get list of available options for help text."""
+        options = ["env", "caddy", "units"]
+
+        discovered = self.config.discovered_services
+        if discovered:
+            options.extend([svc.name for svc in discovered])
+
+        return ", ".join(options)
 
 
 def _redact_secrets(env_content: str) -> str:

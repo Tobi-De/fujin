@@ -1,51 +1,60 @@
-"""Tests for show command - focused on display functionality.
-
-Note: _resolve_units is comprehensively tested in test_app.py (18 tests).
-These tests only verify show command uses it correctly.
-"""
-
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import cappa
 import msgspec
 import pytest
 
-from fujin.commands.show import Show, _redact_secrets
+from fujin.commands.show import Show
 from fujin.config import Config
 
 
 @pytest.fixture
-def base_config(minimal_config_dict, tmp_path):
-    """Base config for show tests with .env file."""
-    # Create .env file
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "DATABASE_URL=postgres://localhost/db\nSECRET_KEY=my-secret-key-123\n"
+def show_config(tmp_path, monkeypatch):
+    """Config fixture for show command tests."""
+    monkeypatch.chdir(tmp_path)
+
+    # Create .fujin directory structure
+    fujin_dir = Path(".fujin")
+    fujin_dir.mkdir()
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir()
+    (systemd_dir / "common.d").mkdir()
+
+    # Create dummy service files
+    (systemd_dir / "web.service").write_text(
+        "[Unit]\nDescription={app_name} web\n[Service]\nUser={user}"
+    )
+    (systemd_dir / "web.socket").write_text(
+        "[Socket]\nListenStream=/run/{app_name}/web.sock"
+    )
+    (systemd_dir / "worker.service").write_text("[Unit]\nDescription={app_name} worker")
+    (systemd_dir / "common.d" / "base.conf").write_text("[Service]\nRestart=always")
+
+    # Create Caddyfile
+    (fujin_dir / "Caddyfile").write_text(
+        "example.com {\n    reverse_proxy localhost:8000\n}"
     )
 
-    minimal_config_dict["processes"]["worker"] = {"command": "celery", "replicas": 2}
-    minimal_config_dict["hosts"][0]["envfile"] = str(env_file)
-    # No sites needed for env/units tests
+    # Create env file
+    (tmp_path / ".env.prod").write_text("SECRET_KEY=supersecret\nDEBUG=False")
 
-    return minimal_config_dict
-
-
-@pytest.fixture
-def config_without_sites(minimal_config_dict):
-    """Config without sites configured."""
-    # No sites = no webserver
-    return minimal_config_dict
-
-
-# ============================================================================
-# Show Available Options
-# ============================================================================
+    return {
+        "app": "testapp",
+        "version": "1.0.0",
+        "build_command": "echo build",
+        "installation_mode": "python-package",
+        "python_version": "3.11",
+        "distfile": "dist/app.whl",
+        "hosts": [{"address": "example.com", "user": "deploy", "envfile": ".env.prod"}],
+    }
 
 
-def test_show_without_name_displays_available_options(base_config):
-    """show with no name displays available options."""
-    config = msgspec.convert(base_config, type=Config)
+def test_show_lists_options_when_no_name(show_config):
+    """fujin show (without args) lists available options."""
+    config = msgspec.convert(show_config, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -54,19 +63,20 @@ def test_show_without_name_displays_available_options(base_config):
         show = Show(name=None)
         show()
 
-        # Should call output to show options
         assert mock_output.info.called
+        assert "Available options:" in mock_output.info.call_args[0][0]
         assert mock_output.output.called
+        options = mock_output.output.call_args[0][0]
+        assert "env" in options
+        assert "caddy" in options
+        assert "units" in options
+        assert "web" in options
+        assert "worker" in options
 
 
-# ============================================================================
-# Show Env
-# ============================================================================
-
-
-def test_show_env_redacts_secrets_by_default(base_config):
-    """show env redacts secret values by default."""
-    config = msgspec.convert(base_config, type=Config)
+def test_show_env_redacted(show_config):
+    """fujin show env redacts secrets by default."""
+    config = msgspec.convert(show_config, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -75,17 +85,16 @@ def test_show_env_redacts_secrets_by_default(base_config):
         show = Show(name="env", plain=False)
         show()
 
-        # Verify output was called with redacted content
-        # Get the actual argument passed to output()
-        assert mock_output.output.called
-        output_arg = mock_output.output.call_args[0][0]
-        assert "***REDACTED***" in output_arg
-        assert "my-secret-key-123" not in output_arg
+        # Check output
+        output_text = mock_output.output.call_args[0][0]
+        assert 'SECRET_KEY="***REDACTED***"' in output_text
+        assert "DEBUG=False" in output_text
+        assert mock_output.info.called  # Should show warning about redaction
 
 
-def test_show_env_with_plain_shows_actual_values(base_config):
-    """show env --plain shows actual secret values."""
-    config = msgspec.convert(base_config, type=Config)
+def test_show_env_plain(show_config):
+    """fujin show env --plain shows actual values."""
+    config = msgspec.convert(show_config, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -94,50 +103,14 @@ def test_show_env_with_plain_shows_actual_values(base_config):
         show = Show(name="env", plain=True)
         show()
 
-        # Verify output contains actual values
-        assert mock_output.output.called
-        output_arg = mock_output.output.call_args[0][0]
-        assert "postgres://localhost/db" in output_arg
-        assert "my-secret-key-123" in output_arg
-        assert "***REDACTED***" not in output_arg
+        output_text = mock_output.output.call_args[0][0]
+        assert "SECRET_KEY=supersecret" in output_text
+        assert "DEBUG=False" in output_text
 
 
-def test_show_env_without_env_file_shows_warning(tmp_path, monkeypatch):
-    """show env without env file configured shows warning."""
-    monkeypatch.chdir(tmp_path)
-
-    config_dict = {
-        "app": "testapp",
-        "version": "1.0.0",
-        "build_command": "echo building",
-        "installation_mode": "python-package",
-        "python_version": "3.11",
-        "distfile": "dist/testapp-{version}-py3-none-any.whl",
-        "processes": {"web": {"command": "gunicorn"}},
-        "hosts": [{"address": "example.com", "user": "deploy"}],
-    }
-
-    config = msgspec.convert(config_dict, type=Config)
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Show, "output", MagicMock()) as mock_output,
-    ):
-        show = Show(name="env")
-        show()
-
-        # Should show warning
-        mock_output.warning.assert_called()
-
-
-# ============================================================================
-# Show Caddy
-# ============================================================================
-
-
-def test_show_caddy_displays_caddyfile(config_with_sites):
-    """show caddy displays rendered Caddyfile."""
-    config = config_with_sites
+def test_show_caddy(show_config):
+    """fujin show caddy displays Caddyfile content."""
+    config = msgspec.convert(show_config, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -146,37 +119,14 @@ def test_show_caddy_displays_caddyfile(config_with_sites):
         show = Show(name="caddy")
         show()
 
-        # Verify Caddyfile content was displayed
-        assert mock_output.info.called
-        assert mock_output.output.called
-        # Check that output contains caddy-related content
-        output_calls = [str(call) for call in mock_output.output.call_args_list]
-        assert len(output_calls) > 0
+        output_text = mock_output.output.call_args[0][0]
+        assert "example.com {" in output_text
+        assert "reverse_proxy localhost:8000" in output_text
 
 
-def test_show_caddy_without_sites_shows_warning(config_without_sites):
-    """show caddy without sites configured shows warning."""
-    config = msgspec.convert(config_without_sites, type=Config)
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Show, "output", MagicMock()) as mock_output,
-    ):
-        show = Show(name="caddy")
-        show()
-
-        # Should show warning
-        mock_output.warning.assert_called_with("No sites configured")
-
-
-# ============================================================================
-# Show Units
-# ============================================================================
-
-
-def test_show_units_displays_all_systemd_units(base_config):
-    """show units displays all systemd unit files."""
-    config = msgspec.convert(base_config, type=Config)
+def test_show_units_lists_all_files(show_config):
+    """fujin show units displays all unit files."""
+    config = msgspec.convert(show_config, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -185,19 +135,17 @@ def test_show_units_displays_all_systemd_units(base_config):
         show = Show(name="units")
         show()
 
-        # Should display multiple units
-        assert mock_output.info.call_count >= 2  # At least web and worker
-        assert mock_output.output.call_count >= 2
+        # Should show headers for each file
+        headers = [call[0][0] for call in mock_output.info.call_args_list]
+        assert any("web.service" in h for h in headers)
+        assert any("web.socket" in h for h in headers)
+        assert any("worker.service" in h for h in headers)
+        assert any("common.d/base.conf" in h for h in headers)
 
 
-# ============================================================================
-# Show Specific Units (Light testing of _resolve_units integration)
-# ============================================================================
-
-
-def test_show_specific_unit_uses_resolve_units(base_config):
-    """show <process> uses _resolve_units with use_templates=True."""
-    config = msgspec.convert(base_config, type=Config)
+def test_show_specific_unit_renders_templates(show_config):
+    """fujin show web renders the service templates."""
+    config = msgspec.convert(show_config, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -206,83 +154,70 @@ def test_show_specific_unit_uses_resolve_units(base_config):
         show = Show(name="web")
         show()
 
-        # Should display the web unit
-        output_calls = [str(call) for call in mock_output.info.call_args_list]
-        assert any("testapp.service" in str(call) for call in output_calls)
+        # Capture all output calls
+        outputs = [call[0][0] for call in mock_output.output.call_args_list]
+        combined_output = "\n".join(outputs)
+
+        # Check rendering of variables
+        assert "Description=testapp web" in combined_output
+        assert "User=deploy" in combined_output
+        assert "ListenStream=/run/testapp/web.sock" in combined_output
 
 
-def test_show_specific_unit_with_replicas_shows_template(base_config):
-    """show <process> with replicas shows template unit."""
-    config = msgspec.convert(base_config, type=Config)
+def test_show_specific_unit_by_filename(show_config):
+    """fujin show web.service works (full filename)."""
+    config = msgspec.convert(show_config, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
         patch.object(Show, "output", MagicMock()) as mock_output,
     ):
-        show = Show(name="worker")
+        show = Show(name="web.service")
         show()
 
-        # Should display the worker template unit (not instances)
-        output_calls = [str(call) for call in mock_output.info.call_args_list]
-        assert any("testapp-worker@.service" in str(call) for call in output_calls)
+        outputs = [call[0][0] for call in mock_output.output.call_args_list]
+        combined_output = "\n".join(outputs)
+        assert "Description=testapp web" in combined_output
 
 
-def test_show_unknown_process_raises_error(base_config):
-    """show <invalid> raises error with available options."""
-    config = msgspec.convert(base_config, type=Config)
+def test_show_unknown_unit_raises_exit(show_config):
+    """fujin show unknown raises cappa.Exit."""
+    config = msgspec.convert(show_config, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
         patch.object(Show, "output", MagicMock()),
     ):
-        show = Show(name="invalid")
-
-        with pytest.raises(SystemExit) as exc_info:
+        show = Show(name="unknown_service")
+        with pytest.raises(cappa.Exit):
             show()
 
-        assert exc_info.value.code == 1
+
+def test_show_caddy_missing(show_config, tmp_path):
+    """fujin show caddy warns if Caddyfile is missing."""
+    (tmp_path / ".fujin" / "Caddyfile").unlink()
+    config = msgspec.convert(show_config, type=Config)
+
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch.object(Show, "output", MagicMock()) as mock_output,
+    ):
+        show = Show(name="caddy")
+        show()
+        assert mock_output.warning.called
+        assert "No Caddyfile found" in mock_output.warning.call_args[0][0]
 
 
-# ============================================================================
-# Redact Secrets Helper Function
-# ============================================================================
+def test_show_env_missing(show_config, tmp_path):
+    """fujin show env warns if envfile is missing/empty."""
+    # Empty the env file
+    (tmp_path / ".env.prod").write_text("")
+    config = msgspec.convert(show_config, type=Config)
 
-
-def test_redact_secrets_comprehensive():
-    """_redact_secrets handles all redaction scenarios correctly."""
-    env = """# This is a comment
-SECRET_KEY=my-very-long-secret-key
-SHORT=abc
-API_KEY="short"
-NOT_QUOTED=short
-
-NORMAL=value
-MALFORMED LINE
-ANOTHER=very-long-secret-key
-EMPTY=
-# Another comment"""
-
-    result = _redact_secrets(env)
-
-    # Long values are redacted
-    assert "***REDACTED***" in result
-    assert "my-very-long-secret-key" not in result
-    assert "very-long-secret-key" not in result
-
-    # Short values not redacted
-    assert "SHORT=abc" in result
-    assert "NOT_QUOTED=short" in result
-
-    # Quoted values are redacted regardless of length
-    assert 'API_KEY="***REDACTED***"' in result
-
-    # Comments and empty lines preserved
-    assert "# This is a comment" in result
-    assert "# Another comment" in result
-    assert "\n\n" in result or result.count("\n") >= 10
-
-    # Malformed lines preserved
-    assert "MALFORMED LINE" in result
-
-    # Empty values preserved
-    assert "EMPTY=" in result
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch.object(Show, "output", MagicMock()) as mock_output,
+    ):
+        show = Show(name="env")
+        show()
+        assert mock_output.warning.called
