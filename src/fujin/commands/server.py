@@ -56,9 +56,8 @@ class Server(BaseCommand):
                     "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool update-shell"
                 )
             conn.run("uv tool install fastfetch-bin-edge")
-            if self.config.sites:
+            if self.config.caddyfile_exists:
                 self.output.info("Setting up Caddy web server...")
-
                 _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
                 if result_ok:
                     self.output.warning("Caddy is already installed.")
