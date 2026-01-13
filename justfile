@@ -67,14 +67,6 @@ download-pocketbase:
 @test-integration *ARGS:
     uv run pytest tests/integration {{ ARGS }}
 
-# Update inline snapshots
-@test-fix:
-    just test --inline-snapshot=fix
-
-# Review inline snapshots
-@test-review:
-    just test --inline-snapshot=review
-
 # -------------------------------------------------------------------------
 # RELEASE UTILITIES
 #---------------------------------------------------------------------------

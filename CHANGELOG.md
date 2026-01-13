@@ -15,6 +15,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Unify systemd units discovery
 - Rewrite to use systemd units and Caddyfile directly
 
+### 🧪 Testing
+
+- Fix integration tests
+
 ## [0.17.2] - 2026-01-11
 
 ### 🐛 Bug Fixes
