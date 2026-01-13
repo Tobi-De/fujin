@@ -26,7 +26,7 @@ timer = { on_calendar = "*:*:00" }
 
 [[sites]]
 domains = ["book.13.204.64.39.nip.io"]
-routes = { "/static/*" = { static = "{app_dir}/static/" }, "/" = "web" }
+routes = { "/static/*" = { static = "{app_dir}/static/" }, "" = "web" }
 
 [[hosts]]
 name = "default"

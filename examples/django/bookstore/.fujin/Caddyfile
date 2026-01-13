@@ -10,7 +10,7 @@ book.13.204.64.39.nip.io {
     }
 
     # Proxy to web service
-    handle {
+    handle  {
         reverse_proxy unix//run/bookstore/bookstore.sock
     }
 }
