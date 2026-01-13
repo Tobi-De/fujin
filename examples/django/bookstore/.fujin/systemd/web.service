@@ -1,0 +1,35 @@
+# Systemd service for web
+# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.service.html
+
+[Unit]
+Description={app_name} web
+After=network.target
+# Add dependencies if needed:
+# Requires=postgresql.service
+# After=postgresql.service
+
+[Service]
+Type=simple
+User={user}
+
+# ExecStartPre={app_dir}/bookstore migrate && bookstore collectstatic --no-input && sudo mkdir -p /var/www/bookstore/static/ && sudo rsync  -a --delete staticfiles/ /var/www/bookstore/static/
+ExecStartPre={app_dir}/.venv/bin/bookstore migrate
+ExecStartPre={app_dir}/.venv/bin/bookstore collectstatic --no-input
+ExecStart={app_dir}/.venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Resource limits (uncomment to enable)
+# MemoryMax=512M
+# CPUQuota=50%
+
+# Security hardening (uncomment to enable)
+# NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=strict
+# ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

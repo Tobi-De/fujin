@@ -1,0 +1,44 @@
+app = "bookstore"
+requirements = "requirements.txt"
+python_version = "3.13"
+versions_to_keep = 2
+build_command = "uv build && uv pip compile pyproject.toml -o requirements.txt"
+release_command = "bookstore migrate && bookstore collectstatic --no-input && sudo mkdir -p /var/www/bookstore/static/ && sudo rsync  -a --delete staticfiles/ /var/www/bookstore/static/"
+distfile = "./../../../dist/bookstore-{version}-py3-none-any.whl"
+installation_mode = "python-package"
+
+[aliases]
+console = "app exec -i shell"
+dbconsole = "app exec -i dbshell"
+shell = "server exec --appenv -i bash"
+
+[processes.web]
+command = ".venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -"
+listen = "unix//run/bookstore/bookstore.sock"
+
+[processes.worker]
+command = ".venv/bin/bookstore db_worker"
+replicas = 2
+
+[processes.health]
+command = ".venv/bin/bookstore health"
+timer = { on_calendar = "*:*:00" }
+
+[[sites]]
+domains = ["book.13.204.64.39.nip.io"]
+routes = { "/static/*" = { static = "{app_dir}/static/" }, "/" = "web" }
+
+[[hosts]]
+name = "default"
+address = "13.204.64.39"
+envfile = ".env.prod"
+user = "ubuntu"
+key_filename = "/var/home/tobi/bluefin.pem"
+
+[[hosts]]
+name = "vagrant"
+address = "localhost"
+envfile = ".env.prod"
+user = "vagrant"
+key_filename = "../../../.vagrant/machines/default/virtualbox/private_key"
+port = 2222
