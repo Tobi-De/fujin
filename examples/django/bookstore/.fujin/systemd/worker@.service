@@ -1,0 +1,17 @@
+# Worker service
+# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.service.html
+
+[Unit]
+Description={app_name} worker server%i
+After=network.target
+
+[Service]
+Type=simple
+User={user}
+
+# ExecStartPre={app_dir}/bookstore migrate --database tasks_db
+# Main command
+ExecStart={app_dir}/.venv/bin/bookstore db_worker
+
+[Install]
+WantedBy=multi-user.target
