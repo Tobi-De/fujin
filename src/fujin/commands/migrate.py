@@ -9,13 +9,11 @@ import cappa
 
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
-from fujin.templates import BASE_DROPIN_TEMPLATE
 from fujin.templates import CADDY_HANDLE_PROXY
 from fujin.templates import CADDY_HANDLE_STATIC
 from fujin.templates import CADDYFILE_HEADER
-from fujin.templates import SERVICE_TEMPLATE
-from fujin.templates import SOCKET_TEMPLATE
-from fujin.templates import TIMER_TEMPLATE
+from fujin.templates import NEW_DROPIN_TEMPLATE
+from fujin.templates import NEW_SERVICE_TEMPLATE
 
 
 @cappa.command(help="Migrate fujin.toml and generate .fujin/ directory structure")
@@ -27,7 +25,7 @@ class Migrate(BaseCommand):
             long="--backup",
             help="Create backup of original file (fujin.toml.backup)",
         ),
-    ] = True
+    ] = False
     dry_run: Annotated[
         bool,
         cappa.Arg(
@@ -268,39 +266,55 @@ class Migrate(BaseCommand):
         """Generate systemd service file content."""
         instance_suffix = "%i" if replicas > 1 else ""
 
-        # Determine service type
-        service_type = "notify" if socket else "simple"
+        service_content = NEW_SERVICE_TEMPLATE.format(name=name)
 
-        # Build ExecStartPre
-        exec_start_pre = ""
-        if release_command:
-            exec_start_pre = f"""# Run release command before starting
-ExecStartPre={{app_dir}}/{release_command}
-"""
-        exec_start = f"{{app_dir}}/{command}"
-        return SERVICE_TEMPLATE.format(
-            description=f"{name.capitalize()} service",
-            app_name="{app_name}",
-            description_suffix=f"{name} server{instance_suffix}",
-            service_type=service_type,
-            user="{user}",
-            exec_start_pre=exec_start_pre,
-            exec_start=exec_start,
+        # Customize ExecStart
+        service_content = service_content.replace(
+            f"ExecStart={{app_dir}}/.venv/bin/python -m myapp.{name}",
+            f"ExecStart={{app_dir}}/{command}",
         )
+
+        # Add ExecStartPre if release_command exists
+        if release_command:
+            exec_start_pre = f"# Run release command before starting\nExecStartPre={{app_dir}}/{release_command}\n\n"
+            service_content = service_content.replace(
+                "# Main command - adjust to match your application\n", exec_start_pre
+            )
+
+        # # Change Type to notify for socket activation
+        # if socket:
+        #     service_content = service_content.replace("Type=simple", "Type=notify")
+
+        # Handle instance suffix for templated units
+        if replicas > 1:
+            service_content = service_content.replace(
+                f"Description={{app_name}} {name}",
+                f"Description={{app_name}} {name} {instance_suffix}",
+            )
+
+        return service_content
 
     def _generate_socket_file(self, name: str, is_template: bool) -> str:
         """Generate systemd socket file content."""
         instance_suffix = "%i" if is_template else ""
-        template_suffix = "@" if is_template else ""
 
-        return SOCKET_TEMPLATE.format(
-            name=name,
-            app_name="{app_name}",
-            instance_suffix=instance_suffix,
-            template_suffix=template_suffix,
-            listen_stream=f"/run/{{app_name}}/{name}{instance_suffix}.sock",
-            user="{user}",
-        )
+        socket_content = NEW_SOCKET_TEMPLATE.format(name=name)
+
+        # Handle templated units
+        if is_template:
+            socket_content = socket_content.replace(
+                f"Description={{{{app_name}}}} {name} socket",
+                f"Description={{{{app_name}}}} {name} socket {instance_suffix}",
+            )
+            socket_content = socket_content.replace(
+                f"PartOf={name}.service", f"PartOf={name}@.service"
+            )
+            socket_content = socket_content.replace(
+                f"ListenStream=/run/{{{{app_name}}}}/{name}.sock",
+                f"ListenStream=/run/{{{{app_name}}}}/{name}{instance_suffix}.sock",
+            )
+
+        return socket_content
 
     def _generate_timer_file(
         self, name: str, timer_config: dict, is_template: bool
@@ -337,7 +351,7 @@ ExecStartPre={{app_dir}}/{release_command}
 
     def _generate_base_conf(self, app_name: str) -> str:
         """Generate common.d/base.conf content."""
-        return BASE_DROPIN_TEMPLATE.format(app_name=app_name, app_dir="{app_dir}")
+        return NEW_DROPIN_TEMPLATE
 
     def _generate_caddyfile(self, sites: list, processes: dict) -> str:
         """Generate Caddyfile from sites configuration."""
@@ -412,3 +426,33 @@ ExecStartPre={{app_dir}}/{release_command}
         content += "}\n"
 
         return content
+
+
+TIMER_TEMPLATE = """# Timer for {name} service
+# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.timer.html
+
+[Unit]
+Description={app_name} {name} timer{instance_suffix}
+
+[Timer]
+{timer_config}
+[Install]
+WantedBy=timers.target
+"""
+
+NEW_SOCKET_TEMPLATE = """# Systemd socket activation for {name}
+# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.socket.html
+
+[Unit]
+Description={{app_name}} {name} socket
+PartOf={name}.service
+
+[Socket]
+ListenStream=/run/{{app_name}}/{name}.sock
+SocketMode=0660
+SocketUser=www-data
+SocketGroup=www-data
+
+[Install]
+WantedBy=sockets.target
+"""

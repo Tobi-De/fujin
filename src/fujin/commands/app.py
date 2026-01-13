@@ -426,7 +426,7 @@ class App(BaseCommand):
                 self.output.warning("No services found")
                 return
 
-            conn.run(f"sudo systemctl cat {' '.join(names)}", pty=True)
+            conn.run(f"sudo systemctl cat {' '.join(names)} --no-pager", pty=True)
 
     def _get_available_options(self) -> str:
         """Get formatted, colored list of available service and unit options."""

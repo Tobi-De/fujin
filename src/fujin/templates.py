@@ -1,25 +1,6 @@
 from __future__ import annotations
 
-# Systemd Templates
-SERVICE_TEMPLATE = """# {description}
-# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.service.html
-
-[Unit]
-Description={app_name} {description_suffix}
-After=network.target
-
-[Service]
-Type={service_type}
-User={user}
-{exec_start_pre}
-# Main command
-ExecStart={exec_start}
-
-[Install]
-WantedBy=multi-user.target
-"""
-
-# Template for user-created services (fujin new service)
+# Systemd Templates for user-created services (fujin new service)
 NEW_SERVICE_TEMPLATE = """# Systemd service for {name}
 # Learn more: https://www.freedesktop.org/software/systemd/man/systemd.service.html
 
@@ -57,66 +38,6 @@ RestartSec=5s
 WantedBy=multi-user.target
 """
 
-SOCKET_TEMPLATE = """# Socket activation for {name} service
-# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.socket.html
-
-[Unit]
-Description={app_name} {name} socket{instance_suffix}
-PartOf={name}{template_suffix}.service
-
-[Socket]
-ListenStream={listen_stream}
-SocketMode=0660
-SocketUser=www-data
-SocketGroup=www-data
-
-[Install]
-WantedBy=sockets.target
-"""
-
-# Template for user-created sockets (fujin new service --socket)
-NEW_SOCKET_TEMPLATE = """# Systemd socket activation for {name}
-# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.socket.html
-# Socket activation allows systemd to start your service on-demand when a connection arrives
-
-[Unit]
-Description={{app_name}} {name} socket
-# The service will be started automatically when connections arrive
-PartOf={name}.service
-
-[Socket]
-# Unix socket path
-ListenStream=/run/{{app_name}}/{name}.sock
-SocketMode=0660
-SocketUser=www-data
-SocketGroup=www-data
-
-# For TCP sockets, use:
-# ListenStream=8000
-
-# For multiple addresses:
-# ListenStream=127.0.0.1:8000
-# ListenStream=[::1]:8000
-
-# Socket options
-# Accept=false  # false = one service instance handles all connections
-# MaxConnections=64
-
-[Install]
-WantedBy=sockets.target
-"""
-
-TIMER_TEMPLATE = """# Timer for {name} service
-# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.timer.html
-
-[Unit]
-Description={app_name} {name} timer{instance_suffix}
-
-[Timer]
-{timer_config}
-[Install]
-WantedBy=timers.target
-"""
 
 # Template for user-created timers (fujin new timer)
 NEW_TIMER_SERVICE_TEMPLATE = """# Systemd service for {name} (scheduled task)
@@ -166,25 +87,6 @@ Persistent=true
 
 [Install]
 WantedBy=timers.target
-"""
-
-BASE_DROPIN_TEMPLATE = """# Common configuration for all {app_name} services
-# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.exec.html
-
-[Service]
-# Restart policy for all services
-Restart=on-failure
-RestartSec=5s
-
-# Standard output/error handling
-StandardOutput=journal
-StandardError=journal
-
-# Working directory
-WorkingDirectory={app_dir}
-
-# Load environment variables
-EnvironmentFile={app_dir}/.env
 """
 
 # Template for user-created dropins (fujin new dropin)

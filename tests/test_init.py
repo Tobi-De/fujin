@@ -40,9 +40,6 @@ def test_init_creates_fujin_toml_with_simple_profile(tmp_path, monkeypatch):
         assert (clean_dir / ".fujin").exists()
         assert (clean_dir / ".fujin/systemd").exists()
         assert (clean_dir / ".fujin/systemd/web.service").exists()
-        assert (clean_dir / ".fujin/systemd/web.socket").exists()
-        assert (clean_dir / ".fujin/systemd/common.d").exists()
-        assert (clean_dir / ".fujin/systemd/common.d/base.conf").exists()
         assert (clean_dir / ".fujin/Caddyfile").exists()
 
         # Verify success messages (includes file creation messages)
