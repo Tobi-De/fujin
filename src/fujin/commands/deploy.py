@@ -112,23 +112,29 @@ class Deploy(BaseCommand):
             systemd_bundle = bundle_dir / "systemd"
             systemd_bundle.mkdir()
 
+            # Track unresolved variables across all files
+            all_unresolved = set()
+
             for du in self.config.deployed_units:
                 # Validate and resolve main service file
                 service_content = du.service_file.read_text()
-                resolved_content = safe_format(service_content, **context)
+                resolved_content, unresolved = safe_format(service_content, **context)
+                all_unresolved.update(unresolved)
 
                 (systemd_bundle / du.service_file.name).write_text(resolved_content)
 
                 # Process and add socket file if exists
                 if du.socket_file:
                     socket_content = du.socket_file.read_text()
-                    resolved_socket = safe_format(socket_content, **context)
+                    resolved_socket, unresolved = safe_format(socket_content, **context)
+                    all_unresolved.update(unresolved)
                     (systemd_bundle / du.socket_file.name).write_text(resolved_socket)
 
                 # Process and add timer file if exists
                 if du.timer_file:
                     timer_content = du.timer_file.read_text()
-                    resolved_timer = safe_format(timer_content, **context)
+                    resolved_timer, unresolved = safe_format(timer_content, **context)
+                    all_unresolved.update(unresolved)
                     (systemd_bundle / du.timer_file.name).write_text(resolved_timer)
 
             # Build installer metadata from deployed units
@@ -155,7 +161,8 @@ class Deploy(BaseCommand):
                 common_bundle.mkdir(exist_ok=True)
                 for dropin in common_dir.glob("*.conf"):
                     dropin_content = dropin.read_text()
-                    resolved_dropin = safe_format(dropin_content, **context)
+                    resolved_dropin, unresolved = safe_format(dropin_content, **context)
+                    all_unresolved.update(unresolved)
                     (common_bundle / dropin.name).write_text(resolved_dropin)
 
             # Handle service-specific dropins
@@ -166,14 +173,26 @@ class Deploy(BaseCommand):
                 bundle_dropin_dir.mkdir()
                 for dropin in service_dropin_dir.glob("*.conf"):
                     dropin_content = dropin.read_text()
-                    resolved_dropin = safe_format(dropin_content, **context)
+                    resolved_dropin, unresolved = safe_format(dropin_content, **context)
+                    all_unresolved.update(unresolved)
                     (bundle_dropin_dir / dropin.name).write_text(resolved_dropin)
 
             if self.config.caddyfile_exists:
                 logger.debug("Resolving and bundling Caddyfile")
                 caddyfile_content = self.config.caddyfile_path.read_text()
-                resolved_caddyfile = safe_format(caddyfile_content, **context)
+                resolved_caddyfile, unresolved = safe_format(
+                    caddyfile_content, **context
+                )
+                all_unresolved.update(unresolved)
                 (bundle_dir / "Caddyfile").write_text(resolved_caddyfile)
+
+            # Warn about unresolved variables
+            if all_unresolved:
+                self.output.warning(
+                    f"Found unresolved variables in configuration files: {', '.join(sorted(all_unresolved))}\n"
+                    f"Available variables: {', '.join(sorted(context.keys()))}\n"
+                    "These will be left as-is (e.g., {variable_name}) in deployed files."
+                )
 
             installer_config = {
                 "app_name": self.config.app_name,
