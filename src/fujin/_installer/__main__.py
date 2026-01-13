@@ -164,6 +164,54 @@ export PATH="{app_dir}:$PATH"
                 print(f"→ Removing stale file: {file_path}")
                 run(f"sudo rm -f {file_path}")
 
+    log("Cleaning up stale dropin directories...")
+    # Build set of dropin files that should exist after deployment
+    expected_dropins = set()
+
+    # Common dropins (applied to all services)
+    common_dir = systemd_dir / "common.d"
+    if common_dir.exists():
+        common_dropin_names = {f.name for f in common_dir.glob("*.conf")}
+        for unit in config.deployed_units:
+            deployed_service = unit["template_service_name"]
+            for dropin_name in common_dropin_names:
+                expected_dropins.add(f"{deployed_service}.d/{dropin_name}")
+
+    # Service-specific dropins
+    for service_dropin_dir_path in systemd_dir.glob("*.service.d"):
+        service_file_name = service_dropin_dir_path.name.removesuffix(".d")
+        # Find matching unit
+        for unit in config.deployed_units:
+            if unit["service_file"] == service_file_name:
+                deployed_service = unit["template_service_name"]
+                for dropin_path in service_dropin_dir_path.glob("*.conf"):
+                    expected_dropins.add(f"{deployed_service}.d/{dropin_path.name}")
+                break
+
+    # Remove stale dropin files and empty directories
+    for dropin_dir in SYSTEMD_SYSTEM_DIR.glob(f"{config.app_name}*.d"):
+        if dropin_dir.is_dir():
+            service_name = dropin_dir.name
+            for dropin_file in dropin_dir.glob("*.conf"):
+                dropin_path_str = f"{service_name}/{dropin_file.name}"
+                if dropin_path_str not in expected_dropins:
+                    print(f"→ Removing stale dropin: {dropin_file}")
+                    run(f"sudo rm -f {dropin_file}")
+
+            # Remove directory if empty
+            try:
+                # Check if directory is empty (will fail if not)
+                result = run(
+                    f'[ -z "$(ls -A {dropin_dir})" ] && echo empty || echo not_empty',
+                    capture_output=True,
+                    text=True,
+                )
+                if "empty" in result.stdout:
+                    print(f"→ Removing empty dropin directory: {dropin_dir}")
+                    run(f"sudo rmdir {dropin_dir}")
+            except subprocess.CalledProcessError:
+                pass  # Directory not empty, keep it
+
     log("Installing new service files...")
     for unit in config.deployed_units:
         # Copy main service file

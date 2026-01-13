@@ -336,3 +336,35 @@ def test_uninstall_with_webserver_removes_caddy_config(
         all_cmds = " ".join(calls)
         assert f"rm -f {python_package_config.caddy_config_path}" in all_cmds
         assert "systemctl reload caddy" in all_cmds
+
+
+# ============================================================================
+# Install - Dropin Cleanup
+# ============================================================================
+
+
+def test_install_has_dropin_cleanup_logic(bundle_dir, python_package_config):
+    """Install includes dropin cleanup logic in the execution flow."""
+    # Add a dropin to bundle so the cleanup code executes
+    common_dir = bundle_dir / "systemd" / "common.d"
+    common_dir.mkdir(parents=True)
+    (common_dir / "limits.conf").write_text("[Service]\nLimitNOFILE=65536\n")
+
+    log_messages = []
+
+    def log_capture(msg):
+        log_messages.append(msg)
+
+    def run_side_effect(cmd, **kwargs):
+        if "list-unit-files" in cmd:
+            return MagicMock(stdout="", returncode=0)
+        return MagicMock(returncode=0, stdout="")
+
+    with (
+        patch("fujin._installer.__main__.run", side_effect=run_side_effect),
+        patch("fujin._installer.__main__.log", side_effect=log_capture),
+    ):
+        install(python_package_config, bundle_dir)
+
+        # Verify dropin cleanup step is logged
+        assert any("Cleaning up stale dropin" in msg for msg in log_messages)
