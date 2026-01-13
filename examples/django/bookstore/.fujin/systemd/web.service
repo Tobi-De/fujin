@@ -11,10 +11,12 @@ After=network.target
 [Service]
 Type=simple
 User={user}
+WorkingDirectory={app_dir}
+EnvironmentFile={app_dir}/.env
 
+# Run release command before starting
 # ExecStartPre={app_dir}/bookstore migrate && bookstore collectstatic --no-input && sudo mkdir -p /var/www/bookstore/static/ && sudo rsync  -a --delete staticfiles/ /var/www/bookstore/static/
 ExecStartPre={app_dir}/.venv/bin/bookstore migrate
-ExecStartPre={app_dir}/.venv/bin/bookstore collectstatic --no-input
 ExecStart={app_dir}/.venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -
 
 # Restart policy

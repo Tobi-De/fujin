@@ -9,7 +9,6 @@ import cappa
 from fujin.commands import BaseCommand
 from fujin.templates import NEW_DROPIN_TEMPLATE
 from fujin.templates import NEW_SERVICE_TEMPLATE
-from fujin.templates import NEW_SOCKET_TEMPLATE
 from fujin.templates import NEW_TIMER_SERVICE_TEMPLATE
 from fujin.templates import NEW_TIMER_TEMPLATE
 
@@ -19,7 +18,6 @@ class New(BaseCommand):
     """
     Examples:
       fujin new service worker          Create a new service file
-      fujin new service web --socket    Create service with socket activation
       fujin new timer cleanup           Create a scheduled task
       fujin new dropin resources        Create common dropin for all services
       fujin new dropin --service web limits  Create dropin for specific service
@@ -31,13 +29,6 @@ class New(BaseCommand):
         name: Annotated[
             str, cappa.Arg(help="Name of the service (e.g., 'worker', 'web')")
         ],
-        socket: Annotated[
-            bool,
-            cappa.Arg(
-                long="--socket",
-                help="Create socket activation unit alongside service",
-            ),
-        ] = False,
     ):
         systemd_dir = Path(".fujin/systemd")
         if not systemd_dir.exists():
@@ -53,24 +44,11 @@ class New(BaseCommand):
         service_file.write_text(service_content)
         self.output.success(f"Created {service_file}")
 
-        if socket:
-            socket_file = systemd_dir / f"{name}.socket"
-            socket_content = NEW_SOCKET_TEMPLATE.format(name=name)
-            socket_file.write_text(socket_content)
-            self.output.success(f"Created {socket_file}")
-
-            self.output.info(
-                f"\nNext steps:\n"
-                f"  1. Edit {service_file} to configure your service\n"
-                f"  2. Edit {socket_file} to configure socket activation\n"
-                f"  3. Deploy: fujin deploy"
-            )
-        else:
-            self.output.info(
-                f"\nNext steps:\n"
-                f"  1. Edit {service_file} to configure your service\n"
-                f"  2. Deploy: fujin deploy"
-            )
+        self.output.info(
+            f"\nNext steps:\n"
+            f"  1. Edit {service_file} to configure your service\n"
+            f"  2. Deploy: fujin deploy"
+        )
 
     @cappa.command(help="Create a new systemd timer and service")
     def timer(

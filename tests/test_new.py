@@ -28,23 +28,6 @@ def test_new_service_creates_file(tmp_path, monkeypatch, new_command):
     assert "[Service]" in content
 
 
-def test_new_service_with_socket_creates_files(tmp_path, monkeypatch, new_command):
-    """new service --socket creates service and socket files."""
-    monkeypatch.chdir(tmp_path)
-
-    new_command.service(name="web", socket=True)
-
-    service_file = tmp_path / ".fujin/systemd/web.service"
-    socket_file = tmp_path / ".fujin/systemd/web.socket"
-
-    assert service_file.exists()
-    assert socket_file.exists()
-
-    socket_content = socket_file.read_text()
-    assert "[Socket]" in socket_content
-    assert "ListenStream=/run/{app_name}/web.sock" in socket_content
-
-
 def test_new_service_exists_error(tmp_path, monkeypatch, new_command):
     """new service errors if file already exists."""
     monkeypatch.chdir(tmp_path)

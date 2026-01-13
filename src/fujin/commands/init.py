@@ -10,12 +10,10 @@ import tomli_w
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 from fujin.config import tomllib
-from fujin.templates import BASE_DROPIN_TEMPLATE
 from fujin.templates import CADDY_HANDLE_PROXY
 from fujin.templates import CADDY_HANDLE_STATIC
 from fujin.templates import CADDYFILE_HEADER
-from fujin.templates import SERVICE_TEMPLATE
-from fujin.templates import SOCKET_TEMPLATE
+from fujin.templates import NEW_SERVICE_TEMPLATE
 
 
 @cappa.command(help="Initialize a new fujin.toml configuration file")
@@ -113,18 +111,6 @@ class Init(BaseCommand):
 
         return config
 
-    def _create_common_dropins(self, systemd_dir: Path, app_name: str):
-        """Create common.d/ directory with base drop-in files."""
-        common_dir = systemd_dir / "common.d"
-        common_dir.mkdir(parents=True, exist_ok=True)
-
-        # Base configuration drop-in
-        base_conf = common_dir / "base.conf"
-        base_conf.write_text(
-            BASE_DROPIN_TEMPLATE.format(app_name=app_name, app_dir="{app_dir}")
-        )
-        self.output.success(f"  Created {base_conf}")
-
     def _create_caddyfile(self, fujin_dir: Path, app_name: str, routes: dict):
         """Create Caddyfile with given routes."""
         caddyfile_content = CADDYFILE_HEADER.format(
@@ -141,7 +127,7 @@ class Init(BaseCommand):
             else:
                 # Reverse proxy to service
                 if target == "web":
-                    upstream = f"unix//run/{{app_name}}/web.sock"
+                    upstream = f"unix//run/{{app_name}}.sock"
                 else:
                     upstream = "localhost:8000"
 
@@ -159,45 +145,21 @@ class Init(BaseCommand):
         self.output.success(f"  Created {caddyfile}")
 
     def _generate_simple(self, app_name: str, fujin_dir: Path):
-        """Generate simple profile: web service with socket activation."""
+        """Generate simple profile: web service."""
         systemd_dir = fujin_dir / "systemd"
         systemd_dir.mkdir(parents=True, exist_ok=True)
 
-        # Web service with socket activation
+        # Web service
         web_service = systemd_dir / "web.service"
-        web_service.write_text(
-            SERVICE_TEMPLATE.format(
-                description=f"Web service for {app_name}",
-                app_name="{app_name}",
-                description_suffix="web server",
-                service_type="notify",
-                user="{user}",
-                exec_start_pre="",
-                exec_start="{app_dir}/.venv/bin/gunicorn "
-                + app_name
-                + ".wsgi:application --bind unix:/run/{app_name}/web.sock",
-            )
+        service_content = NEW_SERVICE_TEMPLATE.format(name="web")
+        # Customize ExecStart for gunicorn
+        service_content = service_content.replace(
+            "ExecStart={app_dir}/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
         )
+        web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
-        # Socket file
-        web_socket = systemd_dir / "web.socket"
-        web_socket.write_text(
-            SOCKET_TEMPLATE.format(
-                name="web",
-                app_name="{app_name}",
-                instance_suffix="",
-                template_suffix="",
-                listen_stream="/run/{app_name}/web.sock",
-                user="{user}",
-            )
-        )
-        self.output.success(f"  Created {web_socket}")
-
-        # Common drop-ins
-        self._create_common_dropins(systemd_dir, app_name)
-
-        # Caddyfile
         self._create_caddyfile(fujin_dir, app_name, {"/*": "web"})
 
     def _generate_django(self, app_name: str, fujin_dir: Path):
@@ -205,52 +167,34 @@ class Init(BaseCommand):
         systemd_dir = fujin_dir / "systemd"
         systemd_dir.mkdir(parents=True, exist_ok=True)
 
-        exec_start_pre = (
-            f"ExecStartPre={{app_dir}}/.venv/bin/{app_name} migrate\n"
-            f"ExecStartPre={{app_dir}}/.venv/bin/{app_name} collectstatic --no-input\n"
-            f"ExecStartPre=/bin/bash -c 'sudo mkdir -p /var/www/{{app_name}}/static/ && sudo rsync -a --delete staticfiles/ /var/www/{{app_name}}/static/'\n"
-        )
-
         # Web service with pre-start migrations
         web_service = systemd_dir / "web.service"
-        web_service.write_text(
-            SERVICE_TEMPLATE.format(
-                description=f"Django web service for {app_name}",
-                app_name="{app_name}",
-                description_suffix="Django web server",
-                service_type="notify",
-                user="{user}",
-                exec_start_pre=exec_start_pre,
-                exec_start="{app_dir}/.venv/bin/gunicorn "
-                + app_name
-                + ".wsgi:application --bind unix:/run/{app_name}/web.sock",
-            )
+        service_content = NEW_SERVICE_TEMPLATE.format(name="web")
+
+        # Add ExecStartPre for migrations and collectstatic
+        exec_start_pre_lines = (
+            f"# Run migrations and collect static files before starting\n"
+            f"ExecStartPre={{app_dir}}/.venv/bin/{app_name} migrate\n"
+            f"ExecStartPre={{app_dir}}/.venv/bin/{app_name} collectstatic --no-input\n"
+            f"ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/ {{app_dir}}/staticfiles/'\n"
         )
+        service_content = service_content.replace(
+            "# Main command - adjust to match your application\n", exec_start_pre_lines
+        )
+
+        # Customize ExecStart for gunicorn
+        service_content = service_content.replace(
+            "ExecStart={app_dir}/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
+        )
+        web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
-        # Socket file
-        web_socket = systemd_dir / "web.socket"
-        web_socket.write_text(
-            SOCKET_TEMPLATE.format(
-                name="web",
-                app_name="{app_name}",
-                instance_suffix="",
-                template_suffix="",
-                listen_stream="/run/{app_name}/web.sock",
-                user="{user}",
-            )
-        )
-        self.output.success(f"  Created {web_socket}")
-
-        # Common drop-ins
-        self._create_common_dropins(systemd_dir, app_name)
-
-        # Caddyfile with static file serving
         self._create_caddyfile(
             fujin_dir,
             app_name,
             {
-                "/static/*": {"static": f"/var/www/{app_name}/static/"},
+                "/static/*": {"static": f"{{app_dir}}/staticfiles/"},
                 "/*": "web",
             },
         )
@@ -262,38 +206,34 @@ class Init(BaseCommand):
 
         # Web service
         web_service = systemd_dir / "web.service"
-        web_service.write_text(
-            SERVICE_TEMPLATE.format(
-                description=f"Falco web service for {app_name}",
-                app_name="{app_name}",
-                description_suffix="Falco web server",
-                service_type="simple",
-                user="{user}",
-                exec_start_pre=f"ExecStartPre={{app_dir}}/.venv/bin/{app_name} setup\n",
-                exec_start=f"{{app_dir}}/.venv/bin/{app_name} prodserver",
-            )
+        service_content = NEW_SERVICE_TEMPLATE.format(name="web")
+
+        # Add ExecStartPre for setup
+        service_content = service_content.replace(
+            "# Main command - adjust to match your application\n",
+            f"# Run setup before starting\nExecStartPre={{app_dir}}/.venv/bin/{app_name} setup\n\n",
         )
+
+        # Customize ExecStart for Falco
+        service_content = service_content.replace(
+            "ExecStart={app_dir}/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/.venv/bin/{app_name} prodserver",
+        )
+        web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
         # Worker service
         worker_service = systemd_dir / "worker.service"
-        worker_service.write_text(
-            SERVICE_TEMPLATE.format(
-                description=f"Falco worker service for {app_name}",
-                app_name="{app_name}",
-                description_suffix="Falco database worker",
-                service_type="simple",
-                user="{user}",
-                exec_start_pre="",
-                exec_start=f"{{app_dir}}/.venv/bin/{app_name} db_worker",
-            )
+        worker_content = NEW_SERVICE_TEMPLATE.format(name="worker")
+
+        # Customize ExecStart for worker
+        worker_content = worker_content.replace(
+            "ExecStart={app_dir}/.venv/bin/python -m myapp.worker",
+            f"ExecStart={{app_dir}}/.venv/bin/{app_name} db_worker",
         )
+        worker_service.write_text(worker_content)
         self.output.success(f"  Created {worker_service}")
 
-        # Common drop-ins
-        self._create_common_dropins(systemd_dir, app_name)
-
-        # Caddyfile
         self._create_caddyfile(fujin_dir, app_name, {"/*": "web"})
 
     def _generate_binary(self, app_name: str, fujin_dir: Path):
@@ -303,21 +243,20 @@ class Init(BaseCommand):
 
         # Web service for binary
         web_service = systemd_dir / "web.service"
-        web_service.write_text(
-            SERVICE_TEMPLATE.format(
-                description=f"Binary web service for {app_name}",
-                app_name="{app_name}",
-                description_suffix="web server (binary)",
-                service_type="simple",
-                user="{user}",
-                exec_start_pre=f"ExecStartPre={{app_dir}}/{app_name} migrate\n",
-                exec_start=f"{{app_dir}}/{app_name} prodserver",
-            )
+        service_content = NEW_SERVICE_TEMPLATE.format(name="web")
+
+        # Add ExecStartPre for migrations
+        service_content = service_content.replace(
+            "# Main command - adjust to match your application\n",
+            f"# Run migrations before starting\nExecStartPre={{app_dir}}/{app_name} migrate\n\n",
         )
+
+        # Customize ExecStart for binary (no .venv)
+        service_content = service_content.replace(
+            "ExecStart={app_dir}/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/{app_name} prodserver",
+        )
+        web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
-        # Common drop-ins
-        self._create_common_dropins(systemd_dir, app_name)
-
-        # Caddyfile
         self._create_caddyfile(fujin_dir, app_name, {"/*": "web"})
