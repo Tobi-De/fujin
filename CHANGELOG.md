@@ -6,8 +6,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [unreleased]
 
+### 🚀 Features
+
+- Fetch logs on services failing to start
+
 ### 🚜 Refactor
 
+- Unify systemd units discovery
 - Rewrite to use systemd units and Caddyfile directly
 
 ## [0.17.2] - 2026-01-11

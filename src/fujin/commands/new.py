@@ -49,7 +49,6 @@ class New(BaseCommand):
             self.output.error(f"{service_file} already exists")
             sys.exit(1)
 
-        # Create service file using template
         service_content = NEW_SERVICE_TEMPLATE.format(name=name)
         service_file.write_text(service_content)
         self.output.success(f"Created {service_file}")
@@ -64,15 +63,13 @@ class New(BaseCommand):
                 f"\nNext steps:\n"
                 f"  1. Edit {service_file} to configure your service\n"
                 f"  2. Edit {socket_file} to configure socket activation\n"
-                f"  3. Update your fujin.toml processes configuration\n"
-                f"  4. Deploy: fujin deploy"
+                f"  3. Deploy: fujin deploy"
             )
         else:
             self.output.info(
                 f"\nNext steps:\n"
                 f"  1. Edit {service_file} to configure your service\n"
-                f"  2. Update your fujin.toml processes configuration\n"
-                f"  3. Deploy: fujin deploy"
+                f"  2. Deploy: fujin deploy"
             )
 
     @cappa.command(help="Create a new systemd timer and service")
@@ -94,12 +91,10 @@ class New(BaseCommand):
             self.output.error(f"Service or timer file already exists for '{name}'")
             sys.exit(1)
 
-        # Create service file (oneshot) using template
         service_content = NEW_TIMER_SERVICE_TEMPLATE.format(name=name)
         service_file.write_text(service_content)
         self.output.success(f"Created {service_file}")
 
-        # Create timer file using template
         timer_content = NEW_TIMER_TEMPLATE.format(name=name)
         timer_file.write_text(timer_content)
         self.output.success(f"Created {timer_file}")
@@ -108,8 +103,7 @@ class New(BaseCommand):
             f"\nNext steps:\n"
             f"  1. Edit {service_file} to configure your task\n"
             f"  2. Edit {timer_file} to set schedule (OnCalendar, OnBootSec, etc.)\n"
-            f"  3. Update your fujin.toml processes configuration\n"
-            f"  4. Deploy: fujin deploy"
+            f"  3. Deploy: fujin deploy"
         )
 
     @cappa.command(help="Create a new systemd dropin configuration")
@@ -133,12 +127,10 @@ class New(BaseCommand):
             self.output.info(f"Created {systemd_dir}/")
 
         if service:
-            # Service-specific dropin
             dropin_dir = systemd_dir / f"{service}.service.d"
             dropin_dir.mkdir(exist_ok=True)
             dropin_file = dropin_dir / f"{name}.conf"
         else:
-            # Common dropin
             dropin_dir = systemd_dir / "common.d"
             dropin_dir.mkdir(exist_ok=True)
             dropin_file = dropin_dir / f"{name}.conf"
@@ -147,7 +139,6 @@ class New(BaseCommand):
             self.output.error(f"{dropin_file} already exists")
             sys.exit(1)
 
-        # Create dropin file using template
         dropin_file.write_text(NEW_DROPIN_TEMPLATE)
         self.output.success(f"Created {dropin_file}")
 
