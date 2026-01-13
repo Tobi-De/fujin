@@ -63,23 +63,32 @@ def python_package_config(tmp_path):
         webserver_enabled=False,
         caddy_config_path="/etc/caddy/conf.d/testapp.caddy",
         app_bin=".venv/bin/testapp",
-        active_units=["testapp-web.service", "testapp-worker.service"],
-        unit_metadata=[
+        deployed_units=[
             {
-                "name": "web",
+                "service_name": "web",
                 "is_template": False,
                 "service_file": "web.service",
-                "deployed_service": "testapp-web.service",
+                "socket_file": None,
+                "timer_file": None,
+                "template_service_name": "testapp-web.service",
+                "template_socket_name": None,
+                "template_timer_name": None,
+                "replica_count": 1,
+                "instance_service_names": ["testapp-web.service"],
             },
             {
-                "name": "worker",
+                "service_name": "worker",
                 "is_template": False,
                 "service_file": "worker.service",
-                "deployed_service": "testapp-worker.service",
+                "socket_file": None,
+                "timer_file": None,
+                "template_service_name": "testapp-worker.service",
+                "template_socket_name": None,
+                "template_timer_name": None,
+                "replica_count": 1,
+                "instance_service_names": ["testapp-worker.service"],
             },
         ],
-        common_dropins=[],
-        service_dropins={},
     )
 
 
@@ -99,17 +108,20 @@ def binary_config(tmp_path):
         webserver_enabled=False,
         caddy_config_path="/etc/caddy/conf.d/testapp.caddy",
         app_bin="testapp",
-        active_units=["testapp-web.service"],
-        unit_metadata=[
+        deployed_units=[
             {
-                "name": "web",
+                "service_name": "web",
                 "is_template": False,
                 "service_file": "web.service",
-                "deployed_service": "testapp-web.service",
+                "socket_file": None,
+                "timer_file": None,
+                "template_service_name": "testapp-web.service",
+                "template_socket_name": None,
+                "template_timer_name": None,
+                "replica_count": 1,
+                "instance_service_names": ["testapp-web.service"],
             },
         ],
-        common_dropins=[],
-        service_dropins={},
     )
 
 

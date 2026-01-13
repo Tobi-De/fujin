@@ -67,7 +67,7 @@ PartOf={name}{template_suffix}.service
 [Socket]
 ListenStream={listen_stream}
 SocketMode=0660
-SocketUser={user}
+SocketUser=www-data
 SocketGroup=www-data
 
 [Install]
@@ -88,7 +88,7 @@ PartOf={name}.service
 # Unix socket path
 ListenStream=/run/{{app_name}}/{name}.sock
 SocketMode=0660
-SocketUser={{user}}
+SocketUser=www-data
 SocketGroup=www-data
 
 # For TCP sockets, use:

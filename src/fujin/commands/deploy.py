@@ -13,8 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
-from fujin.discovery import ServiceUnit
-import configparser
 import cappa
 from rich.console import Console
 from rich.panel import Panel
@@ -87,8 +85,7 @@ class Deploy(BaseCommand):
         version = self.config.version
         distfile_path = self.config.get_distfile_path(version)
 
-        discovered_services = self.config.discovered_services
-        if not discovered_services:
+        if not self.config.deployed_units:
             raise DeploymentError("No systemd units found, nothing to deploy")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -111,63 +108,47 @@ class Deploy(BaseCommand):
                 "user": self.selected_host.user,
             }
 
-            unit_metadata = []
             logger.debug("Validating and resolving systemd units")
             systemd_bundle = bundle_dir / "systemd"
             systemd_bundle.mkdir()
 
-            # Process each service and build metadata
-            for svc in discovered_services:
+            for du in self.config.deployed_units:
                 # Validate and resolve main service file
-                service_content = svc.service_file.read_text()
-                # Use safe_format for everything to handle both legacy (double brace)
-                # and new (single brace) templates, while correctly ignoring non-matching
-                # braces in Caddyfiles.
+                service_content = du.service_file.read_text()
                 resolved_content = safe_format(service_content, **context)
 
-                # Validate with configparser
-                parser = configparser.ConfigParser(strict=False, allow_no_value=True)
-                try:
-                    parser.read_string(resolved_content, source=str(svc.service_file))
-                except Exception as e:
-                    raise BuildError(
-                        f"Unit validation failed: {svc.service_file.name}"
-                    ) from e
-
-                (systemd_bundle / svc.service_file.name).write_text(resolved_content)
-
-                # Build metadata entry
-                metadata = {
-                    "name": svc.name,
-                    "is_template": svc.is_template,
-                    "service_file": svc.service_file.name,
-                    "deployed_service": f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.service",
-                }
+                (systemd_bundle / du.service_file.name).write_text(resolved_content)
 
                 # Process and add socket file if exists
-                if svc.socket_file:
-                    socket_content = svc.socket_file.read_text()
+                if du.socket_file:
+                    socket_content = du.socket_file.read_text()
                     resolved_socket = safe_format(socket_content, **context)
-                    (systemd_bundle / svc.socket_file.name).write_text(resolved_socket)
-                    metadata["socket_file"] = svc.socket_file.name
-                    metadata["deployed_socket"] = (
-                        f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.socket"
-                    )
+                    (systemd_bundle / du.socket_file.name).write_text(resolved_socket)
 
                 # Process and add timer file if exists
-                if svc.timer_file:
-                    timer_content = svc.timer_file.read_text()
+                if du.timer_file:
+                    timer_content = du.timer_file.read_text()
                     resolved_timer = safe_format(timer_content, **context)
-                    (systemd_bundle / svc.timer_file.name).write_text(resolved_timer)
-                    metadata["timer_file"] = svc.timer_file.name
-                    metadata["deployed_timer"] = (
-                        f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.timer"
-                    )
+                    (systemd_bundle / du.timer_file.name).write_text(resolved_timer)
 
-                unit_metadata.append(metadata)
+            # Build installer metadata from deployed units
+            deployed_units_data = []
+            for du in self.config.deployed_units:
+                unit_dict = {
+                    "service_name": du.service_name,
+                    "is_template": du.is_template,
+                    "service_file": du.service_file.name,
+                    "socket_file": du.socket_file.name if du.socket_file else None,
+                    "timer_file": du.timer_file.name if du.timer_file else None,
+                    "template_service_name": du.template_service_name,
+                    "template_socket_name": du.template_socket_name,
+                    "template_timer_name": du.template_timer_name,
+                    "replica_count": du.replica_count,
+                    "instance_service_names": du.instance_service_names,
+                }
+                deployed_units_data.append(unit_dict)
 
-            # Process common drop-ins
-            common_dropins = []
+            # Handle common dropins
             common_dir = self.config.local_config_dir / "systemd" / "common.d"
             if common_dir.exists():
                 common_bundle = systemd_bundle / "common.d"
@@ -176,31 +157,24 @@ class Deploy(BaseCommand):
                     dropin_content = dropin.read_text()
                     resolved_dropin = safe_format(dropin_content, **context)
                     (common_bundle / dropin.name).write_text(resolved_dropin)
-                    common_dropins.append(dropin.name)
 
-            # Process service-specific drop-ins
-            service_dropins = {}
+            # Handle service-specific dropins
             for service_dropin_dir in (self.config.local_config_dir / "systemd").glob(
                 "*.service.d"
             ):
                 bundle_dropin_dir = systemd_bundle / service_dropin_dir.name
                 bundle_dropin_dir.mkdir()
-                dropins = []
                 for dropin in service_dropin_dir.glob("*.conf"):
                     dropin_content = dropin.read_text()
                     resolved_dropin = safe_format(dropin_content, **context)
                     (bundle_dropin_dir / dropin.name).write_text(resolved_dropin)
-                    dropins.append(dropin.name)
-                service_dropins[service_dropin_dir.name] = dropins
 
-            # Resolve and bundle Caddyfile from .fujin/
             if self.config.caddyfile_exists:
                 logger.debug("Resolving and bundling Caddyfile")
                 caddyfile_content = self.config.caddyfile_path.read_text()
                 resolved_caddyfile = safe_format(caddyfile_content, **context)
                 (bundle_dir / "Caddyfile").write_text(resolved_caddyfile)
 
-            # Create installer config with unit metadata
             installer_config = {
                 "app_name": self.config.app_name,
                 "app_dir": self.config.app_dir(self.selected_host),
@@ -213,10 +187,7 @@ class Deploy(BaseCommand):
                 "webserver_enabled": self.config.caddyfile_exists,
                 "caddy_config_path": self.config.caddy_config_path,
                 "app_bin": self.config.app_bin,
-                "active_units": self.config.systemd_units,
-                "unit_metadata": unit_metadata,
-                "common_dropins": common_dropins if discovered_services else [],
-                "service_dropins": service_dropins if discovered_services else {},
+                "deployed_units": deployed_units_data,
             }
 
             # Create zipapp
@@ -224,7 +195,6 @@ class Deploy(BaseCommand):
             zipapp_dir = Path(tmpdir) / "zipapp_source"
             zipapp_dir.mkdir()
 
-            # Copy installer __main__.py
             installer_dir = (
                 Path(importlib.util.find_spec("fujin").origin).parent / "_installer"
             )
@@ -257,7 +227,7 @@ class Deploy(BaseCommand):
             with open(zipapp_path, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
-            self._show_deployment_summary(discovered_services, zipapp_path)
+            self._show_deployment_summary(zipapp_path)
 
             remote_bundle_dir = (
                 Path(self.config.app_dir(self.selected_host)) / ".versions"
@@ -370,9 +340,7 @@ class Deploy(BaseCommand):
                 url = f"https://{domain}"
                 self.output.info(f"Application is available at: {url}")
 
-    def _show_deployment_summary(
-        self, discovered_services: list[ServiceUnit], bundle_path: Path
-    ):
+    def _show_deployment_summary(self, bundle_path: Path):
         console = Console()
 
         bundle_size = bundle_path.stat().st_size
@@ -393,14 +361,13 @@ class Deploy(BaseCommand):
         host_display = self.selected_host.name if self.selected_host.name else "default"
         table.add_row("Host", f"{host_display} ({self.selected_host.address})")
 
-        # Build services summary from discovered services
+        # Build services summary from deployed units
         services_summary = []
-        for svc in discovered_services:
-            replicas = self.config.replicas.get(svc.name, 1)
-            if replicas > 1:
-                services_summary.append(f"{svc.name} ({replicas})")
+        for du in self.config.deployed_units:
+            if du.replica_count > 1:
+                services_summary.append(f"{du.service_name} ({du.replica_count})")
             else:
-                services_summary.append(svc.name)
+                services_summary.append(du.service_name)
         if services_summary:
             table.add_row("Services", ", ".join(services_summary))
         table.add_row("Bundle", size_str)

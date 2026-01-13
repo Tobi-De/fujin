@@ -1,12 +1,12 @@
 from __future__ import annotations
 from contextlib import suppress
 
+from fujin.discovery import discover_deployed_units, DeployedUnit
 import os
 import sys
 from pathlib import Path
 
 import msgspec
-from fujin.discovery import discover_services
 
 from .errors import ImproperlyConfiguredError
 
@@ -181,28 +181,17 @@ class Config(msgspec.Struct, kw_only=True):
         return f"{self.caddy_config_dir}/{self.app_name}.caddy"
 
     @property
-    def discovered_services(self):
-        return discover_services(self.local_config_dir)
+    def deployed_units(self) -> list[DeployedUnit]:
+        return discover_deployed_units(
+            self.local_config_dir, self.app_name, self.replicas
+        )
 
     @property
     def systemd_units(self) -> list[str]:
-        """
-        Get list of systemd units that should be enabled/started.
-        Handles replicas for template units.
-        """
+        """All systemd unit names that should be enabled/started."""
         units = []
-        for svc in self.discovered_services:
-            if svc.is_template:
-                # Handle replicas
-                count = self.replicas.get(svc.name, 1)
-                for i in range(1, count + 1):
-                    units.append(f"{self.app_name}-{svc.name}@{i}.service")
-            else:
-                units.append(f"{self.app_name}-{svc.name}.service")
-                if svc.socket_file:
-                    units.append(f"{self.app_name}-{svc.name}.socket")
-                if svc.timer_file:
-                    units.append(f"{self.app_name}-{svc.name}.timer")
+        for du in self.deployed_units:
+            units.extend(du.all_unit_names())
         return units
 
 

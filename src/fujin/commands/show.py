@@ -116,23 +116,24 @@ class Show(BaseCommand):
 
     def _show_specific_units(self, name: str):
         """Display specific unit(s) based on the provided process name."""
-        # Discover services
-        discovered_services = self.config.discovered_services
-        if not discovered_services:
+        # Check deployed units
+        if not self.deployed_units:
             self.output.warning("No systemd units configured")
             return
 
-        # Filter services matching the requested name
-        matching_services = [svc for svc in discovered_services if svc.name == name]
+        # Filter units matching the requested name
+        matching_unit = next(
+            (du for du in self.deployed_units if du.service_name == name), None
+        )
 
-        if not matching_services:
+        if not matching_unit:
             # Fallback: check if the user asked for a full unit name (e.g. web.service)
-            matching_services = [
-                svc for svc in discovered_services if svc.service_file.name == name
-            ]
+            matching_unit = next(
+                (du for du in self.deployed_units if du.service_file.name == name), None
+            )
 
-        if not matching_services:
-            available = [s.name for s in discovered_services]
+        if not matching_unit:
+            available = [du.service_name for du in self.deployed_units]
             raise cappa.Exit(
                 f"Unknown target '{name}'. Available options: {', '.join(available)}",
                 code=1,
@@ -146,32 +147,30 @@ class Show(BaseCommand):
             "user": self.selected_host.user,
         }
 
+        # Render and show service file
+        content = safe_format(matching_unit.service_file.read_text(), **context)
+        self.output.info(f"[bold cyan]# {matching_unit.service_file.name}[/bold cyan]")
+        self.output.output(content)
+
         separator = "[dim]" + "-" * 80 + "[/dim]"
-        first = True
 
-        for svc in matching_services:
-            # Render and show service file
-            if not first:
-                self.output.output(f"\n{separator}\n")
-
-            content = safe_format(svc.service_file.read_text(), **context)
-            self.output.info(f"[bold cyan]# {svc.service_file.name}[/bold cyan]")
+        # Render and show socket file
+        if matching_unit.socket_file:
+            self.output.output(f"\n{separator}\n")
+            content = safe_format(matching_unit.socket_file.read_text(), **context)
+            self.output.info(
+                f"[bold cyan]# {matching_unit.socket_file.name}[/bold cyan]"
+            )
             self.output.output(content)
-            first = False
 
-            # Render and show socket file
-            if svc.socket_file:
-                self.output.output(f"\n{separator}\n")
-                content = safe_format(svc.socket_file.read_text(), **context)
-                self.output.info(f"[bold cyan]# {svc.socket_file.name}[/bold cyan]")
-                self.output.output(content)
-
-            # Render and show timer file
-            if svc.timer_file:
-                self.output.output(f"\n{separator}\n")
-                content = safe_format(svc.timer_file.read_text(), **context)
-                self.output.info(f"[bold cyan]# {svc.timer_file.name}[/bold cyan]")
-                self.output.output(content)
+        # Render and show timer file
+        if matching_unit.timer_file:
+            self.output.output(f"\n{separator}\n")
+            content = safe_format(matching_unit.timer_file.read_text(), **context)
+            self.output.info(
+                f"[bold cyan]# {matching_unit.timer_file.name}[/bold cyan]"
+            )
+            self.output.output(content)
 
             # Show associated drop-ins
             service_dropin_dir = (
@@ -195,9 +194,8 @@ class Show(BaseCommand):
         """Get list of available options for help text."""
         options = ["env", "caddy", "units"]
 
-        discovered = self.config.discovered_services
-        if discovered:
-            options.extend([svc.name for svc in discovered])
+        if self.deployed_units:
+            options.extend([du.service_name for du in self.deployed_units])
 
         return ", ".join(options)
 

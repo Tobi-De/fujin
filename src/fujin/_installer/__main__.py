@@ -13,7 +13,22 @@ import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
+
+
+class DeployedUnitDict(TypedDict):
+    """Type hint for deployed unit serialized as dict."""
+
+    service_name: str
+    is_template: bool
+    service_file: str  # filename only
+    socket_file: str | None
+    timer_file: str | None
+    template_service_name: str
+    template_socket_name: str | None
+    template_timer_name: str | None
+    replica_count: int
+    instance_service_names: list[str]
 
 
 @dataclass
@@ -31,12 +46,12 @@ class InstallConfig:
     webserver_enabled: bool
     caddy_config_path: str
     app_bin: str
-    active_units: list[str]
-    unit_metadata: list[dict]  # Pre-computed unit information from deploy phase
-    common_dropins: list[str]  # List of common dropin filenames
-    service_dropins: (
-        dict  # Service-specific dropins: {"web.service.d": ["override.conf"]}
-    )
+    deployed_units: list[DeployedUnitDict]
+
+
+# Constants
+SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+SYSTEMD_WANTS_DIR = SYSTEMD_SYSTEM_DIR / "multi-user.target.wants"
 
 
 def log(msg: str) -> None:
@@ -108,13 +123,14 @@ export PATH="{app_dir}:$PATH"
     log("Configuring systemd services...")
     systemd_dir = bundle_dir / "systemd"
 
+    # Collect all valid unit names from deployed_units
     valid_units = []
-    for unit in config.unit_metadata:
-        valid_units.append(unit["deployed_service"])
-        if "deployed_socket" in unit:
-            valid_units.append(unit["deployed_socket"])
-        if "deployed_timer" in unit:
-            valid_units.append(unit["deployed_timer"])
+    for unit in config.deployed_units:
+        valid_units.append(unit["template_service_name"])
+        if unit["template_socket_name"]:
+            valid_units.append(unit["template_socket_name"])
+        if unit["template_timer_name"]:
+            valid_units.append(unit["template_timer_name"])
 
     log("Discovering installed unit files")
     result = run(
@@ -140,23 +156,20 @@ export PATH="{app_dir}:$PATH"
             run(f"sudo systemctl reset-failed {unit}", check=False, capture_output=True)
 
     log("Removing stale service files")
-    for search_dir in [
-        "/etc/systemd/system/",
-        "/etc/systemd/system/multi-user.target.wants/",
-    ]:
-        if not Path(search_dir).exists():
+    for search_dir in [SYSTEMD_SYSTEM_DIR, SYSTEMD_WANTS_DIR]:
+        if not search_dir.exists():
             continue
-        for file_path in Path(search_dir).glob(f"{config.app_name}*"):
+        for file_path in search_dir.glob(f"{config.app_name}*"):
             if file_path.is_file() and file_path.name not in valid_units:
                 print(f"→ Removing stale file: {file_path}")
                 run(f"sudo rm -f {file_path}")
 
     log("Installing new service files...")
-    for unit in config.unit_metadata:
+    for unit in config.deployed_units:
         # Copy main service file
         service_file = systemd_dir / unit["service_file"]
         content = service_file.read_text()
-        deployed_path = Path("/etc/systemd/system") / unit["deployed_service"]
+        deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
         run(
             f"sudo tee {deployed_path} > /dev/null",
             input=content,
@@ -165,10 +178,10 @@ export PATH="{app_dir}:$PATH"
         )
 
         # Copy socket file if exists
-        if "socket_file" in unit:
+        if unit["socket_file"]:
             socket_file = systemd_dir / unit["socket_file"]
             socket_content = socket_file.read_text()
-            socket_deployed_path = Path("/etc/systemd/system") / unit["deployed_socket"]
+            socket_deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_socket_name"]
             run(
                 f"sudo tee {socket_deployed_path} > /dev/null",
                 input=socket_content,
@@ -177,10 +190,10 @@ export PATH="{app_dir}:$PATH"
             )
 
         # Copy timer file if exists
-        if "timer_file" in unit:
+        if unit["timer_file"]:
             timer_file = systemd_dir / unit["timer_file"]
             timer_content = timer_file.read_text()
-            timer_deployed_path = Path("/etc/systemd/system") / unit["deployed_timer"]
+            timer_deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_timer_name"]
             run(
                 f"sudo tee {timer_deployed_path} > /dev/null",
                 input=timer_content,
@@ -189,17 +202,17 @@ export PATH="{app_dir}:$PATH"
             )
 
     # Deploy common dropins (apply to all services)
-    if config.common_dropins:
-        common_dir = systemd_dir / "common.d"
-        for dropin_name in config.common_dropins:
-            dropin_content = (common_dir / dropin_name).read_text()
+    common_dir = systemd_dir / "common.d"
+    if common_dir.exists():
+        for dropin_path in common_dir.glob("*.conf"):
+            dropin_content = dropin_path.read_text()
 
-            # Apply to all services from metadata
-            for unit in config.unit_metadata:
-                deployed_service = unit["deployed_service"]
-                dropin_dir = Path("/etc/systemd/system") / f"{deployed_service}.d"
+            # Apply to all services from deployed_units
+            for unit in config.deployed_units:
+                deployed_service = unit["template_service_name"]
+                dropin_dir = SYSTEMD_SYSTEM_DIR / f"{deployed_service}.d"
                 run(f"sudo mkdir -p {dropin_dir}")
-                dropin_dest = dropin_dir / dropin_name
+                dropin_dest = dropin_dir / dropin_path.name
                 run(
                     f"sudo tee {dropin_dest} > /dev/null",
                     input=dropin_content,
@@ -208,26 +221,25 @@ export PATH="{app_dir}:$PATH"
                 )
 
     # Deploy service-specific dropins
-    for service_dropin_dirname, dropin_names in config.service_dropins.items():
-        service_dropin_dir = systemd_dir / service_dropin_dirname
-        service_file_name = service_dropin_dirname.removesuffix(".d")
+    for service_dropin_dir_path in systemd_dir.glob("*.service.d"):
+        service_file_name = service_dropin_dir_path.name.removesuffix(".d")
 
-        # Find matching unit from metadata
+        # Find matching unit from deployed_units
         matching_unit = None
-        for unit in config.unit_metadata:
+        for unit in config.deployed_units:
             if unit["service_file"] == service_file_name:
                 matching_unit = unit
                 break
 
         if matching_unit:
             deployed_dropin_dir = (
-                Path("/etc/systemd/system") / f"{matching_unit['deployed_service']}.d"
+                SYSTEMD_SYSTEM_DIR / f"{matching_unit['template_service_name']}.d"
             )
             run(f"sudo mkdir -p {deployed_dropin_dir}")
 
-            for dropin_name in dropin_names:
-                dropin_content = (service_dropin_dir / dropin_name).read_text()
-                dropin_dest = deployed_dropin_dir / dropin_name
+            for dropin_path in service_dropin_dir_path.glob("*.conf"):
+                dropin_content = dropin_path.read_text()
+                dropin_dest = deployed_dropin_dir / dropin_path.name
                 run(
                     f"sudo tee {dropin_dest} > /dev/null",
                     input=dropin_content,
@@ -236,38 +248,44 @@ export PATH="{app_dir}:$PATH"
                 )
 
     log("Restarting services...")
-    units_str = " ".join(config.active_units)
+    # Collect all active units to enable/start
+    active_units = []
+    for unit in config.deployed_units:
+        active_units.extend(unit["instance_service_names"])
+        # Add sockets/timers (not templates, they're activated via instances)
+        if not unit["is_template"]:
+            if unit["template_socket_name"]:
+                active_units.append(unit["template_socket_name"])
+            if unit["template_timer_name"]:
+                active_units.append(unit["template_timer_name"])
+        else:
+            # Template sockets/timers use @ without instance number
+            if unit["template_socket_name"]:
+                active_units.append(unit["template_socket_name"])
+            if unit["template_timer_name"]:
+                active_units.append(unit["template_timer_name"])
+
+    units_str = " ".join(active_units)
     run(
         f"sudo systemctl daemon-reload && sudo systemctl enable {units_str}",
         check=True,
     )
 
-    # Restart services and check for failures
     restart_result = run(
         f"sudo systemctl restart {units_str}",
         check=False,
     )
 
-    # Check if restart failed (handle both None and returncode != 0)
-    if (
-        restart_result
-        and hasattr(restart_result, "returncode")
-        and restart_result.returncode != 0
-    ):
-        log("⚠️  Service restart failed! Fetching recent logs...")
-        # Show logs for each service that failed
-        for unit in config.active_units:
+    if restart_result.returncode != 0:
+        log("⚠️ Services restart failed! Fetching recent logs...")
+        for unit in active_units:
             status_result = run(
                 f"sudo systemctl is-active {unit}",
                 check=False,
                 capture_output=True,
                 text=True,
             )
-            if (
-                status_result
-                and hasattr(status_result, "stdout")
-                and status_result.stdout.strip() != "active"
-            ):
+            if status_result.stdout.strip() != "active":
                 print(f"\n{'=' * 60}")
                 print(f"❌ {unit} failed to start")
                 print(f"{'=' * 60}")
@@ -318,14 +336,14 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     log("Uninstalling application...")
     log("Stopping and disabling services...")
 
-    # Build list of units from metadata
+    # Build list of units from deployed_units
     valid_units = []
-    for unit in config.unit_metadata:
-        valid_units.append(unit["deployed_service"])
-        if "deployed_socket" in unit:
-            valid_units.append(unit["deployed_socket"])
-        if "deployed_timer" in unit:
-            valid_units.append(unit["deployed_timer"])
+    for unit in config.deployed_units:
+        valid_units.append(unit["template_service_name"])
+        if unit["template_socket_name"]:
+            valid_units.append(unit["template_socket_name"])
+        if unit["template_timer_name"]:
+            valid_units.append(unit["template_timer_name"])
 
     regular_units = [
         u
@@ -353,7 +371,7 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
         if not unit.startswith(config.app_name):
             print(f"Refusing to remove non-app unit: {unit}", file=sys.stderr)
             continue
-        run(f"sudo rm -f /etc/systemd/system/{unit}")
+        run(f"sudo rm -f {SYSTEMD_SYSTEM_DIR / unit}")
 
     run("sudo systemctl daemon-reload && sudo systemctl reset-failed", check=False)
 

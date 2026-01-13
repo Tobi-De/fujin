@@ -1,54 +1,60 @@
-"""Service discovery from .fujin/systemd/ directory."""
-
 from __future__ import annotations
+from fujin.errors import ServiceDiscoveryError
 
 import configparser
-from dataclasses import dataclass
 from pathlib import Path
+import msgspec
 
 
-@dataclass
-class ServiceUnit:
-    """Represents a discovered systemd service unit."""
-
-    name: str  # Service name without extension (e.g., "web")
-    is_template: bool  # Whether it's a template unit (@)
-    service_file: Path  # Path to .service file
-    socket_file: Path | None = None  # Path to .socket file if exists
-    timer_file: Path | None = None  # Path to .timer file if exists
-
-
-@dataclass
-class DropinFile:
-    """Represents a dropin configuration file."""
-
-    name: str  # Filename
-    path: Path  # Full path to dropin file
-
-
-class ServiceDiscoveryError(Exception):
-    """Raised when service discovery fails."""
-
-
-def discover_services(fujin_dir: Path) -> list[ServiceUnit]:
+class DeployedUnit(msgspec.Struct, kw_only=True):
     """
-    Discover systemd service units from .fujin/systemd/ directory.
-
-    Args:
-        fujin_dir: Path to .fujin directory
-
-    Returns:
-        List of discovered service units
-
-    Raises:
-        ServiceDiscoveryError: If discovery fails or files are malformed
+    Complete information about a deployed systemd unit.
+    Single source of truth combining discovery metadata with deployment context.
     """
+
+    # From discovery
+    service_name: str  # e.g., "web"
+    is_template: bool
+    service_file: Path
+    socket_file: Path | None
+    timer_file: Path | None
+
+    # Template names (for systemctl cat/show, installer metadata)
+    template_service_name: str  # e.g., "myapp-web@.service" or "myapp-web.service"
+    template_socket_name: str | None  # e.g., "myapp-web@.socket" or "myapp-web.socket"
+    template_timer_name: str | None  # e.g., "myapp-web@.timer" or "myapp-web.timer"
+
+    # Instance information (for operations: start/stop/restart/logs)
+    replica_count: int  # From config.replicas, default 1
+    instance_service_names: list[str]  # ["myapp-web@1.service", "myapp-web@2.service"]
+
+    def all_unit_names(self) -> list[str]:
+        """All unit names that should be enabled/started (instances + socket/timer)."""
+        units = self.instance_service_names.copy()
+        # For templates, socket/timer don't have instances
+        if not self.is_template:
+            if self.template_socket_name:
+                units.append(self.template_socket_name)
+            if self.template_timer_name:
+                units.append(self.template_timer_name)
+        else:
+            # Template sockets/timers use @ without instance number
+            if self.template_socket_name:
+                units.append(self.template_socket_name)
+            if self.template_timer_name:
+                units.append(self.template_timer_name)
+        return units
+
+
+def discover_deployed_units(
+    fujin_dir: Path, app_name: str, replicas: dict[str, int]
+) -> list[DeployedUnit]:
     systemd_dir = fujin_dir / "systemd"
 
     if not systemd_dir.exists():
         return []
 
-    services = []
+    result = []
     service_files = list(systemd_dir.glob("*.service"))
 
     for service_file in service_files:
@@ -56,21 +62,26 @@ def discover_services(fujin_dir: Path) -> list[ServiceUnit]:
         if service_file.parent != systemd_dir:
             continue
 
-        # Validate the service file is parseable
         _validate_unit_file(service_file)
 
         # Parse filename to extract service name and template status
         filename = service_file.name
-        name, is_template = _parse_service_filename(filename)
+        name = filename.removesuffix(".service")
+        is_template = name.endswith("@")
+        if is_template:
+            name = name.removesuffix("@")
 
         # Look for associated socket and timer files
-        socket_file = systemd_dir / f"{name}.socket"
-        if is_template:
-            socket_file = systemd_dir / f"{name}@.socket"
-
-        timer_file = systemd_dir / f"{name}.timer"
-        if is_template:
-            timer_file = systemd_dir / f"{name}@.timer"
+        socket_file = (
+            systemd_dir / f"{name}@.socket"
+            if is_template
+            else systemd_dir / f"{name}.socket"
+        )
+        timer_file = (
+            systemd_dir / f"{name}@.timer"
+            if is_template
+            else systemd_dir / f"{name}.timer"
+        )
 
         # Validate associated files if they exist
         if socket_file.exists():
@@ -83,117 +94,42 @@ def discover_services(fujin_dir: Path) -> list[ServiceUnit]:
         else:
             timer_file = None
 
-        services.append(
-            ServiceUnit(
-                name=name,
+        # Get replica count for this service
+        replica_count = replicas.get(name, 1)
+
+        # Build template names (for cat/show commands and installer)
+        suffix = "@" if is_template else ""
+        template_service = f"{app_name}-{name}{suffix}.service"
+        template_socket = f"{app_name}-{name}{suffix}.socket" if socket_file else None
+        template_timer = f"{app_name}-{name}{suffix}.timer" if timer_file else None
+
+        # Build instance names (for start/stop/restart/logs)
+        if is_template:
+            instance_services = [
+                f"{app_name}-{name}@{i}.service" for i in range(1, replica_count + 1)
+            ]
+        else:
+            instance_services = [template_service]
+
+        result.append(
+            DeployedUnit(
+                service_name=name,
                 is_template=is_template,
                 service_file=service_file,
                 socket_file=socket_file,
                 timer_file=timer_file,
+                template_service_name=template_service,
+                template_socket_name=template_socket,
+                template_timer_name=template_timer,
+                replica_count=replica_count,
+                instance_service_names=instance_services,
             )
         )
 
-    return sorted(services, key=lambda s: s.name)
-
-
-def discover_common_dropins(fujin_dir: Path) -> list[DropinFile]:
-    """
-    Discover common dropin files from .fujin/systemd/common.d/
-
-    Args:
-        fujin_dir: Path to .fujin directory
-
-    Returns:
-        List of discovered dropin files
-
-    Raises:
-        ServiceDiscoveryError: If dropin files are malformed
-    """
-    common_dir = fujin_dir / "systemd" / "common.d"
-
-    if not common_dir.exists():
-        return []
-
-    dropins = []
-    for dropin_file in common_dir.glob("*.conf"):
-        # Validate dropin is parseable
-        _validate_unit_file(dropin_file)
-
-        dropins.append(DropinFile(name=dropin_file.name, path=dropin_file))
-
-    return sorted(dropins, key=lambda d: d.name)
-
-
-def discover_service_dropins(
-    fujin_dir: Path, service_name: str, is_template: bool
-) -> list[DropinFile]:
-    """
-    Discover service-specific dropin files.
-
-    Args:
-        fujin_dir: Path to .fujin directory
-        service_name: Service name (e.g., "web")
-        is_template: Whether service is a template unit
-
-    Returns:
-        List of discovered dropin files
-
-    Raises:
-        ServiceDiscoveryError: If dropin files are malformed
-    """
-    # Build the dropin directory name
-    if is_template:
-        dropin_dir_name = f"{service_name}@.service.d"
-    else:
-        dropin_dir_name = f"{service_name}.service.d"
-
-    dropin_dir = fujin_dir / "systemd" / dropin_dir_name
-
-    if not dropin_dir.exists():
-        return []
-
-    dropins = []
-    for dropin_file in dropin_dir.glob("*.conf"):
-        # Validate dropin is parseable
-        _validate_unit_file(dropin_file)
-
-        dropins.append(DropinFile(name=dropin_file.name, path=dropin_file))
-
-    return sorted(dropins, key=lambda d: d.name)
-
-
-def _parse_service_filename(filename: str) -> tuple[str, bool]:
-    """
-    Parse service filename to extract name and template status.
-
-    Args:
-        filename: Service filename (e.g., "web@.service")
-
-    Returns:
-        Tuple of (service_name, is_template)
-    """
-    # Remove .service extension
-    name = filename.removesuffix(".service")
-
-    # Check if it's a template (ends with @)
-    is_template = name.endswith("@")
-
-    if is_template:
-        name = name.removesuffix("@")
-
-    return name, is_template
+    return sorted(result, key=lambda u: u.service_name)
 
 
 def _validate_unit_file(file_path: Path) -> None:
-    """
-    Validate that a systemd unit file is parseable.
-
-    Args:
-        file_path: Path to unit file
-
-    Raises:
-        ServiceDiscoveryError: If file is malformed
-    """
     try:
         parser = configparser.ConfigParser(strict=False, allow_no_value=True)
         # Read as string to avoid encoding issues
