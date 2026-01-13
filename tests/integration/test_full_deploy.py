@@ -74,6 +74,26 @@ with socketserver.TCPServer(("", PORT), Handler) as httpd:
     distfile.write_text(script_content)
     distfile.chmod(0o755)
 
+    # Create .fujin/systemd directory with service file
+    fujin_dir = tmp_path / ".fujin"
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Web server
+
+[Service]
+Type=simple
+ExecStart={app_dir}/myapp
+WorkingDirectory={app_dir}
+EnvironmentFile=-{app_dir}/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
     # Create config
     config_dict = {
         "app": "myapp",
@@ -89,7 +109,6 @@ with socketserver.TCPServer(("", PORT), Handler) as httpd:
                 "key_filename": ssh_key,
             }
         ],
-        "processes": {"web": {"command": "myapp"}},  # Binary name matches app_bin
     }
 
     config = msgspec.convert(config_dict, type=Config)
@@ -102,16 +121,16 @@ with socketserver.TCPServer(("", PORT), Handler) as httpd:
 
     # Verify service is active
     stdout, success = exec_in_container(
-        vps_container["name"], "systemctl is-active myapp.service"
+        vps_container["name"], "systemctl is-active myapp-web.service"
     )
 
     if not success or stdout != "active":
         # Debug: show service status and logs
         status, _ = exec_in_container(
-            vps_container["name"], "systemctl status myapp.service"
+            vps_container["name"], "systemctl status myapp-web.service"
         )
         logs, _ = exec_in_container(
-            vps_container["name"], "journalctl -u myapp.service --no-pager -n 50"
+            vps_container["name"], "journalctl -u myapp-web.service --no-pager -n 50"
         )
         print(f"\n=== Service Status ===\n{status}")
         print(f"\n=== Service Logs ===\n{logs}")
@@ -154,6 +173,41 @@ def test_python_package_deployment(vps_container, ssh_key, tmp_path, monkeypatch
     env_file = tmp_path / ".env"
     env_file.write_text("DEBUG=true\n")
 
+    # Create .fujin/systemd directory with service files
+    fujin_dir = tmp_path / ".fujin"
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    web_service = systemd_dir / "web.service"
+    web_service.write_text("""[Unit]
+Description=Web server
+
+[Service]
+Type=simple
+ExecStart={app_dir}/.venv/bin/python3 -m http.server 8000
+WorkingDirectory={app_dir}
+EnvironmentFile=-{app_dir}/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    worker_service = systemd_dir / "worker.service"
+    worker_service.write_text("""[Unit]
+Description=Worker
+
+[Service]
+Type=simple
+ExecStart={app_dir}/.venv/bin/python3 -c 'import time; print("worker running"); time.sleep(99999)'
+WorkingDirectory={app_dir}
+EnvironmentFile=-{app_dir}/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
     # Create config
     config_dict = {
         "app": "testapp",
@@ -172,12 +226,6 @@ def test_python_package_deployment(vps_container, ssh_key, tmp_path, monkeypatch
                 "envfile": str(env_file),
             }
         ],
-        "processes": {
-            "web": {"command": ".venv/bin/python3 -m http.server 8000"},
-            "worker": {
-                "command": ".venv/bin/python3 -c 'import time; print(\"worker running\"); time.sleep(99999)'"
-            },
-        },
     }
 
     config = msgspec.convert(config_dict, type=Config)
@@ -188,7 +236,7 @@ def test_python_package_deployment(vps_container, ssh_key, tmp_path, monkeypatch
         deploy()
 
     # Verify both services are active (with retry for slow starts)
-    for service in ["testapp.service", "testapp-worker.service"]:
+    for service in ["testapp-web.service", "testapp-worker.service"]:
         for attempt in range(10):
             stdout, success = exec_in_container(
                 vps_container["name"], f"systemctl is-active {service}"
@@ -223,6 +271,40 @@ def test_deployment_with_webserver(vps_container, ssh_key, tmp_path, monkeypatch
     distfile.write_text("#!/bin/bash\nsleep infinity\n")
     distfile.chmod(0o755)
 
+    # Create .fujin/systemd directory with service file
+    fujin_dir = tmp_path / ".fujin"
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Web server
+
+[Service]
+Type=simple
+ExecStart={app_dir}/webapp
+WorkingDirectory={app_dir}
+EnvironmentFile=-{app_dir}/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    # Create Caddyfile
+    caddyfile = fujin_dir / "Caddyfile"
+    caddyfile.write_text("""example.com {
+    handle /static/* {
+        root * /var/www/static/
+        file_server
+    }
+    
+    handle {
+        reverse_proxy localhost:8000
+    }
+}
+""")
+
     config_dict = {
         "app": "webapp",
         "version": "1.0.0",
@@ -235,13 +317,6 @@ def test_deployment_with_webserver(vps_container, ssh_key, tmp_path, monkeypatch
                 "user": vps_container["user"],
                 "port": vps_container["port"],
                 "key_filename": ssh_key,
-            }
-        ],
-        "processes": {"web": {"command": "webapp", "listen": "localhost:8000"}},
-        "sites": [
-            {
-                "domains": ["example.com"],
-                "routes": {"/static/*": {"static": "/var/www/static/"}, "/": "web"},
             }
         ],
     }
@@ -278,6 +353,26 @@ def test_rollback_to_previous_version(vps_container, ssh_key, tmp_path, monkeypa
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir()
 
+    # Create .fujin/systemd directory with service file
+    fujin_dir = tmp_path / ".fujin"
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Web server
+
+[Service]
+Type=simple
+ExecStart={app_dir}/rollapp
+WorkingDirectory={app_dir}
+EnvironmentFile=-{app_dir}/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
     # Helper to create config for a version
     def make_config(version: str):
         pyproject.write_text(f'[project]\nname = "rollapp"\nversion = "{version}"\n')
@@ -302,7 +397,6 @@ def test_rollback_to_previous_version(vps_container, ssh_key, tmp_path, monkeypa
                         "key_filename": ssh_key,
                     }
                 ],
-                "processes": {"web": {"command": "rollapp"}},
             },
             type=Config,
         )
@@ -353,7 +447,7 @@ def test_rollback_to_previous_version(vps_container, ssh_key, tmp_path, monkeypa
 
     # Verify service is still active
     stdout, success = exec_in_container(
-        vps_container["name"], "systemctl is-active rollapp.service"
+        vps_container["name"], "systemctl is-active rollapp-web.service"
     )
     assert success and stdout == "active"
 
@@ -373,6 +467,26 @@ def test_down_command(vps_container, ssh_key, tmp_path, monkeypatch):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nname = "downapp"\nversion = "1.0.0"\n')
 
+    # Create .fujin/systemd directory with service file
+    fujin_dir = tmp_path / ".fujin"
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Web server
+
+[Service]
+Type=simple
+ExecStart={app_dir}/downapp
+WorkingDirectory={app_dir}
+EnvironmentFile=-{app_dir}/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
     config_dict = {
         "app": "downapp",
         "version": "1.0.0",
@@ -387,7 +501,6 @@ def test_down_command(vps_container, ssh_key, tmp_path, monkeypatch):
                 "key_filename": ssh_key,
             }
         ],
-        "processes": {"web": {"command": "downapp"}},
     }
 
     config = msgspec.convert(config_dict, type=Config)
@@ -399,7 +512,7 @@ def test_down_command(vps_container, ssh_key, tmp_path, monkeypatch):
 
     # Verify service is active
     stdout, success = exec_in_container(
-        vps_container["name"], "systemctl is-active downapp.service"
+        vps_container["name"], "systemctl is-active downapp-web.service"
     )
     assert success and stdout == "active"
 
@@ -413,7 +526,7 @@ def test_down_command(vps_container, ssh_key, tmp_path, monkeypatch):
 
     # Verify service is inactive or doesn't exist
     stdout, _ = exec_in_container(
-        vps_container["name"], "systemctl is-active downapp.service"
+        vps_container["name"], "systemctl is-active downapp-web.service"
     )
     assert stdout in ["inactive", "unknown"], (
         f"Expected inactive or unknown, got: {stdout}"
@@ -421,6 +534,6 @@ def test_down_command(vps_container, ssh_key, tmp_path, monkeypatch):
 
     # Verify service files were removed (down runs uninstall)
     _, success = exec_in_container(
-        vps_container["name"], "test -f /etc/systemd/system/downapp.service"
+        vps_container["name"], "test -f /etc/systemd/system/downapp-web.service"
     )
     assert not success, "Service file should be removed after down"
