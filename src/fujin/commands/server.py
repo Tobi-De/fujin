@@ -24,11 +24,11 @@ class Server(BaseCommand):
     Examples:
       fujin server setup-ssh      Interactive SSH key setup
       fujin server bootstrap      Setup server with dependencies and Caddy
-      fujin server info           Show server system information
+      fujin server status         Show server system information
     """
 
     @cappa.command(help="Display information about the host system")
-    def info(self):
+    def status(self):
         with self.connection() as conn:
             _, result_ok = conn.run(f"command -v fastfetch", warn=True, hide=True)
             if result_ok:

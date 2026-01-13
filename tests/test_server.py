@@ -38,12 +38,12 @@ def config_without_webserver(base_config):
 
 
 # ============================================================================
-# Info Command
+# Status Command
 # ============================================================================
 
 
-def test_info_uses_fastfetch_when_available(base_config):
-    """info uses fastfetch when available."""
+def test_status_uses_fastfetch_when_available(base_config):
+    """status uses fastfetch when available."""
     config = msgspec.convert(base_config, type=Config)
     mock_conn = MagicMock()
 
@@ -61,15 +61,15 @@ def test_info_uses_fastfetch_when_available(base_config):
         mock_connection.return_value.__exit__.return_value = None
 
         server = Server()
-        server.info()
+        server.status()
 
         # Verify fastfetch was called
         calls = [call[0][0] for call in mock_conn.run.call_args_list]
         assert any("fastfetch" == cmd for cmd in calls)
 
 
-def test_info_fallback_to_os_release_when_fastfetch_unavailable(base_config):
-    """info falls back to /etc/os-release when fastfetch unavailable."""
+def test_status_fallback_to_os_release_when_fastfetch_unavailable(base_config):
+    """status falls back to /etc/os-release when fastfetch unavailable."""
     config = msgspec.convert(base_config, type=Config)
     mock_conn = MagicMock()
 
@@ -87,7 +87,7 @@ def test_info_fallback_to_os_release_when_fastfetch_unavailable(base_config):
         mock_connection.return_value.__exit__.return_value = None
 
         server = Server()
-        server.info()
+        server.status()
 
         # Verify os-release was read and displayed
         calls = [call[0][0] for call in mock_conn.run.call_args_list]
