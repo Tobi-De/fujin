@@ -1,13 +1,17 @@
-"""Tests for zipapp installer."""
-
 from __future__ import annotations
 
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from fujin._installer.__main__ import InstallConfig, install, uninstall
+
+
+def mock_successful_run(*args, **kwargs):
+    """Mock run() that returns a successful CompletedProcess."""
+    return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
 
 @pytest.fixture
@@ -117,7 +121,9 @@ def binary_config(tmp_path):
 def test_install_python_package(bundle_dir, python_package_config):
     """Install creates directories, files, and runs uv commands for python package."""
     with (
-        patch("fujin._installer.__main__.run") as mock_run,
+        patch(
+            "fujin._installer.__main__.run", side_effect=mock_successful_run
+        ) as mock_run,
         patch("fujin._installer.__main__.log"),
     ):
         app_dir = Path(python_package_config.app_dir)
@@ -154,7 +160,9 @@ def test_install_with_release_command_executes_it(bundle_dir, python_package_con
     python_package_config.release_command = "python manage.py migrate"
 
     with (
-        patch("fujin._installer.__main__.run") as mock_run,
+        patch(
+            "fujin._installer.__main__.run", side_effect=mock_successful_run
+        ) as mock_run,
         patch("fujin._installer.__main__.log"),
     ):
         install(python_package_config, bundle_dir)
@@ -179,7 +187,7 @@ def test_install_binary(bundle_dir, binary_config):
     (bundle_dir / "testapp-1.0.0-linux-x86_64").write_bytes(b"\x7fELF fake binary")
 
     with (
-        patch("fujin._installer.__main__.run"),
+        patch("fujin._installer.__main__.run", side_effect=mock_successful_run),
         patch("fujin._installer.__main__.log"),
     ):
         app_dir = Path(binary_config.app_dir)
