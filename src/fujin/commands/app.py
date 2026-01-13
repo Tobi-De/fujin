@@ -452,21 +452,15 @@ class App(BaseCommand):
         if not name:
             return self.config.systemd_units
 
-        # Parse suffix if present
+        suffixes = {".service": "service", ".timer": "timer", ".socket": "socket"}
         suffix_type = None
-        if name.endswith(".service"):
-            service_name = name[:-8]
-            suffix_type = "service"
-        elif name.endswith(".timer"):
-            service_name = name[:-6]
-            suffix_type = "timer"
-        elif name.endswith(".socket"):
-            service_name = name[:-7]
-            suffix_type = "socket"
-        else:
-            service_name = name
+        service_name = name
+        for suffix, stype in suffixes.items():
+            if name.endswith(suffix):
+                service_name = name.removesuffix(suffix)
+                suffix_type = stype
+                break
 
-        # Find the deployed unit
         du = next(
             (u for u in self.deployed_units if u.service_name == service_name),
             None,
@@ -478,30 +472,23 @@ class App(BaseCommand):
                 code=1,
             )
 
-        units = []
-
-        # Return appropriate units based on suffix type
-        if suffix_type == "service" or suffix_type is None:
-            if use_templates:
-                units.append(du.template_service_name)
-            else:
-                units.extend(du.instance_service_names)
-
         if suffix_type == "socket":
             if not du.socket_file:
                 raise cappa.Exit(
                     f"Service '{service_name}' does not have a socket.", code=1
                 )
-            units.append(du.template_socket_name)
+            return [du.template_socket_name]
 
         if suffix_type == "timer":
             if not du.timer_file:
                 raise cappa.Exit(
                     f"Service '{service_name}' does not have a timer.", code=1
                 )
-            units.append(du.template_timer_name)
+            return [du.template_timer_name]
 
-        return units
+        if use_templates:
+            return [du.template_service_name]
+        return du.instance_service_names
 
     def _find_dropins(self, deployed_unit) -> list[str]:
         """Find all dropin files for a deployed unit."""
