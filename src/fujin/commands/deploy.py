@@ -7,7 +7,6 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-import time
 import zipapp
 from dataclasses import dataclass
 from pathlib import Path
@@ -263,61 +262,25 @@ class Deploy(BaseCommand):
             with self.connection() as conn:
                 conn.run(f"mkdir -p {remote_bundle_dir_q}")
 
-                max_upload_retries = 3
-                upload_ok = False
-                for attempt in range(1, max_upload_retries + 1):
-                    self.output.info(
-                        f"Uploading deployment bundle (attempt {attempt}/{max_upload_retries})..."
-                    )
+                self.output.info("Uploading deployment bundle...")
+                conn.put(str(zipapp_path), remote_bundle_path_q)
 
-                    # Upload to a temporary filename first, then move into place
-                    tmp_remote = f"{remote_bundle_path}.uploading.{int(time.time())}"
-                    conn.put(str(zipapp_path), tmp_remote)
+                logger.info("Verifying uploaded bundle checksum")
+                remote_checksum_out, _ = conn.run(
+                    f"sha256sum {remote_bundle_path_q} | awk '{{print $1}}'",
+                    hide=True,
+                )
+                remote_checksum = remote_checksum_out.strip()
 
-                    logger.info("Verifying uploaded bundle checksum")
-                    remote_checksum_out, _ = conn.run(
-                        f"sha256sum {tmp_remote} | awk '{{print $1}}'",
-                        hide=True,
-                    )
-                    remote_checksum = remote_checksum_out.strip()
-
-                    if local_checksum == remote_checksum:
-                        conn.run(f"mv {tmp_remote} {remote_bundle_path_q}")
-                        upload_ok = True
-                        self.output.success(
-                            "Bundle uploaded and verified successfully."
-                        )
-                        break
-
-                    conn.run(f"rm -f {tmp_remote}")
+                if local_checksum != remote_checksum:
                     self.output.error(
-                        f"Checksum mismatch! Local: {local_checksum}, Remote: {remote_checksum}"
+                        f"Upload verification failed! Local: {local_checksum}, Remote: {remote_checksum}"
                     )
-                    self.output.warning(
-                        "The uploaded file doesn't match the local file. This could indicate:\n"
-                        "  - Network corruption during transfer\n"
-                        "  - Storage issues on the remote server\n"
-                        "  - Interrupted upload"
+                    raise UploadError(
+                        "Upload verification failed", checksum_mismatch=True
                     )
 
-                    if self.no_input or (
-                        attempt == max_upload_retries
-                        or not Confirm.ask("Upload failed. Retry?")
-                    ):
-                        self.output.error("Upload verification failed")
-                        self.output.info(
-                            "\nTroubleshooting:\n"
-                            "  - Check your network connection stability\n"
-                            "  - Verify the remote server has sufficient disk space: df -h\n"
-                            "  - Try deploying again with: fujin deploy"
-                        )
-                        raise UploadError(
-                            "Upload verification failed", checksum_mismatch=True
-                        )
-
-                if not upload_ok:
-                    self.output.error("Upload failed after maximum retries")
-                    raise UploadError("Upload failed after maximum retries")
+                self.output.success("Bundle uploaded and verified successfully.")
 
                 self.output.info("Executing remote installation...")
                 deploy_script = f"python3 {remote_bundle_path_q} install || (echo 'install failed' >&2; exit 1)"
