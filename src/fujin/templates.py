@@ -16,6 +16,8 @@ Type=simple
 User={{user}}
 WorkingDirectory={{app_dir}}
 EnvironmentFile={{app_dir}}/.env
+RuntimeDirectory={{app_name}}
+RuntimeDirectoryMode=0755
 
 # Main command - adjust to match your application
 ExecStart={{app_dir}}/.venv/bin/python -m myapp.{name}

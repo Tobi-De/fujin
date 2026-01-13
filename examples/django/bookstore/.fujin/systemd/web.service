@@ -13,6 +13,8 @@ Type=simple
 User={user}
 WorkingDirectory={app_dir}
 EnvironmentFile={app_dir}/.env
+RuntimeDirectory={app_name}
+RuntimeDirectoryMode=0755
 
 # Run release command before starting
 # ExecStartPre={app_dir}/bookstore migrate && bookstore collectstatic --no-input && sudo mkdir -p /var/www/bookstore/static/ && sudo rsync  -a --delete staticfiles/ /var/www/bookstore/static/
