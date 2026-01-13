@@ -72,56 +72,70 @@ class App(BaseCommand):
                 if domain:
                     infos["running_at"] = f"https://{domain}"
 
-            services = {}
-            for du in self.config.deployed_units:
-                running_count = sum(
-                    1
-                    for name in du.instance_service_names
-                    if services_status.get(name) == "active"
-                )
-                total_count = len(du.instance_service_names)
+            services = self._build_service_status_dict(services_status)
 
-                if total_count == 1:
-                    services[du.service_name] = services_status.get(
-                        du.instance_service_names[0], "unknown"
-                    )
-                else:
-                    services[du.service_name] = f"{running_count}/{total_count}"
-
-                if du.template_socket_name:
-                    socket_status = services_status.get(du.template_socket_name)
-                    if socket_status:
-                        services[f"{du.service_name}.socket"] = socket_status
-
-        # Format info text with clickable URL
+        # Display info and status table
         info_lines = [f"{key}: {value}" for key, value in infos.items()]
-        infos_text = "\n".join(info_lines)
+        self.output.output("\n".join(info_lines))
+        self.output.output(self._build_status_table(services))
 
+    def _build_service_status_dict(
+        self, services_status: dict[str, str]
+    ) -> dict[str, str]:
+        """Build a dict of service name -> status string."""
+        services = {}
+        for du in self.config.deployed_units:
+            running_count = sum(
+                1
+                for name in du.instance_service_names
+                if services_status.get(name) == "active"
+            )
+            total_count = len(du.instance_service_names)
+
+            if total_count == 1:
+                services[du.service_name] = services_status.get(
+                    du.instance_service_names[0], "unknown"
+                )
+            else:
+                services[du.service_name] = f"{running_count}/{total_count}"
+
+            if du.template_socket_name:
+                socket_status = services_status.get(du.template_socket_name)
+                if socket_status:
+                    services[f"{du.service_name}.socket"] = socket_status
+
+        return services
+
+    def _build_status_table(self, services: dict[str, str]) -> Table:
+        """Build a Rich table from service status dict."""
         table = Table(title="", header_style="bold cyan")
         table.add_column("Process", style="")
         table.add_column("Status")
-        for service, status in services.items():
-            if status == "active":
-                status_str = f"[bold green]{status}[/bold green]"
-            elif status == "failed":
-                status_str = f"[bold red]{status}[/bold red]"
-            elif status in ("inactive", "unknown"):
-                status_str = f"[dim]{status}[/dim]"
-            elif "/" in status:
-                running, total = map(int, status.split("/"))
-                if running == total:
-                    status_str = f"[bold green]{status}[/bold green]"
-                elif running == 0:
-                    status_str = f"[bold red]{status}[/bold red]"
-                else:
-                    status_str = f"[bold yellow]{status}[/bold yellow]"
-            else:
-                status_str = status
 
+        for service, status in services.items():
+            status_str = self._format_status(status)
             table.add_row(service, status_str)
 
-        self.output.output(infos_text)
-        self.output.output(table)
+        return table
+
+    def _format_status(self, status: str) -> str:
+        """Format a status string with color."""
+        if status == "active":
+            return f"[bold green]{status}[/bold green]"
+        elif status == "failed":
+            return f"[bold red]{status}[/bold red]"
+        elif status in ("inactive", "unknown"):
+            return f"[dim]{status}[/dim]"
+        elif "/" in status:
+            running, total = map(int, status.split("/"))
+            if running == total:
+                return f"[bold green]{status}[/bold green]"
+            elif running == 0:
+                return f"[bold red]{status}[/bold red]"
+            else:
+                return f"[bold yellow]{status}[/bold yellow]"
+        else:
+            return status
 
     def _show_service_detail(self, service_name: str):
         """Show detailed information for a specific service."""
@@ -170,13 +184,7 @@ class App(BaseCommand):
                     load_state = props.get("LoadState", "unknown")
                     active_since = props.get("ActiveEnterTimestamp", "")
 
-                    # Format status with color
-                    if active_state == "active":
-                        status_str = f"[bold green]{active_state}[/bold green]"
-                    elif active_state == "failed":
-                        status_str = f"[bold red]{active_state}[/bold red]"
-                    else:
-                        status_str = f"[dim]{active_state}[/dim]"
+                    status_str = self._format_status(active_state)
 
                     if load_state == "not-found":
                         self.output.output(f"  {unit_name}: [dim]not deployed[/dim]")
@@ -191,21 +199,7 @@ class App(BaseCommand):
                     self.output.output(f"  {unit_name}: [dim]unknown[/dim]")
 
         # Show drop-ins if any
-        drop_ins = []
-        # Common drop-ins
-        common_dir = Path(".fujin/systemd/common.d")
-        if common_dir.exists():
-            common_files = list(common_dir.glob("*.conf"))
-            drop_ins.extend([f"common.d/{f.name}" for f in common_files])
-
-        # Service-specific drop-ins
-        service_dropin_dir = Path(f".fujin/systemd/{deployed_unit.service_file.name}.d")
-        if service_dropin_dir.exists():
-            service_files = list(service_dropin_dir.glob("*.conf"))
-            drop_ins.extend(
-                [f"{deployed_unit.service_file.name}.d/{f.name}" for f in service_files]
-            )
-
+        drop_ins = self._find_dropins(deployed_unit)
         if drop_ins:
             self.output.output("\n[bold]Drop-ins:[/bold]")
             for dropin in drop_ins:
@@ -218,20 +212,6 @@ class App(BaseCommand):
             )
         if deployed_unit.timer_file:
             self.output.output(f"\n[bold]Timer:[/bold] {deployed_unit.timer_file.name}")
-            # Get timer status
-            with self.connection() as conn:
-                timer_name = deployed_unit.template_timer_name
-                timer_cmd = f"sudo systemctl show {timer_name} --property=NextElapseUSecRealtime,LastTriggerUSec --no-pager"
-                timer_output, success = conn.run(timer_cmd, warn=True, hide=True)
-                if success:
-                    props = {}
-                    for line in timer_output.strip().split("\n"):
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            props[key] = value
-                    next_run = props.get("NextElapseUSecRealtime", "")
-                    if next_run and next_run != "0":
-                        self.output.output(f"  Next run: {next_run}")
 
     @cappa.command(
         help="Start an interactive shell session using the system SSH client"
@@ -291,8 +271,6 @@ class App(BaseCommand):
         self._run_service_command("stop", name)
 
     def _run_service_command(self, command: str, name: str | None):
-        from pathlib import Path
-
         with self.connection() as conn:
             # Use instances for start/stop/restart (operates on running services)
             names = self._resolve_units(name, use_templates=False)
@@ -300,18 +278,14 @@ class App(BaseCommand):
                 self.output.warning("No services found")
                 return
 
-            # When stopping a service, also stop associated sockets
-            # Check for socket files in .fujin/systemd/ directory
+            # When stopping, also stop associated sockets
             if command == "stop" and name:
-                systemd_dir = Path(".fujin/systemd")
-                if systemd_dir.exists():
-                    # Check for socket file matching the service name
-                    socket_file = systemd_dir / f"{name}.socket"
-                    if socket_file.exists():
-                        socket_unit = f"{self.config.app_name}-{name}.socket"
-                        if socket_unit not in names:
-                            names.append(socket_unit)
-                            self.output.info(f"Also stopping socket: {socket_unit}")
+                du = next(
+                    (u for u in self.deployed_units if u.service_name == name),
+                    None,
+                )
+                if du and du.template_socket_name:
+                    names.append(du.template_socket_name)
 
             self.output.output(
                 f"Running [cyan]{command}[/cyan] on: [cyan]{', '.join(names)}[/cyan]"
@@ -399,10 +373,13 @@ class App(BaseCommand):
             else:
                 self.output.warning("No services found")
 
-    @cappa.command(help="Show the systemd unit file content for the specified service")
+    @cappa.command(help="Show systemd unit file content, env file, or Caddyfile")
     def cat(
         self,
-        name: Annotated[str | None, cappa.Arg(help="Service name")] = None,
+        name: Annotated[
+            str | None,
+            cappa.Arg(help="Service name, 'env', 'caddy', or 'units'"),
+        ] = None,
     ):
         if not name:
             self.output.info("Available options:")
@@ -414,6 +391,15 @@ class App(BaseCommand):
                 self.output.output(f"[cyan]# {self.config.caddy_config_path}[/cyan]")
                 print()
                 conn.run(f"cat {self.config.caddy_config_path}")
+                print()
+                return
+
+            if name == "env":
+                app_dir = shlex.quote(self.config.app_dir(self.selected_host))
+                env_path = f"{app_dir}/.env"
+                self.output.output(f"[cyan]# {env_path}[/cyan]")
+                print()
+                conn.run(f"cat {env_path}", warn=True)
                 print()
                 return
 
@@ -433,21 +419,11 @@ class App(BaseCommand):
         options = []
 
         # Special values
-        options.extend(["env", "caddy", "units"])
-
-        # Get deployed units
-        has_timer = any(du.timer_file for du in self.deployed_units)
-        has_socket = any(du.socket_file for du in self.deployed_units)
-
-        if has_timer:
-            options.append("timer")
-        if has_socket:
-            options.append("socket")
+        options.extend(["caddy", "env", "units"])
 
         # Service names and variations
         for du in self.deployed_units:
             options.append(du.service_name)
-            options.append(f"{du.service_name}.service")
             if du.socket_file:
                 options.append(f"{du.service_name}.socket")
             if du.timer_file:
@@ -463,26 +439,20 @@ class App(BaseCommand):
         """
         Resolve a service name to systemd unit names.
 
-        Accepts service names (e.g., "web") and service names with suffixes
-        (e.g., "web.service", "health.timer"). Does NOT accept full systemd
-        names like "bookstore.service" or instance names like "bookstore-worker@1.service".
-
         Args:
-            name: Service name or service name with suffix (.service/.timer/.socket)
-                  Special keywords: "timer", "socket"
-            use_templates: If True, return template names (for show/cat)
+            name: Service name (e.g., "web", "worker")
+                  Can include suffix: "web.service", "worker.timer", "web.socket"
+                  If None, returns all units
+            use_templates: If True, return template names (for cat/show)
                           If False, return instance names (for start/stop/restart/logs)
 
         Returns:
             List of systemd unit names
         """
-
-        systemd_units = self.config.systemd_units
-
         if not name:
-            return systemd_units
+            return self.config.systemd_units
 
-        # Extract base service name and suffix type
+        # Parse suffix if present
         suffix_type = None
         if name.endswith(".service"):
             service_name = name[:-8]
@@ -496,13 +466,6 @@ class App(BaseCommand):
         else:
             service_name = name
 
-        # Handle special keywords
-        if service_name == "timer":
-            return [n for n in systemd_units if n.endswith(".timer")]
-
-        if service_name == "socket":
-            return [n for n in systemd_units if n.endswith(".socket")]
-
         # Find the deployed unit
         du = next(
             (u for u in self.deployed_units if u.service_name == service_name),
@@ -511,33 +474,51 @@ class App(BaseCommand):
         if not du:
             available = ", ".join(u.service_name for u in self.deployed_units)
             raise cappa.Exit(
-                f"Unknown service '{service_name}'. Available services: {available}",
+                f"Unknown service '{service_name}'. Available: {available}",
                 code=1,
             )
 
         units = []
 
-        # Build unit names based on suffix type and use_templates flag
+        # Return appropriate units based on suffix type
         if suffix_type == "service" or suffix_type is None:
             if use_templates:
                 units.append(du.template_service_name)
             else:
                 units.extend(du.instance_service_names)
 
-        if suffix_type == "socket" or (suffix_type is None and du.socket_file):
-            if not du.socket_file and suffix_type == "socket":
+        if suffix_type == "socket":
+            if not du.socket_file:
                 raise cappa.Exit(
                     f"Service '{service_name}' does not have a socket.", code=1
                 )
-            if du.template_socket_name:
-                units.append(du.template_socket_name)
+            units.append(du.template_socket_name)
 
-        if suffix_type == "timer" or (suffix_type is None and du.timer_file):
-            if not du.timer_file and suffix_type == "timer":
+        if suffix_type == "timer":
+            if not du.timer_file:
                 raise cappa.Exit(
                     f"Service '{service_name}' does not have a timer.", code=1
                 )
-            if du.template_timer_name:
-                units.append(du.template_timer_name)
+            units.append(du.template_timer_name)
 
         return units
+
+    def _find_dropins(self, deployed_unit) -> list[str]:
+        """Find all dropin files for a deployed unit."""
+        drop_ins = []
+
+        # Common drop-ins
+        common_dir = Path(".fujin/systemd/common.d")
+        if common_dir.exists():
+            common_files = list(common_dir.glob("*.conf"))
+            drop_ins.extend([f"common.d/{f.name}" for f in common_files])
+
+        # Service-specific drop-ins
+        service_dropin_dir = Path(f".fujin/systemd/{deployed_unit.service_file.name}.d")
+        if service_dropin_dir.exists():
+            service_files = list(service_dropin_dir.glob("*.conf"))
+            drop_ins.extend(
+                [f"{deployed_unit.service_file.name}.d/{f.name}" for f in service_files]
+            )
+
+        return drop_ins
