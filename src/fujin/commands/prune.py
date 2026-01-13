@@ -13,16 +13,21 @@ from fujin.commands import BaseCommand
 @dataclass
 class Prune(BaseCommand):
     keep: Annotated[
-        int,
+        int | None,
         cappa.Arg(
             short="-k",
             long="--keep",
-            help="Number of version artifacts to retain (minimum 1)",
+            help="Number of version artifacts to retain (minimum 1). Defaults to versions_to_keep from config",
         ),
-    ] = 2
+    ] = None
 
     def __call__(self):
-        if self.keep < 1:
+        # Use config value if --keep not specified
+        keep = (
+            self.keep if self.keep is not None else (self.config.versions_to_keep or 5)
+        )
+
+        if keep < 1:
             raise cappa.Exit("The minimum value for the --keep option is 1", code=1)
 
         versions_dir = f"{self.config.app_dir(self.selected_host)}/.versions"
@@ -48,13 +53,13 @@ class Prune(BaseCommand):
                 if fname.startswith(prefix) and fname.endswith(suffix):
                     valid_bundles.append(fname)
 
-            if len(valid_bundles) <= self.keep:
+            if len(valid_bundles) <= keep:
                 self.output.info(
-                    f"Only {len(valid_bundles)} versions found. Nothing to prune (keep={self.keep})."
+                    f"Only {len(valid_bundles)} versions found. Nothing to prune (keep={keep})."
                 )
                 return
 
-            to_delete = valid_bundles[self.keep :]
+            to_delete = valid_bundles[keep:]
             # Extract versions for display
             versions_to_delete = []
             for fname in to_delete:
