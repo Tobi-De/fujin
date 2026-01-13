@@ -238,8 +238,48 @@ export PATH="{app_dir}:$PATH"
     log("Restarting services...")
     units_str = " ".join(config.active_units)
     run(
-        f"sudo systemctl daemon-reload && sudo systemctl enable {units_str} && sudo systemctl restart {units_str}"
+        f"sudo systemctl daemon-reload && sudo systemctl enable {units_str}",
+        check=True,
     )
+
+    # Restart services and check for failures
+    restart_result = run(
+        f"sudo systemctl restart {units_str}",
+        check=False,
+    )
+
+    # Check if restart failed (handle both None and returncode != 0)
+    if (
+        restart_result
+        and hasattr(restart_result, "returncode")
+        and restart_result.returncode != 0
+    ):
+        log("⚠️  Service restart failed! Fetching recent logs...")
+        # Show logs for each service that failed
+        for unit in config.active_units:
+            status_result = run(
+                f"sudo systemctl is-active {unit}",
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if (
+                status_result
+                and hasattr(status_result, "stdout")
+                and status_result.stdout.strip() != "active"
+            ):
+                print(f"\n{'=' * 60}")
+                print(f"❌ {unit} failed to start")
+                print(f"{'=' * 60}")
+                # Show last 30 lines of logs for this unit
+                run(
+                    f"sudo journalctl -u {unit} -n 30 --no-pager",
+                    check=False,
+                )
+        print(f"\n{'=' * 60}")
+        print("Deployment failed: One or more services failed to start")
+        print(f"{'=' * 60}\n")
+        sys.exit(1)
 
     if config.webserver_enabled:
         log("Configuring Caddy...")
