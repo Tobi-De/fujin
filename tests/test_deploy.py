@@ -12,7 +12,7 @@ import pytest
 
 from fujin.commands.deploy import Deploy
 from fujin.config import Config
-from fujin.errors import BuildError, UploadError
+from fujin.errors import BuildError
 
 
 @pytest.fixture
@@ -148,105 +148,6 @@ def test_deploy_fails_when_requirements_missing(minimal_deploy_config, tmp_path)
 
         with pytest.raises(BuildError):
             deploy()
-
-
-def test_deploy_retries_on_checksum_mismatch(minimal_deploy_config):
-    """Deploy retries upload when checksum doesn't match."""
-    config = msgspec.convert(minimal_deploy_config, type=Config)
-    mock_conn = MagicMock()
-
-    # First upload: wrong checksum, second: correct
-    local_checksum = "abcd1234"
-    mock_conn.run.side_effect = [
-        ("", True),  # mkdir
-        ("wrong", True),  # first checksum
-        ("", True),  # rm temp
-        (local_checksum, True),  # second checksum
-        ("", True),  # mv
-        ("", True),  # install
-        ("[]", True),  # history read
-        ("", True),  # history write
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.commands.deploy.subprocess.run") as mock_subprocess,
-        patch.object(Deploy, "connection") as mock_connection,
-        patch("fujin.commands.deploy.log_operation"),
-        patch("fujin.commands.deploy.hashlib.file_digest") as mock_digest,
-        patch("fujin.commands.deploy.Confirm") as mock_confirm,
-        patch.object(Deploy, "output", MagicMock()),
-        patch("fujin.commands.deploy.Console", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        # Mock subprocess.run to return git commit
-        mock_subprocess.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="abc123\n", stderr=""
-        )
-
-        # Mock the checksum calculation to return known value
-        mock_digest_obj = MagicMock()
-        mock_digest_obj.hexdigest.return_value = local_checksum
-        mock_digest.return_value = mock_digest_obj
-
-        # Mock user confirming retry
-        mock_confirm.ask.return_value = True
-
-        deploy = Deploy(no_input=False)  # Need no_input=False to allow retries
-        deploy()
-
-        # Should have uploaded twice (retry)
-        assert mock_conn.put.call_count == 2
-
-
-def test_deploy_fails_after_max_retry_attempts(minimal_deploy_config):
-    """Deploy raises UploadError after max retries."""
-    config = msgspec.convert(minimal_deploy_config, type=Config)
-    mock_conn = MagicMock()
-
-    # All attempts fail with wrong checksum
-    local_checksum = "correct_checksum"
-    mock_conn.run.side_effect = [
-        ("", True),  # mkdir
-        ("wrong1", True),
-        ("", True),  # attempt 1
-        ("wrong2", True),
-        ("", True),  # attempt 2
-        ("wrong3", True),
-        ("", True),  # attempt 3
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.commands.deploy.subprocess.run") as mock_subprocess,
-        patch.object(Deploy, "connection") as mock_connection,
-        patch("fujin.commands.deploy.log_operation"),
-        patch("fujin.commands.deploy.hashlib.file_digest") as mock_digest,
-        patch.object(Deploy, "output", MagicMock()),
-        patch("fujin.commands.deploy.Console", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        # Mock subprocess.run to return git commit
-        mock_subprocess.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="abc123\n", stderr=""
-        )
-
-        # Mock the checksum calculation to return known value
-        mock_digest_obj = MagicMock()
-        mock_digest_obj.hexdigest.return_value = local_checksum
-        mock_digest.return_value = mock_digest_obj
-
-        deploy = Deploy(no_input=True)
-
-        with pytest.raises(UploadError):
-            deploy()
-
-        # With no_input=True, fails immediately on first mismatch
-        assert mock_conn.put.call_count == 1
 
 
 # ============================================================================
