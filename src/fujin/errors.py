@@ -69,3 +69,7 @@ class SSHAuthenticationError(FujinError):
 
 class ImproperlyConfiguredError(FujinError):
     """Fujin is improperly configured."""
+
+
+class ServiceDiscoveryError(FujinError):
+    """Raised when service discovery fails."""

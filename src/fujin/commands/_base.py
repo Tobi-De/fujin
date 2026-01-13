@@ -33,6 +33,11 @@ class BaseCommand:
         return Config.read()
 
     @cached_property
+    def deployed_units(self) -> list:
+        """Cached deployed units for this command instance."""
+        return self.config.deployed_units
+
+    @cached_property
     def selected_host(self) -> HostConfig:
         """Get the selected host based on --host flag or default."""
         return self.config.select_host(self.host)
@@ -53,11 +58,9 @@ class BaseCommand:
         # Special values
         options.extend(["env", "caddy", "units"])
 
-        # Get discovered services from .fujin/systemd/
-        discovered = self.config.discovered_services
-
-        has_timer = any(svc.timer_file for svc in discovered)
-        has_socket = any(svc.socket_file for svc in discovered)
+        # Get deployed units
+        has_timer = any(du.timer_file for du in self.deployed_units)
+        has_socket = any(du.socket_file for du in self.deployed_units)
 
         if has_timer:
             options.append("timer")
@@ -65,13 +68,13 @@ class BaseCommand:
             options.append("socket")
 
         # Service names and variations
-        for svc in discovered:
-            options.append(svc.name)
-            options.append(f"{svc.name}.service")
-            if svc.socket_file:
-                options.append(f"{svc.name}.socket")
-            if svc.timer_file:
-                options.append(f"{svc.name}.timer")
+        for du in self.deployed_units:
+            options.append(du.service_name)
+            options.append(f"{du.service_name}.service")
+            if du.socket_file:
+                options.append(f"{du.service_name}.socket")
+            if du.timer_file:
+                options.append(f"{du.service_name}.timer")
 
         # Apply uniform color to all options
         colored_options = [f"[cyan]{opt}[/cyan]" for opt in options]
@@ -123,51 +126,42 @@ class BaseCommand:
         if service_name == "socket":
             return [n for n in systemd_units if n.endswith(".socket")]
 
-        # Get discovered services
-        discovered = self.config.discovered_services
-        svc = next((s for s in discovered if s.name == service_name), None)
-        if not svc:
-            available = ", ".join(s.name for s in discovered)
+        # Find the deployed unit
+        du = next(
+            (u for u in self.deployed_units if u.service_name == service_name),
+            None,
+        )
+        if not du:
+            available = ", ".join(u.service_name for u in self.deployed_units)
             raise cappa.Exit(
                 f"Unknown service '{service_name}'. Available services: {available}",
                 code=1,
             )
 
         units = []
-        replicas = self.config.replicas.get(svc.name, 1)
 
-        # Build deployed unit names
+        # Build unit names based on suffix type and use_templates flag
         if suffix_type == "service" or suffix_type is None:
-            if use_templates and svc.is_template:
-                units.append(f"{self.config.app_name}-{svc.name}@.service")
+            if use_templates:
+                units.append(du.template_service_name)
             else:
-                if svc.is_template:
-                    base = f"{self.config.app_name}-{svc.name}"
-                    units.extend(
-                        [f"{base}@{i}.service" for i in range(1, replicas + 1)]
-                    )
-                else:
-                    units.append(f"{self.config.app_name}-{svc.name}.service")
+                units.extend(du.instance_service_names)
 
-        if suffix_type == "socket" or (suffix_type is None and svc.socket_file):
-            if not svc.socket_file and suffix_type == "socket":
+        if suffix_type == "socket" or (suffix_type is None and du.socket_file):
+            if not du.socket_file and suffix_type == "socket":
                 raise cappa.Exit(
                     f"Service '{service_name}' does not have a socket.", code=1
                 )
-            if svc.socket_file:
-                units.append(
-                    f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.socket"
-                )
+            if du.template_socket_name:
+                units.append(du.template_socket_name)
 
-        if suffix_type == "timer" or (suffix_type is None and svc.timer_file):
-            if not svc.timer_file and suffix_type == "timer":
+        if suffix_type == "timer" or (suffix_type is None and du.timer_file):
+            if not du.timer_file and suffix_type == "timer":
                 raise cappa.Exit(
                     f"Service '{service_name}' does not have a timer.", code=1
                 )
-            if svc.timer_file:
-                units.append(
-                    f"{self.config.app_name}-{svc.name}{'@' if svc.is_template else ''}.timer"
-                )
+            if du.template_timer_name:
+                units.append(du.template_timer_name)
 
         return units
 
