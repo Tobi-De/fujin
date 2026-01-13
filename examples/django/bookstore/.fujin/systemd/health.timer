@@ -1,0 +1,11 @@
+# Timer for health service
+# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.timer.html
+
+[Unit]
+Description={app_name} health timer
+
+[Timer]
+OnCalendar=*:*:00
+
+[Install]
+WantedBy=timers.target

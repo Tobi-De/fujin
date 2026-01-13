@@ -9,7 +9,6 @@ import cappa
 from rich.table import Table
 
 from fujin.commands import BaseCommand
-from fujin.config import InstallationMode
 
 
 @cappa.command(
@@ -38,13 +37,9 @@ class App(BaseCommand):
         if service:
             return self._show_service_detail(service)
 
-        # Build systemd unit names from deployed units
         names = []
         for du in self.config.deployed_units:
-            # Add all instance names
             names.extend(du.instance_service_names)
-
-            # Add socket/timer (templates use @ notation)
             if du.template_socket_name:
                 names.append(du.template_socket_name)
             if du.template_timer_name:
@@ -52,67 +47,33 @@ class App(BaseCommand):
 
         with self.connection() as conn:
             app_dir = shlex.quote(self.config.app_dir(self.selected_host))
-            delimiter = "___FUJIN_DELIM___"
-
-            # Combine commands to reduce SSH roundtrips
-            # 1. Get remote version from .version file
-            # 2. List files in .versions directory for rollback targets
-            # 3. Get service statuses (systemctl)
-            cmds = [
-                f"cat {app_dir}/.version 2>/dev/null || true",
-                f"ls -1t {app_dir}/.versions 2>/dev/null || true",
-                f"sudo systemctl is-active {' '.join(names)} 2>/dev/null || true",
-            ]
-            full_cmd = f"; echo '{delimiter}'; ".join(cmds)
-            result_stdout, _ = conn.run(full_cmd, warn=True, hide=True)
-            parts = result_stdout.split(delimiter)
-            remote_version = parts[0].strip() or "N/A"
-
-            # Parse rollback targets from filenames
-            rollback_files = parts[1].strip().splitlines()
-            rollback_versions = []
-            prefix = f"{self.config.app_name}-"
-            suffix = ".pyz"
-            for fname in rollback_files:
-                fname = fname.strip()
-                if fname.startswith(prefix) and fname.endswith(suffix):
-                    v = fname[len(prefix) : -len(suffix)]
-                    if v != remote_version:
-                        rollback_versions.append(v)
-
-            rollback_targets = (
-                ", ".join(rollback_versions) if rollback_versions else "N/A"
+            remote_version, _ = conn.run(
+                f"cat {app_dir}/.version 2>/dev/null || echo N/A", warn=True, hide=True
             )
+            remote_version = remote_version.strip()
+
+            statuses_output, _ = conn.run(
+                f"sudo systemctl is-active {' '.join(names)} 2>/dev/null || true",
+                warn=True,
+                hide=True,
+            )
+            statuses = (
+                statuses_output.strip().split("\n") if statuses_output.strip() else []
+            )
+            services_status = dict(zip(names, statuses))
 
             infos = {
                 "app_name": self.config.app_name,
-                "app_dir": self.config.app_dir(self.selected_host),
-                "app_bin": self.config.app_bin,
                 "local_version": self.config.version,
                 "remote_version": remote_version,
-                "rollback_targets": (
-                    ", ".join(rollback_targets.split("\n"))
-                    if rollback_targets
-                    else "N/A"
-                ),
             }
-            if self.config.installation_mode == InstallationMode.PY_PACKAGE:
-                if self.config.python_version:
-                    infos["python_version"] = self.config.python_version
-
             if self.config.caddyfile_exists:
                 domain = self.config.get_domain_name()
                 if domain:
                     infos["running_at"] = f"https://{domain}"
 
-            services_status = {}
-            statuses = parts[2].strip().split("\n") if parts[2].strip() else []
-            services_status = dict(zip(names, statuses))
-
-            # Build services table from deployed units
             services = {}
             for du in self.config.deployed_units:
-                # Count running instances for services
                 running_count = sum(
                     1
                     for name in du.instance_service_names
@@ -127,7 +88,6 @@ class App(BaseCommand):
                 else:
                     services[du.service_name] = f"{running_count}/{total_count}"
 
-                # Add socket status if exists
                 if du.template_socket_name:
                     socket_status = services_status.get(du.template_socket_name)
                     if socket_status:
@@ -467,3 +427,117 @@ class App(BaseCommand):
                 return
 
             conn.run(f"sudo systemctl cat {' '.join(names)}", pty=True)
+
+    def _get_available_options(self) -> str:
+        """Get formatted, colored list of available service and unit options."""
+        options = []
+
+        # Special values
+        options.extend(["env", "caddy", "units"])
+
+        # Get deployed units
+        has_timer = any(du.timer_file for du in self.deployed_units)
+        has_socket = any(du.socket_file for du in self.deployed_units)
+
+        if has_timer:
+            options.append("timer")
+        if has_socket:
+            options.append("socket")
+
+        # Service names and variations
+        for du in self.deployed_units:
+            options.append(du.service_name)
+            options.append(f"{du.service_name}.service")
+            if du.socket_file:
+                options.append(f"{du.service_name}.socket")
+            if du.timer_file:
+                options.append(f"{du.service_name}.timer")
+
+        # Apply uniform color to all options
+        colored_options = [f"[cyan]{opt}[/cyan]" for opt in options]
+        return " ".join(colored_options)
+
+    def _resolve_units(
+        self, name: str | None, use_templates: bool = False
+    ) -> list[str]:
+        """
+        Resolve a service name to systemd unit names.
+
+        Accepts service names (e.g., "web") and service names with suffixes
+        (e.g., "web.service", "health.timer"). Does NOT accept full systemd
+        names like "bookstore.service" or instance names like "bookstore-worker@1.service".
+
+        Args:
+            name: Service name or service name with suffix (.service/.timer/.socket)
+                  Special keywords: "timer", "socket"
+            use_templates: If True, return template names (for show/cat)
+                          If False, return instance names (for start/stop/restart/logs)
+
+        Returns:
+            List of systemd unit names
+        """
+
+        systemd_units = self.config.systemd_units
+
+        if not name:
+            return systemd_units
+
+        # Extract base service name and suffix type
+        suffix_type = None
+        if name.endswith(".service"):
+            service_name = name[:-8]
+            suffix_type = "service"
+        elif name.endswith(".timer"):
+            service_name = name[:-6]
+            suffix_type = "timer"
+        elif name.endswith(".socket"):
+            service_name = name[:-7]
+            suffix_type = "socket"
+        else:
+            service_name = name
+
+        # Handle special keywords
+        if service_name == "timer":
+            return [n for n in systemd_units if n.endswith(".timer")]
+
+        if service_name == "socket":
+            return [n for n in systemd_units if n.endswith(".socket")]
+
+        # Find the deployed unit
+        du = next(
+            (u for u in self.deployed_units if u.service_name == service_name),
+            None,
+        )
+        if not du:
+            available = ", ".join(u.service_name for u in self.deployed_units)
+            raise cappa.Exit(
+                f"Unknown service '{service_name}'. Available services: {available}",
+                code=1,
+            )
+
+        units = []
+
+        # Build unit names based on suffix type and use_templates flag
+        if suffix_type == "service" or suffix_type is None:
+            if use_templates:
+                units.append(du.template_service_name)
+            else:
+                units.extend(du.instance_service_names)
+
+        if suffix_type == "socket" or (suffix_type is None and du.socket_file):
+            if not du.socket_file and suffix_type == "socket":
+                raise cappa.Exit(
+                    f"Service '{service_name}' does not have a socket.", code=1
+                )
+            if du.template_socket_name:
+                units.append(du.template_socket_name)
+
+        if suffix_type == "timer" or (suffix_type is None and du.timer_file):
+            if not du.timer_file and suffix_type == "timer":
+                raise cappa.Exit(
+                    f"Service '{service_name}' does not have a timer.", code=1
+                )
+            if du.template_timer_name:
+                units.append(du.template_timer_name)
+
+        return units
