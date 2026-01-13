@@ -7,10 +7,14 @@ The ``fujin app`` command provides tools to manage your running application serv
    :alt: fujin app command overview
    :width: 100%
 
+.. note::
+   The ``fj`` command is available as a convenient shortcut for ``fujin app``.
+   For example, ``fj status`` is equivalent to ``fujin app status``.
+
 Overview
 --------
 
-Use ``fujin app`` to control your application's systemd services:
+Use ``fujin app`` (or the shorter ``fj``) to control your application's systemd services:
 
 - Start, stop, and restart services
 - View real-time logs
@@ -35,16 +39,16 @@ Given the following configuration in ``fujin.toml``:
     command = "celery -A app worker"
     timer = { on_calendar = "*:00" }  # Run hourly
 
-You can interact with services in various ways:
+You can interact with services in various ways (examples show both ``fujin app`` and the ``fj`` shortcut):
 
 **Manage all services**
 
 .. code-block:: bash
 
     # Start/Stop/Restart all services (web, worker, socket, timer)
-    fujin app start
-    fujin app stop
-    fujin app restart
+    fj start
+    fj stop
+    fj restart
 
 **Manage specific process groups**
 
@@ -53,10 +57,10 @@ When targeting a process by name, it includes related units (sockets, timers).
 .. code-block:: bash
 
     # Starts web.service AND web.socket
-    fujin app start web
+    fj start web
 
     # Logs for worker.service AND worker.timer
-    fujin app logs worker
+    fj logs worker
 
 **Manage specific systemd units**
 
@@ -65,13 +69,13 @@ You can be specific by appending the unit type.
 .. code-block:: bash
 
     # Only restart the service, not the socket
-    fujin app restart web.service
+    fj restart web.service
 
     # Only show logs for the timer
-    fujin app logs worker.timer
+    fj logs worker.timer
 
     # Only stop the socket
-    fujin app stop web.socket
+    fj stop web.socket
 
 Logs Command
 ------------
@@ -83,23 +87,23 @@ The ``logs`` command is one of the most frequently used app subcommands. It prov
 .. code-block:: bash
 
    # Show logs for all services
-   fujin app logs
+   fj logs
 
    # Show logs for specific process
-   fujin app logs web
+   fj logs web
 
    # Show logs for specific unit
-   fujin app logs web.service
+   fj logs web.service
 
 **Follow logs in real-time**
 
 .. code-block:: bash
 
    # Follow logs (like tail -f)
-   fujin app logs -f
+   fj logs -f
 
    # Follow logs for specific process
-   fujin app logs -f web
+   fj logs -f web
 
 **Control log output**
 
