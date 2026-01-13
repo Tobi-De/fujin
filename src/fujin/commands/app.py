@@ -17,7 +17,7 @@ from fujin.config import InstallationMode
 )
 class App(BaseCommand):
     @cappa.command(help="Display application information and process status")
-    def info(
+    def status(
         self,
         service: Annotated[
             str | None,
