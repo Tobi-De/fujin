@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Add fj entry point as shortcut to fujin app
 - Show warning on unresolved variables and remove useless cmds
 - Fetch logs on services failing to start
 

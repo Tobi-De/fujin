@@ -1,16 +1,15 @@
 # Caddyfile for {app_name}
 # Learn more: https://caddyserver.com/docs/caddyfile
 
-book.13.204.64.39.nip.io {
+book.144.91.117.80.nip.io {
 
     # Serve static files
-    handle /static/* {
-        root * {app_dir}/static/
+    handle_path /static/* {
+        root * /var/www/bookstore/staticfiles
         file_server
     }
 
     # Proxy to web service
-    handle  {
-        reverse_proxy unix//run/bookstore/bookstore.sock
-    }
+    reverse_proxy unix//run/bookstore/bookstore.sock
 }
+

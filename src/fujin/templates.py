@@ -134,7 +134,7 @@ CADDYFILE_HEADER = """# Caddyfile for {app_name}
 
 CADDY_HANDLE_STATIC = """
     # Serve static files
-    handle {path} {{
+    handle_path {path} {{
         root * {root}
         file_server
     }}
