@@ -16,9 +16,11 @@ EnvironmentFile={app_dir}/.env
 RuntimeDirectory={app_name}
 RuntimeDirectoryMode=0755
 
-# Run release command before starting
-# ExecStartPre={app_dir}/bookstore migrate && bookstore collectstatic --no-input && sudo mkdir -p /var/www/bookstore/static/ && sudo rsync  -a --delete staticfiles/ /var/www/bookstore/static/
+# Run ExecStartPre as root to create staticfiles folder
+PermissionsStartOnly=true
+ExecStartPre={app_dir}/.venv/bin/bookstore collectstatic --no-input
 ExecStartPre={app_dir}/.venv/bin/bookstore migrate
+
 ExecStart={app_dir}/.venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/bookstore/bookstore.sock --access-logfile - --error-logfile -
 
 # Restart policy
