@@ -92,14 +92,6 @@ class Deploy(BaseCommand):
             bundle_dir = Path(tmpdir) / f"{self.config.app_name}-bundle"
             bundle_dir.mkdir()
 
-            # Copy artifacts
-            shutil.copy(distfile_path, bundle_dir / distfile_path.name)
-            if self.config.requirements:
-                shutil.copy(self.config.requirements, bundle_dir / "requirements.txt")
-
-            (bundle_dir / ".env").write_text(parsed_env)
-
-            # Discover and resolve systemd units locally
             context = {
                 "app_name": self.config.app_name,
                 "version": version,
@@ -107,12 +99,22 @@ class Deploy(BaseCommand):
                 "user": self.selected_host.user,
             }
 
-            logger.debug("Validating and resolving systemd units")
-            systemd_bundle = bundle_dir / "systemd"
-            systemd_bundle.mkdir()
+            # Copy artifacts
+            shutil.copy(distfile_path, bundle_dir / distfile_path.name)
+            if self.config.requirements:
+                shutil.copy(self.config.requirements, bundle_dir / "requirements.txt")
 
             # Track unresolved variables across all files
             all_unresolved = set()
+
+            # resolve and copy env file
+            resolved_env, unresolved = safe_format(parsed_env, **context)
+            all_unresolved.update(unresolved)
+            (bundle_dir / ".env").write_text(resolved_env)
+
+            logger.debug("Validating and resolving systemd units")
+            systemd_bundle = bundle_dir / "systemd"
+            systemd_bundle.mkdir()
 
             for du in self.config.deployed_units:
                 # Validate and resolve main service file
