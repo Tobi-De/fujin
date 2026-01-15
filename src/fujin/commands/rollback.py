@@ -16,7 +16,7 @@ from fujin.audit import log_operation
 class Rollback(BaseCommand):
     def __call__(self):
         with self.connection() as conn:
-            app_dir = shlex.quote(self.config.app_dir(self.selected_host))
+            app_dir = shlex.quote(self.config.app_dir())
             result, _ = conn.run(f"ls -1t {app_dir}/.versions", warn=True, hide=True)
             if not result:
                 self.output.info("No rollback targets available")

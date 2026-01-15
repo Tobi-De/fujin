@@ -56,6 +56,23 @@ class Server(BaseCommand):
                     "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool update-shell"
                 )
             conn.run("uv tool install fastfetch-bin-edge")
+
+            self.output.info("Setting up fujin group...")
+            conn.run("sudo groupadd -f fujin", pty=True)
+
+            self.output.info("Setting up /opt/fujin directory...")
+            conn.run("sudo mkdir -p /opt/fujin", pty=True)
+            conn.run("sudo chown root:fujin /opt/fujin", pty=True)
+            conn.run("sudo chmod 775 /opt/fujin", pty=True)
+
+            self.output.info("Setting up shared Python directory...")
+            conn.run("sudo mkdir -p /opt/fujin/.python", pty=True)
+            conn.run("sudo chown root:fujin /opt/fujin/.python", pty=True)
+            conn.run("sudo chmod 775 /opt/fujin/.python", pty=True)
+
+            self.output.info(f"Adding {self.selected_host.user} to fujin group...")
+            conn.run(f"sudo usermod -aG fujin {self.selected_host.user}", pty=True)
+
             if self.config.caddyfile_exists:
                 self.output.info("Setting up Caddy web server...")
                 _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
@@ -72,6 +89,9 @@ class Server(BaseCommand):
                     conn.run(" && ".join(commands), pty=True)
 
             self.output.success("Server bootstrap completed successfully!")
+            self.output.warning(
+                "⚠️  Log out and back in for group changes to take effect"
+            )
 
     @cappa.command(
         name="create-user", help="Create a new user with sudo and ssh access"
@@ -156,12 +176,10 @@ class Server(BaseCommand):
         else:
             self.output.info(f"Using existing SSH key: {existing_key}")
 
-        # Copy SSH key to server
         self.output.info(f"Copying SSH key to {username}@{ip}...")
 
         ssh_copy_cmd = ["ssh-copy-id", "-i", str(existing_key)]
         if password:
-            # Use sshpass if available for password authentication
             sshpass_available = bool(shutil.which("sshpass"))
             if sshpass_available:
                 ssh_copy_cmd = ["sshpass", "-p", password] + ssh_copy_cmd
@@ -182,7 +200,6 @@ class Server(BaseCommand):
                 "ssh-copy-id not found. Please install OpenSSH client."
             ) from e
 
-        # Update fujin.toml
         fujin_toml = Path("fujin.toml")
 
         if fujin_toml.exists():
@@ -199,7 +216,6 @@ class Server(BaseCommand):
         hosts[0] = {"address": ip, "user": username}
         config_data["hosts"] = hosts
 
-        # Write back to fujin.toml
         fujin_toml.write_text(tomli_w.dumps(config_data, multiline_strings=True))
         self.output.success(f"Updated fujin.toml with connection details!")
 

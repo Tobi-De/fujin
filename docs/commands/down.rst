@@ -10,7 +10,7 @@ The ``fujin down`` command tears down your application by stopping services and 
 Overview
 --------
 
-Use ``fujin down`` to remove your application from the server. The command runs the bundle's uninstall script, which stops and disables systemd services, removes systemd unit files, cleans up Caddy configuration, and deletes the application directory.
+Use ``fujin down`` to remove your application from the server. The command runs the bundle's uninstall script, which stops and disables systemd services, removes systemd unit files, cleans up Caddy configuration, deletes the application user, and removes the application directory.
 
 .. warning::
 
@@ -38,8 +38,10 @@ Here's what happens when you run ``fujin down``:
    - Stops all systemd services
    - Disables services from auto-starting
    - Removes systemd unit files
+   - Removes Caddy configuration (if webserver was enabled)
+   - Deletes the application user
 
-4. **Remove app directory**: Deletes the entire application directory (``~/apps/your-app`` or custom location).
+4. **Remove app directory**: Deletes the entire application directory (``/opt/fujin/your-app``).
 
 5. **Uninstall Caddy** (if ``--full``): Removes the Caddy web server from the system.
 

@@ -48,10 +48,18 @@ Install system dependencies required for fujin deployments.
 
 This command:
 
+- Creates ``/opt/fujin`` directory structure with proper permissions
+- Creates ``/opt/fujin/.python`` shared Python installation directory
 - Installs uv (Python package manager)
 - Installs Caddy web server (if webserver enabled)
 - Sets up necessary system packages
 - Configures Caddy to auto-load configurations from ``/etc/caddy/conf.d/``
+
+The bootstrap process creates a shared Python directory at ``/opt/fujin/.python`` where UV installs Python interpreters. This allows:
+
+- Multiple applications to share Python installations
+- Stronger systemd security with ``ProtectHome=true`` (home directories completely inaccessible)
+- Better isolation between deployment users and runtime users
 
 **Example:**
 

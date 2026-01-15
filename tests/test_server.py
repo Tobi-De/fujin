@@ -110,6 +110,14 @@ def test_bootstrap_installs_dependencies(base_config):
         ("", False),  # command -v uv (not installed)
         ("", True),  # install uv
         ("", True),  # uv tool install fastfetch
+        ("", True),  # sudo groupadd -f fujin
+        ("", True),  # sudo mkdir -p /opt/fujin
+        ("", True),  # sudo chown root:fujin /opt/fujin
+        ("", True),  # sudo chmod 775 /opt/fujin
+        ("", True),  # sudo mkdir -p /opt/fujin/.python
+        ("", True),  # sudo chown root:fujin /opt/fujin/.python
+        ("", True),  # sudo chmod 775 /opt/fujin/.python
+        ("", True),  # sudo usermod -aG fujin {user}
     ]
 
     with (
@@ -149,6 +157,14 @@ def test_bootstrap_without_webserver_skips_caddy(config_without_webserver):
         ("", False),  # command -v uv
         ("", True),  # install uv
         ("", True),  # uv tool install fastfetch
+        ("", True),  # sudo groupadd -f fujin
+        ("", True),  # sudo mkdir -p /opt/fujin
+        ("", True),  # sudo chown root:fujin /opt/fujin
+        ("", True),  # sudo chmod 775 /opt/fujin
+        ("", True),  # sudo mkdir -p /opt/fujin/.python
+        ("", True),  # sudo chown root:fujin /opt/fujin/.python
+        ("", True),  # sudo chmod 775 /opt/fujin/.python
+        ("", True),  # sudo usermod -aG fujin {user}
     ]
 
     with (
@@ -176,6 +192,14 @@ def test_bootstrap_skips_uv_when_already_installed(base_config):
         ("", True),  # apt update
         ("", True),  # command -v uv (already installed)
         ("", True),  # uv tool install fastfetch
+        ("", True),  # sudo groupadd -f fujin
+        ("", True),  # sudo mkdir -p /opt/fujin
+        ("", True),  # sudo chown root:fujin /opt/fujin
+        ("", True),  # sudo chmod 775 /opt/fujin
+        ("", True),  # sudo mkdir -p /opt/fujin/.python
+        ("", True),  # sudo chown root:fujin /opt/fujin/.python
+        ("", True),  # sudo chmod 775 /opt/fujin/.python
+        ("", True),  # sudo usermod -aG fujin {user}
     ]
 
     with (
@@ -206,7 +230,14 @@ def test_bootstrap_warns_on_apt_failure(base_config):
         ("", False),  # apt update fails
         ("", True),  # command -v uv
         ("", True),  # uv tool install fastfetch
-        ("", True),  # command -v caddy
+        ("", True),  # sudo groupadd -f fujin
+        ("", True),  # sudo mkdir -p /opt/fujin
+        ("", True),  # sudo chown root:fujin /opt/fujin
+        ("", True),  # sudo chmod 775 /opt/fujin
+        ("", True),  # sudo mkdir -p /opt/fujin/.python
+        ("", True),  # sudo chown root:fujin /opt/fujin/.python
+        ("", True),  # sudo chmod 775 /opt/fujin/.python
+        ("", True),  # sudo usermod -aG fujin {user}
     ]
 
     with (

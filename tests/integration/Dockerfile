@@ -21,6 +21,13 @@ RUN useradd -m -s /bin/bash fujin && \
     usermod -aG sudo fujin && \
     echo "fujin ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
+# 3.1 Create fujin group and /opt/fujin directory for deployments
+RUN groupadd fujin || true && \
+    usermod -aG fujin fujin && \
+    mkdir -p /opt/fujin/.python && \
+    chown -R root:fujin /opt/fujin && \
+    chmod -R 775 /opt/fujin
+
 # 3.5. Install uv for the fujin user
 RUN su - fujin -c "curl -LsSf https://astral.sh/uv/install.sh | sh"
 

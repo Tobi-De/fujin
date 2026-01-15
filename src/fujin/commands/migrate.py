@@ -71,14 +71,12 @@ class Migrate(BaseCommand):
             "Converting template-based config to file-based structure (.fujin/ directory)"
         )
 
-        # Show what will be created
         self._preview_changes(config_dict)
 
         if self.dry_run:
             self.output.info("\n[dim]Dry run - no changes written[/dim]")
             return
 
-        # Create backup if requested
         if self.backup:
             backup_path = Path("fujin.toml.backup")
             if backup_path.exists():
@@ -87,7 +85,6 @@ class Migrate(BaseCommand):
                 shutil.copy2(fujin_toml, backup_path)
                 self.output.success(f"Backup created: {backup_path}")
 
-        # Perform migration
         self._migrate_to_file_based(config_dict)
 
         self.output.success("\nMigration completed successfully!")
@@ -108,7 +105,6 @@ class Migrate(BaseCommand):
 
         self.output.output("\n[bold cyan]Files to be created:[/bold cyan]")
 
-        # Systemd units
         if processes:
             self.output.output("  .fujin/systemd/")
             for name in processes:
@@ -122,11 +118,9 @@ class Migrate(BaseCommand):
             self.output.output("    ├── common.d/")
             self.output.output("    │   └── base.conf")
 
-        # Caddyfile
         if sites:
             self.output.output("  .fujin/Caddyfile")
 
-        # Config changes
         self.output.output("\n[bold cyan]fujin.toml changes:[/bold cyan]")
         changes = []
 
@@ -161,7 +155,6 @@ class Migrate(BaseCommand):
         sites = config.get("sites", [])
         release_command = config.get("release_command")
 
-        # Create .fujin directory structure
         fujin_dir = Path(".fujin")
         systemd_dir = fujin_dir / "systemd"
         systemd_dir.mkdir(parents=True, exist_ok=True)
@@ -182,11 +175,9 @@ class Migrate(BaseCommand):
                 socket = process_config.get("socket", False)
                 timer = process_config.get("timer")
 
-            # Track replicas for config
             if num_replicas > 1:
                 replicas[name] = num_replicas
 
-            # Generate service file
             service_file = self._generate_service_file(
                 name=name,
                 command=command,
@@ -203,7 +194,6 @@ class Migrate(BaseCommand):
             service_path.write_text(service_file)
             self.output.success(f"Created {service_path}")
 
-            # Generate socket file if needed
             if socket:
                 socket_file = self._generate_socket_file(name, num_replicas > 1)
                 socket_path = systemd_dir / (
@@ -212,7 +202,6 @@ class Migrate(BaseCommand):
                 socket_path.write_text(socket_file)
                 self.output.success(f"Created {socket_path}")
 
-            # Generate timer file if needed
             if timer:
                 timer_file = self._generate_timer_file(name, timer, num_replicas > 1)
                 timer_path = systemd_dir / (
@@ -280,10 +269,6 @@ class Migrate(BaseCommand):
             service_content = service_content.replace(
                 "# Main command - adjust to match your application\n", exec_start_pre
             )
-
-        # # Change Type to notify for socket activation
-        # if socket:
-        #     service_content = service_content.replace("Type=simple", "Type=notify")
 
         # Handle instance suffix for templated units
         if replicas > 1:

@@ -34,7 +34,8 @@ RestartSec=5s
 # NoNewPrivileges=true
 # PrivateTmp=true
 # ProtectSystem=strict
-# ProtectHome=true
+# ProtectHome=true  # Home directories will be inaccessible
+# ReadWritePaths={{app_dir}}  # Grant write access to app directory
 
 [Install]
 WantedBy=multi-user.target
@@ -107,7 +108,7 @@ NEW_DROPIN_TEMPLATE = """# Systemd dropin configuration
 # NoNewPrivileges=true    # Prevent privilege escalation
 # PrivateTmp=true         # Isolated /tmp directory
 # ProtectSystem=strict    # Read-only /usr, /boot, /efi
-# ProtectHome=true        # Make /home inaccessible
+# ProtectHome=true        # Make /home inaccessible (use ReadWritePaths for app dir)
 # ProtectKernelTunables=true
 # ProtectControlGroups=true
 # RestrictRealtime=true
