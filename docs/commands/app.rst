@@ -212,12 +212,28 @@ Open an interactive shell on the server in your app's directory.
    # Open bash shell in app directory
    fujin app shell
 
+.. important::
+
+   **Runs as app user**: The shell runs as the app user (e.g., ``bookstore``), not the deploy user. This gives you write access to app-owned files like databases, logs, and uploads.
+
+   This is equivalent to: ``fujin exec --appenv bash``
+
+   **App binary wrapper**: Inside the shell, the app binary command (e.g., ``bookstore``) is automatically wrapped to run as the app user. This means you can simply type:
+
+   .. code-block:: bash
+
+      bookstore@server:/opt/fujin/bookstore$ bookstore createsuperuser
+      bookstore@server:/opt/fujin/bookstore$ bookstore migrate
+
+   The wrapper function in ``.appenv`` ensures these commands have the correct permissions without needing ``sudo`` manually.
+
 This is useful for:
 
 - Inspecting deployed files
-- Running one-off commands
+- Running one-off commands with database write access
 - Debugging deployment issues
 - Checking file permissions
+- Testing commands before creating aliases
 
 Cat Command
 -----------
@@ -294,3 +310,19 @@ Common Workflows
 
    # Access shell to investigate further
    fujin app shell
+
+**Run database operations interactively**
+
+.. code-block:: bash
+
+   # Open shell as app user (can write to database)
+   fujin app shell
+
+   # Now in the shell:
+   bookstore@server:/opt/fujin/bookstore$ python manage.py createsuperuser
+   bookstore@server:/opt/fujin/bookstore$ python manage.py migrate
+   bookstore@server:/opt/fujin/bookstore$ sqlite3 db.sqlite3 ".tables"
+
+.. tip::
+
+   The ``fujin app shell`` command runs as the app user, giving you the same permissions as your running services. This means you can safely modify databases and write to logs without permission errors.

@@ -45,11 +45,11 @@ class SecretConfig(msgspec.Struct):
 
 class Config(msgspec.Struct, kw_only=True):
     app_name: str = msgspec.field(name="app")
+    app_user: str | None = None  # User to run the app as (defaults to app_name)
     version: str = msgspec.field(default_factory=lambda: read_version_from_pyproject())
     versions_to_keep: int | None = 5
     python_version: str | None = None
     build_command: str
-    release_command: str | None = None
     installation_mode: InstallationMode
     distfile: str
     aliases: dict[str, str] = msgspec.field(default_factory=dict)
@@ -65,6 +65,10 @@ class Config(msgspec.Struct, kw_only=True):
     )
 
     def __post_init__(self):
+        # Default app_user to app_name if not specified
+        if not self.app_user:
+            self.app_user = self.app_name
+
         if not self.hosts or len(self.hosts) == 0:
             raise ImproperlyConfiguredError(
                 "At least one host must be defined in 'hosts' array"
@@ -113,16 +117,14 @@ class Config(msgspec.Struct, kw_only=True):
             return f".venv/bin/{self.app_name}"
         return self.app_name
 
-    def app_dir(self, host: HostConfig | None = None) -> str:
-        """Get app directory for the given host (or default host)."""
-        host = host or self.select_host()
-        return f"{host.apps_dir}/{self.app_name}"
+    @property
+    def apps_dir(self) -> str:
+        """Apps are always deployed to /opt/fujin."""
+        return "/opt/fujin"
 
-    def get_release_dir(
-        self, version: str | None = None, host: HostConfig | None = None
-    ) -> str:
-        """Get release directory for the given version and host."""
-        return f"{self.app_dir(host)}/v{version or self.version}"
+    def app_dir(self) -> str:
+        """Get app directory."""
+        return f"{self.apps_dir}/{self.app_name}"
 
     def get_distfile_path(self, version: str | None = None) -> Path:
         version = version or self.version
@@ -201,7 +203,6 @@ class HostConfig(msgspec.Struct, kw_only=True):
     user: str
     _env_file: str | None = msgspec.field(name="envfile", default=None)
     env_content: str = msgspec.field(name="env", default="")
-    apps_dir: str = ".local/share/fujin"
     password_env: str | None = None
     port: int = 22
     _key_filename: str | None = msgspec.field(name="key_filename", default=None)
@@ -218,9 +219,6 @@ class HostConfig(msgspec.Struct, kw_only=True):
                 raise ImproperlyConfiguredError(f"{self._env_file} not found")
             self.env_content = envfile.read_text()
         self.env_content = self.env_content.strip()
-        # Only prepend /home/{user} if apps_dir is a relative path
-        if not self.apps_dir.startswith("/"):
-            self.apps_dir = f"/home/{self.user}/{self.apps_dir}"
 
     @property
     def key_filename(self) -> Path | None:

@@ -255,7 +255,7 @@ WantedBy=multi-user.target
     # Verify .env was deployed
     stdout, success = exec_in_container(
         vps_container["name"],
-        f"cat /home/{vps_container['user']}/.local/share/fujin/testapp/.env",
+        "cat /opt/fujin/testapp/.env",
     )
     assert success and "DEBUG=true" in stdout, f".env not deployed correctly: {stdout}"
 
@@ -410,7 +410,7 @@ WantedBy=multi-user.target
     # Verify v1.0.0 is running
     stdout, success = exec_in_container(
         vps_container["name"],
-        f"cat /home/{vps_container['user']}/.local/share/fujin/rollapp/.version",
+        "cat /opt/fujin/rollapp/.version",
     )
     assert success and stdout == "1.0.0", f"Expected version 1.0.0, got: '{stdout}'"
 
@@ -423,7 +423,7 @@ WantedBy=multi-user.target
     # Verify v2.0.0 is running
     stdout, success = exec_in_container(
         vps_container["name"],
-        f"cat /home/{vps_container['user']}/.local/share/fujin/rollapp/.version",
+        "cat /opt/fujin/rollapp/.version",
     )
     assert success and stdout == "2.0.0", f"Expected version 2.0.0, got: '{stdout}'"
 
@@ -439,7 +439,7 @@ WantedBy=multi-user.target
     # Verify v1.0.0 is running again
     stdout, success = exec_in_container(
         vps_container["name"],
-        f"cat /home/{vps_container['user']}/.local/share/fujin/rollapp/.version",
+        "cat /opt/fujin/rollapp/.version",
     )
     assert success and stdout == "1.0.0", (
         f"Expected version 1.0.0 after rollback, got: '{stdout}'"
@@ -537,3 +537,7 @@ WantedBy=multi-user.target
         vps_container["name"], "test -f /etc/systemd/system/downapp-web.service"
     )
     assert not success, "Service file should be removed after down"
+
+    # Verify app user was deleted
+    _, success = exec_in_container(vps_container["name"], "id -u downapp")
+    assert not success, "App user should be deleted after down"

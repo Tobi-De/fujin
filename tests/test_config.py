@@ -268,8 +268,7 @@ def test_config_with_replicas(minimal_config_dict):
 
 
 def test_config_app_dir(minimal_config):
-    host = minimal_config.hosts[0]
-    assert minimal_config.app_dir(host) == "/home/deploy/.local/share/fujin/testapp"
+    assert minimal_config.app_dir() == "/opt/fujin/testapp"
 
 
 def test_config_app_bin_for_python_package(minimal_config):

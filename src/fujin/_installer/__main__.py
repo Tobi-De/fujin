@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,13 +37,14 @@ class InstallConfig:
     """Configuration for the installer, embedded in the zipapp."""
 
     app_name: str
+    app_user: str
+    deploy_user: str
     app_dir: str
     version: str
     installation_mode: Literal["python-package", "binary"]
     python_version: str | None
     requirements: bool
     distfile_name: str
-    release_command: str | None
     webserver_enabled: bool
     caddy_config_path: str
     app_bin: str
@@ -64,9 +66,20 @@ def run(cmd: str, check: bool = True, **kwargs) -> subprocess.CompletedProcess:
 
 def install(config: InstallConfig, bundle_dir: Path) -> None:
     """Install the application.
-
     Assumes it's running from a directory with extracted bundle files.
     """
+
+    log("Creating app user if needed...")
+    user_exists = (
+        run(f"id -u {config.app_user}", check=False, capture_output=True).returncode
+        == 0
+    )
+    if not user_exists:
+        log(f"Creating system user: {config.app_user}")
+        run(
+            f"sudo useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}"
+        )
+
     log("Setting up directories...")
     app_dir = Path(config.app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
@@ -81,49 +94,70 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
 
     if config.installation_mode == "python-package":
         log("Installing Python package...")
+
+        uv_python_install_dir = "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python"
+
         (app_dir / ".appenv").write_text(f"""set -a
 source .env
 set +a
-export UV_COMPILE_BYTECODE=1
-export UV_PYTHON=python{config.python_version}
+export {uv_python_install_dir}
 export PATH=".venv/bin:$PATH"
+
+# Wrapper function to run app binary as app user
+{config.app_name}() {{
+    sudo -u {config.app_user} {app_dir}/.venv/bin/{config.app_name} "$@"
+}}
+export -f {config.app_name}
 """)
 
-        log("Syncing Python dependencies...")
         distfile_path = bundle_dir / config.distfile_name
-        run(f"uv python install {config.python_version}")
-        run("test -d .venv || uv venv")
+        run(
+            f"{uv_python_install_dir} uv venv -p {config.python_version} --managed-python --clear"
+        )
 
+        dist_install = f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} uv pip install {distfile_path}"
         if config.requirements:
             requirements_path = bundle_dir / "requirements.txt"
-            run(
-                f"uv pip install -r {requirements_path} && uv pip install --no-deps {distfile_path}"
-            )
+            run(f"{dist_install} --no-deps && uv pip install -r {requirements_path} ")
         else:
-            run(f"uv pip install {distfile_path}")
+            run(dist_install)
     else:
         log("Installing binary...")
         (app_dir / ".appenv").write_text(f"""set -a
 source .env
 set +a
 export PATH="{app_dir}:$PATH"
+
+# Wrapper function to run app binary as app user
+{config.app_name}() {{
+    sudo -u {config.app_user} {app_dir}/{config.app_name} "$@"
+}}
+export -f {config.app_name}
 """)
         full_path_app_bin = app_dir / config.app_bin
         full_path_app_bin.unlink(missing_ok=True)
         full_path_app_bin.write_bytes((bundle_dir / config.distfile_name).read_bytes())
         full_path_app_bin.chmod(0o755)
 
-    if config.release_command:
-        log("Running release command")
-        run(f"bash -lc 'cd {app_dir} && source .appenv && {config.release_command}'")
-
     (app_dir / ".version").write_text(config.version)
+
+    log("Setting file ownership and permissions...")
+    run(f"sudo chown -R {config.deploy_user}:{config.app_user} {app_dir}")
+    # Make app directory group-writable (for database, logs, etc.)
+    run(f"sudo chmod 775 {app_dir}")
+    run(f"sudo chmod 640 {app_dir}/.env")
+
+    # .venv permissions: readable/executable by group, writable by owner
+    if (app_dir / ".venv").exists():
+        run(f"sudo find {app_dir}/.venv -type d -exec chmod 755 {{}} +")
+        run(f"sudo find {app_dir}/.venv -type f -exec chmod 644 {{}} +")
+        run(f"sudo find {app_dir}/.venv/bin -type f -exec chmod 755 {{}} +")
+
     os.chdir(bundle_dir)
 
     log("Configuring systemd services...")
     systemd_dir = bundle_dir / "systemd"
 
-    # Collect all valid unit names from deployed_units
     valid_units = []
     for unit in config.deployed_units:
         valid_units.append(unit["template_service_name"])
@@ -180,7 +214,6 @@ export PATH="{app_dir}:$PATH"
     # Service-specific dropins
     for service_dropin_dir_path in systemd_dir.glob("*.service.d"):
         service_file_name = service_dropin_dir_path.name.removesuffix(".d")
-        # Find matching unit
         for unit in config.deployed_units:
             if unit["service_file"] == service_file_name:
                 deployed_service = unit["template_service_name"]
@@ -198,7 +231,6 @@ export PATH="{app_dir}:$PATH"
                     print(f"→ Removing stale dropin: {dropin_file}")
                     run(f"sudo rm -f {dropin_file}")
 
-            # Remove directory if empty
             try:
                 # Check if directory is empty (will fail if not)
                 result = run(
@@ -214,7 +246,6 @@ export PATH="{app_dir}:$PATH"
 
     log("Installing new service files...")
     for unit in config.deployed_units:
-        # Copy main service file
         service_file = systemd_dir / unit["service_file"]
         content = service_file.read_text()
         deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
@@ -225,7 +256,6 @@ export PATH="{app_dir}:$PATH"
             check=True,
         )
 
-        # Copy socket file if exists
         if unit["socket_file"]:
             socket_file = systemd_dir / unit["socket_file"]
             socket_content = socket_file.read_text()
@@ -237,7 +267,6 @@ export PATH="{app_dir}:$PATH"
                 check=True,
             )
 
-        # Copy timer file if exists
         if unit["timer_file"]:
             timer_file = systemd_dir / unit["timer_file"]
             timer_content = timer_file.read_text()
@@ -255,7 +284,6 @@ export PATH="{app_dir}:$PATH"
         for dropin_path in common_dir.glob("*.conf"):
             dropin_content = dropin_path.read_text()
 
-            # Apply to all services from deployed_units
             for unit in config.deployed_units:
                 deployed_service = unit["template_service_name"]
                 dropin_dir = SYSTEMD_SYSTEM_DIR / f"{deployed_service}.d"
@@ -272,7 +300,6 @@ export PATH="{app_dir}:$PATH"
     for service_dropin_dir_path in systemd_dir.glob("*.service.d"):
         service_file_name = service_dropin_dir_path.name.removesuffix(".d")
 
-        # Find matching unit from deployed_units
         matching_unit = None
         for unit in config.deployed_units:
             if unit["service_file"] == service_file_name:
@@ -296,7 +323,6 @@ export PATH="{app_dir}:$PATH"
                 )
 
     log("Restarting services...")
-    # Collect all active units to enable/start
     active_units = []
     for unit in config.deployed_units:
         active_units.extend(unit["instance_service_names"])
@@ -426,6 +452,26 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     if config.webserver_enabled:
         log("Removing Caddy configuration...")
         run(f"sudo rm -f {config.caddy_config_path} && sudo systemctl reload caddy")
+
+    log("Deleting app user...")
+    user_exists = (
+        run(f"id -u {config.app_user} >/dev/null 2>&1", check=False).returncode == 0
+    )
+    if user_exists:
+        # Kill any remaining processes owned by the app user before deletion
+        log(f"Terminating processes owned by {config.app_user}...")
+        run(f"sudo pkill -u {config.app_user}", check=False)
+
+        # Wait briefly for processes to terminate gracefully
+        time.sleep(1)
+
+        # Force kill any stubborn processes
+        run(f"sudo pkill -9 -u {config.app_user}", check=False)
+
+        # Now delete the user
+        run(f"sudo userdel {config.app_user}", check=False)
+    else:
+        print(f"User {config.app_user} does not exist, skipping deletion")
 
     log("Uninstall completed.")
 
