@@ -53,13 +53,14 @@ def python_package_config(tmp_path):
     app_dir = tmp_path / "app_install"
     return InstallConfig(
         app_name="testapp",
+        app_user="testapp",
+        deploy_user="deploy",
         app_dir=str(app_dir),
         version="1.0.0",
         installation_mode="python-package",
         python_version="3.11",
         requirements=True,
         distfile_name="testapp-1.0.0-py3-none-any.whl",
-        release_command=None,
         webserver_enabled=False,
         caddy_config_path="/etc/caddy/conf.d/testapp.caddy",
         app_bin=".venv/bin/testapp",
@@ -98,13 +99,14 @@ def binary_config(tmp_path):
     app_dir = tmp_path / "app_install"
     return InstallConfig(
         app_name="testapp",
+        app_user="testapp",
+        deploy_user="deploy",
         app_dir=str(app_dir),
         version="1.0.0",
         installation_mode="binary",
         python_version=None,
         requirements=False,
         distfile_name="testapp-1.0.0-linux-x86_64",
-        release_command=None,
         webserver_enabled=False,
         caddy_config_path="/etc/caddy/conf.d/testapp.caddy",
         app_bin="testapp",
@@ -153,39 +155,29 @@ def test_install_python_package(bundle_dir, python_package_config):
         assert (app_dir / ".appenv").exists()
         appenv = (app_dir / ".appenv").read_text()
         assert "UV_PYTHON=python3.11" in appenv
+        assert "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python" in appenv
         assert 'PATH=".venv/bin:$PATH"' in appenv
+        # Check for wrapper function
+        assert f"{python_package_config.app_name}()" in appenv
+        assert f"sudo -u {python_package_config.app_user}" in appenv
+        assert f"export -f {python_package_config.app_name}" in appenv
         assert (app_dir / ".version").exists()
         assert (app_dir / ".version").read_text() == "1.0.0"
 
         # Verify exact commands were called
         calls = [call[0][0] for call in mock_run.call_args_list]
-        assert f"uv python install {python_package_config.python_version}" in calls
-        assert "test -d .venv || uv venv" in calls
+        assert (
+            f"UV_PYTHON_INSTALL_DIR=/opt/fujin/.python uv python install {python_package_config.python_version}"
+            in calls
+        )
+        assert (
+            f"UV_PYTHON_INSTALL_DIR=/opt/fujin/.python UV_PYTHON=python{python_package_config.python_version} uv venv"
+            in calls
+        )
         assert (
             f"uv pip install -r {requirements_path} && uv pip install --no-deps {distfile_path}"
             in calls
         )
-
-
-def test_install_with_release_command_executes_it(bundle_dir, python_package_config):
-    """Install executes release command when specified."""
-    python_package_config.release_command = "python manage.py migrate"
-
-    with (
-        patch(
-            "fujin._installer.__main__.run", side_effect=mock_successful_run
-        ) as mock_run,
-        patch("fujin._installer.__main__.log"),
-    ):
-        install(python_package_config, bundle_dir)
-
-        # Verify release command was called (wrapped in bash -lc with .appenv)
-        calls = [call[0][0] for call in mock_run.call_args_list]
-        release_cmd = next((c for c in calls if "python manage.py migrate" in c), None)
-        assert release_cmd is not None
-        assert "bash -lc" in release_cmd
-        assert "source .appenv" in release_cmd
-        assert "python manage.py migrate" in release_cmd
 
 
 # ============================================================================
@@ -215,6 +207,10 @@ def test_install_binary(bundle_dir, binary_config):
         # Assert .appenv has correct PATH
         appenv_content = (app_dir / ".appenv").read_text()
         assert f'export PATH="{app_dir}:$PATH"' in appenv_content
+        # Check for wrapper function
+        assert f"{binary_config.app_name}()" in appenv_content
+        assert f"sudo -u {binary_config.app_user}" in appenv_content
+        assert f"export -f {binary_config.app_name}" in appenv_content
 
 
 # ============================================================================
@@ -291,8 +287,15 @@ def test_install_with_webserver_configures_caddy(bundle_dir, python_package_conf
 
 def test_uninstall_stops_and_disables_services(bundle_dir, python_package_config):
     """Uninstall stops and disables all services."""
+
+    def run_side_effect(cmd, **kwargs):
+        # Make user check succeed
+        if f"id -u {python_package_config.app_user}" in cmd:
+            return MagicMock(returncode=0)
+        return MagicMock(returncode=0)
+
     with (
-        patch("fujin._installer.__main__.run") as mock_run,
+        patch("fujin._installer.__main__.run", side_effect=run_side_effect) as mock_run,
         patch("fujin._installer.__main__.log"),
     ):
         uninstall(python_package_config, bundle_dir)
@@ -307,8 +310,15 @@ def test_uninstall_stops_and_disables_services(bundle_dir, python_package_config
 
 def test_uninstall_removes_unit_files(bundle_dir, python_package_config):
     """Uninstall removes systemd unit files."""
+
+    def run_side_effect(cmd, **kwargs):
+        # Make user check succeed
+        if f"id -u {python_package_config.app_user}" in cmd:
+            return MagicMock(returncode=0)
+        return MagicMock(returncode=0)
+
     with (
-        patch("fujin._installer.__main__.run") as mock_run,
+        patch("fujin._installer.__main__.run", side_effect=run_side_effect) as mock_run,
         patch("fujin._installer.__main__.log"),
     ):
         uninstall(python_package_config, bundle_dir)
@@ -325,8 +335,14 @@ def test_uninstall_with_webserver_removes_caddy_config(
     """Uninstall removes Caddy configuration when webserver was enabled."""
     python_package_config.webserver_enabled = True
 
+    def run_side_effect(cmd, **kwargs):
+        # Make user check succeed
+        if f"id -u {python_package_config.app_user}" in cmd:
+            return MagicMock(returncode=0)
+        return MagicMock(returncode=0)
+
     with (
-        patch("fujin._installer.__main__.run") as mock_run,
+        patch("fujin._installer.__main__.run", side_effect=run_side_effect) as mock_run,
         patch("fujin._installer.__main__.log"),
     ):
         uninstall(python_package_config, bundle_dir)
@@ -336,6 +352,63 @@ def test_uninstall_with_webserver_removes_caddy_config(
         all_cmds = " ".join(calls)
         assert f"rm -f {python_package_config.caddy_config_path}" in all_cmds
         assert "systemctl reload caddy" in all_cmds
+
+
+def test_uninstall_deletes_app_user(bundle_dir, python_package_config):
+    """Uninstall kills processes and deletes the app user."""
+
+    def run_side_effect(cmd, **kwargs):
+        # Make user check succeed
+        if f"id -u {python_package_config.app_user}" in cmd:
+            return MagicMock(returncode=0)
+        return MagicMock(returncode=0)
+
+    with (
+        patch("fujin._installer.__main__.run", side_effect=run_side_effect) as mock_run,
+        patch("fujin._installer.__main__.log"),
+        patch("fujin._installer.__main__.time.sleep"),  # Skip sleep in test
+    ):
+        uninstall(python_package_config, bundle_dir)
+
+        # Verify process termination and user deletion commands
+        calls = [call[0][0] for call in mock_run.call_args_list]
+        assert any(f"id -u {python_package_config.app_user}" in cmd for cmd in calls)
+        # Check for pkill commands
+        assert any(
+            f"sudo pkill -u {python_package_config.app_user}" in cmd for cmd in calls
+        )
+        assert any(
+            f"sudo pkill -9 -u {python_package_config.app_user}" in cmd for cmd in calls
+        )
+        # Check for user deletion
+        assert any(
+            f"sudo userdel {python_package_config.app_user}" in cmd for cmd in calls
+        )
+
+
+def test_uninstall_skips_user_deletion_when_user_doesnt_exist(
+    bundle_dir, python_package_config
+):
+    """Uninstall skips user deletion when user doesn't exist."""
+
+    def run_side_effect(cmd, **kwargs):
+        # Make user check fail
+        if f"id -u {python_package_config.app_user}" in cmd:
+            return MagicMock(returncode=1)
+        return MagicMock(returncode=0)
+
+    with (
+        patch("fujin._installer.__main__.run", side_effect=run_side_effect) as mock_run,
+        patch("fujin._installer.__main__.log"),
+    ):
+        uninstall(python_package_config, bundle_dir)
+
+        # Verify user check but no deletion
+        calls = [call[0][0] for call in mock_run.call_args_list]
+        assert any(f"id -u {python_package_config.app_user}" in cmd for cmd in calls)
+        assert not any(
+            f"sudo userdel {python_package_config.app_user}" in cmd for cmd in calls
+        )
 
 
 # ============================================================================

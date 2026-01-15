@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from typing import Annotated
 
@@ -37,16 +38,21 @@ class Exec(BaseCommand):
 
         with self.connection() as conn:
             if self.app:
-                # Run via app binary
-                with conn.cd(self.config.app_dir(self.selected_host)):
-                    conn.run(
-                        f"source .appenv && {self.config.app_bin} {self.command}",
-                        pty=True,
-                    )
+                # Run via app binary as app user
+                command = f"cd {self.config.app_dir()} && source .appenv && {self.config.app_bin} {self.command}"
+                conn.run(
+                    f"sudo -u {self.config.app_user} bash -c {shlex.quote(command)}",
+                    pty=True,
+                )
             elif self.appenv:
-                # Run in app directory with app environment
-                command = f"cd {self.config.app_dir(self.selected_host)} && source .appenv && {self.command}"
-                conn.run(command, pty=True)
+                # Run in app directory with app environment as app user
+                command = (
+                    f"cd {self.config.app_dir()} && source .appenv && {self.command}"
+                )
+                conn.run(
+                    f"sudo -u {self.config.app_user} bash -c {shlex.quote(command)}",
+                    pty=True,
+                )
             else:
-                # Plain server command
+                # Plain server command (as deploy user)
                 conn.run(self.command, pty=True)

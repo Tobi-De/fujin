@@ -250,6 +250,59 @@ with self.connection as conn:
 - **PyApp**: Can build standalone binary with `just build-bin`
 - **Ruff config**: Requires `from __future__ import annotations` import in all files
 
+## Systemd Security Directives
+
+Fujin uses systemd security directives to harden services. **IMPORTANT**: When apps are deployed to `/home/{user}/.local/share/fujin`, you MUST use `ProtectHome=read-only` instead of `ProtectHome=true`.
+
+### Correct Security Configuration
+
+For apps in `/home/*`:
+```ini
+[Service]
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only  # NOT "true" - apps need to read from /home
+ReadWritePaths={app_dir}
+ReadWritePaths={app_dir}/.venv  # Python needs to write bytecode
+```
+
+### Why These Settings?
+
+- `ProtectHome=true` makes `/home` completely inaccessible (exit code 203/EXEC)
+- `ProtectHome=read-only` allows reading app code/venv but prevents writes
+- `ProtectSystem=strict` makes most of filesystem read-only
+- `ReadWritePaths={app_dir}/.venv` allows Python to write `.pyc` bytecode files
+- Without `.venv` write access, Python can't compile bytecode (exit code 203/EXEC)
+
+### Alternative: System-Wide Installation
+
+If using `/opt/fujin` instead of `/home`:
+- Can use `ProtectHome=true` (home dirs not needed)
+- Still need `ReadWritePaths={app_dir}/.venv` for Python bytecode
+- Cleaner separation but requires sudo for directory creation
+
+### Debugging Permission Issues
+
+Common exit codes:
+- **203/EXEC**: Executable not found or not accessible (check ProtectHome, ProtectSystem, file permissions)
+- **226**: Namespace/cgroup setup failed (usually ProtectSystem incompatibility)
+
+Test manually:
+```bash
+# Check if binary is accessible
+ls -la /path/to/app/.venv/bin/app
+
+# Test with systemd restrictions
+sudo systemd-run --pty \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=read-only \
+  --property=ReadWritePaths=/path/to/app \
+  --property=ReadWritePaths=/path/to/app/.venv \
+  --property=User=username \
+  /path/to/app/.venv/bin/app --version
+```
+
 ## Alias System
 
 Fujin supports command aliases defined in `fujin.toml`:

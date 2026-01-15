@@ -47,9 +47,19 @@ Arguments
 Execution Modes
 ---------------
 
+.. important::
+
+   **User Context**: Commands run with different user permissions depending on the mode:
+
+   - **Plain server commands** (default): Run as the deploy user
+   - **App environment** (``--appenv``): Run as the app user (e.g., ``bookstore``)
+   - **Via app binary** (``--app``): Run as the app user (e.g., ``bookstore``)
+
+   This ensures app commands can write to files owned by the app user (databases, logs, uploads, etc.)
+
 **Plain Server Command (default)**
 
-Run any command on the server:
+Run any command on the server as the deploy user:
 
 .. code-block:: bash
 
@@ -83,6 +93,10 @@ Equivalent to:
 
    cd /path/to/app && source .appenv && your-command
 
+.. note::
+
+   When you're in an interactive shell (``fujin app shell`` or ``fujin exec --appenv bash``), the app binary command is automatically wrapped to run as the app user. You can simply type ``bookstore migrate`` and it will have the correct permissions.
+
 **Via App Binary (--app)**
 
 Execute commands through your application binary:
@@ -111,20 +125,24 @@ Examples
 
 .. code-block:: bash
 
-   # Run migrations
+   # Run migrations (modifies database)
    fujin exec --app migrate
 
-   # Create superuser
+   # Create superuser (writes to database)
    fujin exec --app createsuperuser
 
-   # Collect static files
+   # Collect static files (writes to static directory)
    fujin exec --app collectstatic --no-input
 
-   # Open Django shell
+   # Open Django shell (interactive REPL)
    fujin exec --app shell
 
    # Custom management command
    fujin exec --app my_custom_command
+
+.. tip::
+
+   **Why these commands work:** They run as the app user (e.g., ``bookstore``), which has write access to ``db.sqlite3`` and other app-owned files. Running as the deploy user would fail with "read-only database" errors.
 
 **Database Operations**
 
@@ -247,12 +265,55 @@ Then use:
    fujin exec --appenv 'pg_dump $DB_NAME' > backup.sql
 
 
+Troubleshooting
+---------------
+
+**Permission Denied Errors**
+
+If you see errors like:
+
+.. code-block:: text
+
+   sqlite3.OperationalError: attempt to write a readonly database
+   PermissionError: [Errno 13] Permission denied: 'db.sqlite3'
+
+**Solution**: Use ``--appenv`` or ``--app`` to run as the app user:
+
+.. code-block:: bash
+
+   # Wrong: Runs as deploy user, can't write to app-owned files
+   fujin exec python manage.py migrate
+
+   # Correct: Runs as app user with write permissions
+   fujin exec --app migrate
+   # Or: fujin exec --appenv python manage.py migrate
+
+**Sudo Password Required**
+
+If you see ``sudo: a password is required``:
+
+**Solution**: Ensure your deploy user has ``NOPASSWD: ALL`` in sudoers. This is automatically configured by ``fujin server bootstrap``.
+
+**Command Not Found**
+
+If commands like ``python`` or your app binary aren't found:
+
+**Solution**: Use ``--appenv`` to load the app environment which includes ``.venv/bin`` in PATH:
+
+.. code-block:: bash
+
+   # Wrong: PATH doesn't include .venv/bin
+   fujin exec python --version
+
+   # Correct: .appenv loads .venv/bin into PATH
+   fujin exec --appenv python --version
+
 See Also
 --------
 
 - :doc:`app` - Application management (safer alternatives)
 - :doc:`../configuration` - Configuration reference
-- :doc:`deploy` - Deployment workflow
+- :doc:`deploy` - Deployment workflow and permission model
 
 .. tip::
 

@@ -36,7 +36,8 @@ class Down(BaseCommand):
     def __call__(self):
         msg = (
             f"[red]You are about to delete all project files, stop all services,\n"
-            f"and remove all configurations on the host {self.selected_host.address} for the project {self.config.app_name}.\n"
+            f"remove the app user ({self.config.app_user}), and remove all configurations\n"
+            f"on the host {self.selected_host.address} for the project {self.config.app_name}.\n"
             f"Any assets in your project folder will be lost.\n"
             f"Are you sure you want to proceed? This action is irreversible.[/red]"
         )
@@ -50,7 +51,7 @@ class Down(BaseCommand):
         with self.connection() as conn:
             self.output.info("Tearing down project...")
 
-            app_dir = shlex.quote(self.config.app_dir(self.selected_host))
+            app_dir = shlex.quote(self.config.app_dir())
             res, ok = conn.run(f"cat {app_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
             bundle_path = f"{app_dir}/.versions/{self.config.app_name}-{version}.pyz"
@@ -59,7 +60,9 @@ class Down(BaseCommand):
 
             uninstall_ok = False
             if bundle_exists:
-                uninstall_cmd = f"python3 {bundle_path} uninstall && rm -rf {app_dir}"
+                uninstall_cmd = (
+                    f"python3 {bundle_path} uninstall && sudo rm -rf {app_dir}"
+                )
                 _, uninstall_ok = conn.run(uninstall_cmd, warn=True, pty=True)
 
             if not uninstall_ok:
@@ -70,7 +73,7 @@ class Down(BaseCommand):
                     "Teardown encountered errors but continuing due to --force"
                 )
                 # Force cleanup - just remove app directory
-                conn.run(f"rm -rf {app_dir}", warn=True, pty=True)
+                conn.run(f"sudo rm -rf {app_dir}", warn=True, pty=True)
 
             if self.full:
                 conn.run(

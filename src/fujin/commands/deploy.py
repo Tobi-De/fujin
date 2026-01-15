@@ -94,8 +94,9 @@ class Deploy(BaseCommand):
 
             context = {
                 "app_name": self.config.app_name,
+                "app_user": self.config.app_user,
                 "version": version,
-                "app_dir": self.config.app_dir(self.selected_host),
+                "app_dir": self.config.app_dir(),
                 "user": self.selected_host.user,
             }
 
@@ -197,13 +198,14 @@ class Deploy(BaseCommand):
 
             installer_config = {
                 "app_name": self.config.app_name,
-                "app_dir": self.config.app_dir(self.selected_host),
+                "app_user": self.config.app_user,
+                "deploy_user": self.selected_host.user,
+                "app_dir": self.config.app_dir(),
                 "version": version,
                 "installation_mode": self.config.installation_mode.value,
                 "python_version": self.config.python_version,
                 "requirements": bool(self.config.requirements),
                 "distfile_name": distfile_path.name,
-                "release_command": self.config.release_command,
                 "webserver_enabled": self.config.caddyfile_exists,
                 "caddy_config_path": self.config.caddy_config_path,
                 "app_bin": self.config.app_bin,
@@ -249,9 +251,7 @@ class Deploy(BaseCommand):
 
             self._show_deployment_summary(zipapp_path)
 
-            remote_bundle_dir = (
-                Path(self.config.app_dir(self.selected_host)) / ".versions"
-            )
+            remote_bundle_dir = Path(self.config.app_dir()) / ".versions"
             remote_bundle_path = (
                 f"{remote_bundle_dir}/{self.config.app_name}-{version}.pyz"
             )
