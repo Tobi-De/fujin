@@ -1,4 +1,7 @@
-"""Tests for down command."""
+"""Tests for down command - user interaction and error handling.
+
+Uses shared minimal_config_dict fixture from conftest.py.
+"""
 
 from __future__ import annotations
 
@@ -11,31 +14,14 @@ from fujin.commands.down import Down
 from fujin.config import Config
 
 
-@pytest.fixture
-def minimal_config(tmp_path, monkeypatch):
-    """Minimal config for down tests."""
-    monkeypatch.chdir(tmp_path)
-
-    return {
-        "app": "testapp",
-        "version": "1.0.0",
-        "build_command": "echo building",
-        "installation_mode": "python-package",
-        "python_version": "3.11",
-        "distfile": "dist/testapp-{version}-py3-none-any.whl",
-        "processes": {"web": {"command": "gunicorn"}},
-        "hosts": [{"address": "example.com", "user": "deploy"}],
-    }
-
-
 # ============================================================================
 # Confirmation Flow
 # ============================================================================
 
 
-def test_down_aborted_when_user_declines(minimal_config):
+def test_down_aborted_when_user_declines(minimal_config_dict):
     """Down command exits without action when user declines confirmation."""
-    config = msgspec.convert(minimal_config, type=Config)
+    config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
     with (
@@ -55,9 +41,9 @@ def test_down_aborted_when_user_declines(minimal_config):
         assert not mock_conn.run.called
 
 
-def test_down_handles_keyboard_interrupt(minimal_config):
+def test_down_handles_keyboard_interrupt(minimal_config_dict):
     """Down command handles Ctrl+C gracefully during confirmation."""
-    config = msgspec.convert(minimal_config, type=Config)
+    config = msgspec.convert(minimal_config_dict, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -79,9 +65,9 @@ def test_down_handles_keyboard_interrupt(minimal_config):
 # ============================================================================
 
 
-def test_down_successful_teardown_with_bundle(minimal_config):
+def test_down_successful_teardown_with_bundle(minimal_config_dict):
     """Down successfully tears down when bundle exists."""
-    config = msgspec.convert(minimal_config, type=Config)
+    config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
     # Mock responses for: version read, bundle exists check, uninstall
@@ -111,9 +97,9 @@ def test_down_successful_teardown_with_bundle(minimal_config):
         assert any("rm -rf" in cmd for cmd in calls)
 
 
-def test_down_uses_config_version_when_version_file_missing(minimal_config):
+def test_down_uses_config_version_when_version_file_missing(minimal_config_dict):
     """Down uses config version when .version file doesn't exist."""
-    config = msgspec.convert(minimal_config, type=Config)
+    config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
     # Version file read fails, bundle check, uninstall
@@ -147,9 +133,9 @@ def test_down_uses_config_version_when_version_file_missing(minimal_config):
 # ============================================================================
 
 
-def test_down_fails_when_uninstall_fails_without_force(minimal_config):
+def test_down_fails_when_uninstall_fails_without_force(minimal_config_dict):
     """Down raises error when uninstall fails and --force not set."""
-    config = msgspec.convert(minimal_config, type=Config)
+    config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
     # Version read, bundle exists, uninstall fails
@@ -177,9 +163,9 @@ def test_down_fails_when_uninstall_fails_without_force(minimal_config):
         assert exc_info.value.code == 1
 
 
-def test_down_continues_with_force_when_uninstall_fails(minimal_config):
+def test_down_continues_with_force_when_uninstall_fails(minimal_config_dict):
     """Down continues with force cleanup when uninstall fails and --force set."""
-    config = msgspec.convert(minimal_config, type=Config)
+    config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
     # Version read, bundle exists, uninstall fails, force cleanup
@@ -215,9 +201,9 @@ def test_down_continues_with_force_when_uninstall_fails(minimal_config):
 # ============================================================================
 
 
-def test_down_with_full_flag_uninstalls_caddy(minimal_config):
+def test_down_with_full_flag_uninstalls_caddy(minimal_config_dict):
     """Down with --full flag also uninstalls Caddy."""
-    config = msgspec.convert(minimal_config, type=Config)
+    config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
     # Version read, bundle exists, uninstall, caddy uninstall

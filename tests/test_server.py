@@ -1,351 +1,19 @@
-"""Tests for server command."""
+"""Tests for server command - setup-ssh functionality.
+
+Bootstrap, status, and create-user tests have been migrated to integration tests.
+See tests/integration/test_server_bootstrap.py
+"""
 
 from __future__ import annotations
 
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import msgspec
 import pytest
 
 from fujin.commands.server import Server
-from fujin.config import Config
 from fujin.config import tomllib
 from fujin.errors import SSHKeyError
-
-
-@pytest.fixture
-def base_config(tmp_path, monkeypatch):
-    """Base config for server tests."""
-    monkeypatch.chdir(tmp_path)
-
-    return {
-        "app": "testapp",
-        "version": "1.0.0",
-        "build_command": "echo building",
-        "installation_mode": "python-package",
-        "python_version": "3.11",
-        "distfile": "dist/testapp-{version}-py3-none-any.whl",
-        "hosts": [{"address": "example.com", "user": "deploy"}],
-    }
-
-
-@pytest.fixture
-def config_without_webserver(base_config):
-    """Config without webserver enabled (for legacy tests)."""
-    # Same as base_config now since webserver is determined by presence of Caddyfile
-    return base_config
-
-
-# ============================================================================
-# Status Command
-# ============================================================================
-
-
-def test_status_uses_fastfetch_when_available(base_config):
-    """status uses fastfetch when available."""
-    config = msgspec.convert(base_config, type=Config)
-    mock_conn = MagicMock()
-
-    mock_conn.run.side_effect = [
-        ("", True),  # command -v fastfetch (available)
-        ("", True),  # fastfetch
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch.object(Server, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.status()
-
-        # Verify fastfetch was called
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert any("fastfetch" == cmd for cmd in calls)
-
-
-def test_status_fallback_to_os_release_when_fastfetch_unavailable(base_config):
-    """status falls back to /etc/os-release when fastfetch unavailable."""
-    config = msgspec.convert(base_config, type=Config)
-    mock_conn = MagicMock()
-
-    mock_conn.run.side_effect = [
-        ("", False),  # command -v fastfetch (not available)
-        ("Ubuntu 22.04", True),  # cat /etc/os-release
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch.object(Server, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.status()
-
-        # Verify os-release was read and displayed
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert any("/etc/os-release" in cmd for cmd in calls)
-        mock_output.output.assert_called_with("Ubuntu 22.04")
-
-
-# ============================================================================
-# Bootstrap Command
-# ============================================================================
-
-
-def test_bootstrap_installs_dependencies(base_config):
-    """bootstrap installs system dependencies."""
-    config = msgspec.convert(base_config, type=Config)
-    mock_conn = MagicMock()
-
-    mock_conn.run.side_effect = [
-        ("", True),  # apt update && upgrade && install
-        ("", False),  # command -v uv (not installed)
-        ("", True),  # install uv
-        ("", True),  # uv tool install fastfetch
-        ("", True),  # sudo groupadd -f fujin
-        ("", True),  # sudo mkdir -p /opt/fujin
-        ("", True),  # sudo chown root:fujin /opt/fujin
-        ("", True),  # sudo chmod 775 /opt/fujin
-        ("", True),  # sudo mkdir -p /opt/fujin/.python
-        ("", True),  # sudo chown root:fujin /opt/fujin/.python
-        ("", True),  # sudo chmod 775 /opt/fujin/.python
-        ("", True),  # sudo usermod -aG fujin {user}
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch.object(Server, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.bootstrap()
-
-        # Verify apt commands were called
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert any("apt update" in cmd for cmd in calls)
-
-        # Verify uv was installed
-        assert any("astral.sh/uv/install.sh" in cmd for cmd in calls)
-
-        # Caddy should NOT be installed since no sites are configured
-        assert not any("install caddy" in cmd for cmd in calls)
-
-        # Verify success message
-        mock_output.success.assert_called_with(
-            "Server bootstrap completed successfully!"
-        )
-
-
-def test_bootstrap_without_webserver_skips_caddy(config_without_webserver):
-    """bootstrap skips Caddy installation when webserver disabled."""
-    config = msgspec.convert(config_without_webserver, type=Config)
-    mock_conn = MagicMock()
-
-    mock_conn.run.side_effect = [
-        ("", True),  # apt update
-        ("", False),  # command -v uv
-        ("", True),  # install uv
-        ("", True),  # uv tool install fastfetch
-        ("", True),  # sudo groupadd -f fujin
-        ("", True),  # sudo mkdir -p /opt/fujin
-        ("", True),  # sudo chown root:fujin /opt/fujin
-        ("", True),  # sudo chmod 775 /opt/fujin
-        ("", True),  # sudo mkdir -p /opt/fujin/.python
-        ("", True),  # sudo chown root:fujin /opt/fujin/.python
-        ("", True),  # sudo chmod 775 /opt/fujin/.python
-        ("", True),  # sudo usermod -aG fujin {user}
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch.object(Server, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.bootstrap()
-
-        # Verify caddy was not checked
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert not any("caddy" in cmd for cmd in calls)
-
-
-def test_bootstrap_skips_uv_when_already_installed(base_config):
-    """bootstrap skips uv installation when already present."""
-    config = msgspec.convert(base_config, type=Config)
-    mock_conn = MagicMock()
-
-    mock_conn.run.side_effect = [
-        ("", True),  # apt update
-        ("", True),  # command -v uv (already installed)
-        ("", True),  # uv tool install fastfetch
-        ("", True),  # sudo groupadd -f fujin
-        ("", True),  # sudo mkdir -p /opt/fujin
-        ("", True),  # sudo chown root:fujin /opt/fujin
-        ("", True),  # sudo chmod 775 /opt/fujin
-        ("", True),  # sudo mkdir -p /opt/fujin/.python
-        ("", True),  # sudo chown root:fujin /opt/fujin/.python
-        ("", True),  # sudo chmod 775 /opt/fujin/.python
-        ("", True),  # sudo usermod -aG fujin {user}
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch.object(Server, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.bootstrap()
-
-        # Verify uv installation was skipped
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert not any("astral.sh/uv/install.sh" in cmd for cmd in calls)
-
-        # Caddy should not be checked since no sites are configured
-        assert not any("command -v caddy" in cmd for cmd in calls)
-
-
-def test_bootstrap_warns_on_apt_failure(base_config):
-    """bootstrap shows warning when apt update/upgrade fails."""
-    config = msgspec.convert(base_config, type=Config)
-    mock_conn = MagicMock()
-
-    mock_conn.run.side_effect = [
-        ("", False),  # apt update fails
-        ("", True),  # command -v uv
-        ("", True),  # uv tool install fastfetch
-        ("", True),  # sudo groupadd -f fujin
-        ("", True),  # sudo mkdir -p /opt/fujin
-        ("", True),  # sudo chown root:fujin /opt/fujin
-        ("", True),  # sudo chmod 775 /opt/fujin
-        ("", True),  # sudo mkdir -p /opt/fujin/.python
-        ("", True),  # sudo chown root:fujin /opt/fujin/.python
-        ("", True),  # sudo chmod 775 /opt/fujin/.python
-        ("", True),  # sudo usermod -aG fujin {user}
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch.object(Server, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.bootstrap()
-
-        # Verify warning was shown
-        mock_output.warning.assert_called()
-        assert any(
-            "Failed to update and upgrade" in str(call)
-            for call in mock_output.warning.call_args_list
-        )
-
-
-# ============================================================================
-# Create User Command
-# ============================================================================
-
-
-def test_create_user_without_password(base_config):
-    """create-user creates user without password."""
-    config = msgspec.convert(base_config, type=Config)
-    mock_conn = MagicMock()
-    mock_conn.run.return_value = ("", True)
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch.object(Server, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.create_user(name="newuser", with_password=False)
-
-        # Verify commands were called
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        full_cmd = calls[0]
-
-        assert "adduser" in full_cmd
-        assert "newuser" in full_cmd
-        assert "chpasswd" not in full_cmd  # No password set
-
-        # Verify success message
-        mock_output.success.assert_called_with("New user newuser created successfully!")
-
-
-def test_create_user_with_password(base_config):
-    """create-user creates user with generated password."""
-    config = msgspec.convert(base_config, type=Config)
-    mock_conn = MagicMock()
-    mock_conn.run.return_value = ("", True)
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch("fujin.commands.server.secrets.token_hex", return_value="abc123def456"),
-        patch.object(Server, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.create_user(name="newuser", with_password=True)
-
-        # Verify password was generated and displayed
-        assert any(
-            "Generated password: abc123def456" in str(call)
-            for call in mock_output.success.call_args_list
-        )
-
-        # Verify chpasswd command was included
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        full_cmd = calls[0]
-        assert "chpasswd" in full_cmd
-        assert "newuser:abc123def456" in full_cmd
-
-
-def test_create_user_sets_sudo_access(base_config):
-    """create-user grants sudo NOPASSWD access."""
-    config = msgspec.convert(base_config, type=Config)
-    mock_conn = MagicMock()
-    mock_conn.run.return_value = ("", True)
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Server, "connection") as mock_connection,
-        patch.object(Server, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        server = Server()
-        server.create_user(name="newuser", with_password=False)
-
-        # Verify sudo access was granted
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        full_cmd = calls[0]
-        assert "NOPASSWD:ALL" in full_cmd
-        assert "/etc/sudoers" in full_cmd
 
 
 # ============================================================================
@@ -435,11 +103,16 @@ def test_setup_ssh_generates_new_key_when_none_exists(tmp_path, monkeypatch):
         )
 
 
-def test_setup_ssh_updates_existing_fujin_toml(tmp_path, monkeypatch):
-    """setup-ssh updates existing fujin.toml."""
+def test_setup_ssh_fujin_toml_handling(tmp_path, monkeypatch):
+    """setup-ssh creates or updates fujin.toml appropriately."""
     monkeypatch.chdir(tmp_path)
 
-    # Create existing fujin.toml
+    # Create SSH key
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    (ssh_dir / "id_ed25519").write_text("key")
+
+    # Test 1: Update existing fujin.toml
     fujin_toml = tmp_path / "fujin.toml"
     fujin_toml.write_text(
         """
@@ -451,11 +124,6 @@ domain_name = "old.example.com"
 user = "olduser"
 """
     )
-
-    # Create SSH key
-    ssh_dir = tmp_path / ".ssh"
-    ssh_dir.mkdir(mode=0o700)
-    (ssh_dir / "id_ed25519").write_text("key")
 
     with (
         patch("fujin.commands.server.Prompt") as mock_prompt,
@@ -473,24 +141,13 @@ user = "olduser"
         config = tomllib.loads(fujin_toml.read_text())
         assert config["hosts"][0]["address"] == "10.0.0.5"
         assert config["hosts"][0]["user"] == "deploy"
-
-        # Verify update message
         assert any(
             "Updating existing fujin.toml" in str(call)
             for call in mock_output.info.call_args_list
         )
 
-
-def test_setup_ssh_creates_new_fujin_toml(tmp_path, monkeypatch):
-    """setup-ssh creates new fujin.toml when none exists."""
-    monkeypatch.chdir(tmp_path)
-
-    # No fujin.toml
-
-    # Create SSH key
-    ssh_dir = tmp_path / ".ssh"
-    ssh_dir.mkdir(mode=0o700)
-    (ssh_dir / "id_ed25519").write_text("key")
+    # Test 2: Create new fujin.toml
+    fujin_toml.unlink()  # Remove existing file
 
     with (
         patch("fujin.commands.server.Prompt") as mock_prompt,
@@ -505,62 +162,40 @@ def test_setup_ssh_creates_new_fujin_toml(tmp_path, monkeypatch):
         server.setup_ssh()
 
         # Verify fujin.toml was created
-        fujin_toml = tmp_path / "fujin.toml"
         assert fujin_toml.exists()
-
-        # Verify config content
         config = tomllib.loads(fujin_toml.read_text())
         assert config["hosts"][0]["address"] == "server.example.com"
         assert config["hosts"][0]["user"] == "admin"
-
-        # Verify creation message
         assert any(
             "Creating new fujin.toml" in str(call)
             for call in mock_output.info.call_args_list
         )
 
 
-def test_setup_ssh_uses_sshpass_with_password(tmp_path, monkeypatch):
-    """setup-ssh uses sshpass when password provided and available."""
+@pytest.mark.parametrize(
+    "sshpass_available,should_warn",
+    [
+        (True, False),  # sshpass available - no warning
+        (False, True),  # sshpass unavailable - show warning
+    ],
+)
+def test_setup_ssh_password_handling(
+    tmp_path, monkeypatch, sshpass_available, should_warn
+):
+    """setup-ssh handles passwords with/without sshpass."""
     monkeypatch.chdir(tmp_path)
 
     ssh_dir = tmp_path / ".ssh"
     ssh_dir.mkdir(mode=0o700)
     (ssh_dir / "id_ed25519").write_text("key")
 
-    with (
-        patch("fujin.commands.server.Prompt") as mock_prompt,
-        patch("fujin.commands.server.subprocess.run") as mock_subprocess,
-        patch("fujin.commands.server.Path.home", return_value=tmp_path),
-        patch("fujin.commands.server.shutil.which", return_value="/usr/bin/sshpass"),
-        patch.object(Server, "output", MagicMock()),
-    ):
-        mock_prompt.ask.side_effect = ["192.168.1.1", "user", "mypassword"]
-        mock_subprocess.return_value = MagicMock(returncode=0)
-
-        server = Server()
-        server.setup_ssh()
-
-        # Verify sshpass was used
-        ssh_copy_call = mock_subprocess.call_args_list[-1][0][0]
-        assert "sshpass" in ssh_copy_call
-        assert "-p" in ssh_copy_call
-        assert "mypassword" in ssh_copy_call
-
-
-def test_setup_ssh_warns_when_sshpass_unavailable(tmp_path, monkeypatch):
-    """setup-ssh warns when password provided but sshpass unavailable."""
-    monkeypatch.chdir(tmp_path)
-
-    ssh_dir = tmp_path / ".ssh"
-    ssh_dir.mkdir(mode=0o700)
-    (ssh_dir / "id_ed25519").write_text("key")
+    sshpass_path = "/usr/bin/sshpass" if sshpass_available else None
 
     with (
         patch("fujin.commands.server.Prompt") as mock_prompt,
         patch("fujin.commands.server.subprocess.run") as mock_subprocess,
         patch("fujin.commands.server.Path.home", return_value=tmp_path),
-        patch("fujin.commands.server.shutil.which", return_value=None),
+        patch("fujin.commands.server.shutil.which", return_value=sshpass_path),
         patch.object(Server, "output", MagicMock()) as mock_output,
     ):
         mock_prompt.ask.side_effect = ["192.168.1.1", "user", "mypassword"]
@@ -569,72 +204,75 @@ def test_setup_ssh_warns_when_sshpass_unavailable(tmp_path, monkeypatch):
         server = Server()
         server.setup_ssh()
 
-        # Verify warning was shown
-        assert any(
-            "sshpass not found" in str(call)
-            for call in mock_output.warning.call_args_list
-        )
+        if sshpass_available:
+            # Verify sshpass was used
+            ssh_copy_call = mock_subprocess.call_args_list[-1][0][0]
+            assert "sshpass" in ssh_copy_call
+            assert "-p" in ssh_copy_call
+            assert "mypassword" in ssh_copy_call
+        else:
+            # Verify warning was shown
+            assert any(
+                "sshpass not found" in str(call)
+                for call in mock_output.warning.call_args_list
+            )
 
 
-def test_setup_ssh_handles_keyboard_interrupt(tmp_path, monkeypatch):
-    """setup-ssh handles Ctrl+C gracefully."""
+@pytest.mark.parametrize(
+    "error_type,mock_setup",
+    [
+        ("keyboard_interrupt", lambda: KeyboardInterrupt()),
+        ("ssh_copy_failure", lambda: MagicMock(returncode=1)),
+        ("keygen_failure", lambda: subprocess.CalledProcessError(1, "ssh-keygen")),
+    ],
+)
+def test_setup_ssh_error_handling(tmp_path, monkeypatch, error_type, mock_setup):
+    """setup-ssh handles various error scenarios."""
     monkeypatch.chdir(tmp_path)
 
-    with (
-        patch("fujin.commands.server.Prompt") as mock_prompt,
-        patch.object(Server, "output", MagicMock()),
-    ):
-        mock_prompt.ask.side_effect = KeyboardInterrupt
+    if error_type == "keyboard_interrupt":
+        # Test keyboard interrupt
+        with (
+            patch("fujin.commands.server.Prompt") as mock_prompt,
+            patch.object(Server, "output", MagicMock()),
+        ):
+            mock_prompt.ask.side_effect = mock_setup()
 
-        server = Server()
+            server = Server()
+            with pytest.raises(SystemExit) as exc_info:
+                server.setup_ssh()
+            assert exc_info.value.code == 0
 
-        with pytest.raises(SystemExit) as exc_info:
-            server.setup_ssh()
+    elif error_type == "ssh_copy_failure":
+        # Test ssh-copy-id failure
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir(mode=0o700)
+        (ssh_dir / "id_ed25519").write_text("key")
 
-        assert exc_info.value.code == 0
+        with (
+            patch("fujin.commands.server.Prompt") as mock_prompt,
+            patch("fujin.commands.server.subprocess.run") as mock_subprocess,
+            patch("fujin.commands.server.Path.home", return_value=tmp_path),
+            patch.object(Server, "output", MagicMock()),
+        ):
+            mock_prompt.ask.side_effect = ["192.168.1.1", "user", ""]
+            mock_subprocess.return_value = mock_setup()
 
+            server = Server()
+            with pytest.raises(SSHKeyError):
+                server.setup_ssh()
 
-def test_setup_ssh_raises_on_ssh_copy_failure(tmp_path, monkeypatch):
-    """setup-ssh raises error when ssh-copy-id fails."""
-    monkeypatch.chdir(tmp_path)
+    elif error_type == "keygen_failure":
+        # Test ssh-keygen failure (no existing keys)
+        with (
+            patch("fujin.commands.server.Prompt") as mock_prompt,
+            patch("fujin.commands.server.subprocess.run") as mock_subprocess,
+            patch("fujin.commands.server.Path.home", return_value=tmp_path),
+            patch.object(Server, "output", MagicMock()),
+        ):
+            mock_prompt.ask.side_effect = ["192.168.1.1", "user", ""]
+            mock_subprocess.side_effect = [mock_setup()]
 
-    ssh_dir = tmp_path / ".ssh"
-    ssh_dir.mkdir(mode=0o700)
-    (ssh_dir / "id_ed25519").write_text("key")
-
-    with (
-        patch("fujin.commands.server.Prompt") as mock_prompt,
-        patch("fujin.commands.server.subprocess.run") as mock_subprocess,
-        patch("fujin.commands.server.Path.home", return_value=tmp_path),
-        patch.object(Server, "output", MagicMock()),
-    ):
-        mock_prompt.ask.side_effect = ["192.168.1.1", "user", ""]
-        mock_subprocess.return_value = MagicMock(returncode=1)  # Failed
-
-        server = Server()
-
-        with pytest.raises(SSHKeyError):
-            server.setup_ssh()
-
-
-def test_setup_ssh_raises_on_keygen_failure(tmp_path, monkeypatch):
-    """setup-ssh raises error when ssh-keygen fails."""
-    monkeypatch.chdir(tmp_path)
-
-    # No existing keys
-
-    with (
-        patch("fujin.commands.server.Prompt") as mock_prompt,
-        patch("fujin.commands.server.subprocess.run") as mock_subprocess,
-        patch("fujin.commands.server.Path.home", return_value=tmp_path),
-        patch.object(Server, "output", MagicMock()),
-    ):
-        mock_prompt.ask.side_effect = ["192.168.1.1", "user", ""]
-
-        # Mock ssh-keygen failure
-        mock_subprocess.side_effect = [subprocess.CalledProcessError(1, "ssh-keygen")]
-
-        server = Server()
-
-        with pytest.raises(SSHKeyError):
-            server.setup_ssh()
+            server = Server()
+            with pytest.raises(SSHKeyError):
+                server.setup_ssh()

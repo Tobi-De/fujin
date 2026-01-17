@@ -318,57 +318,61 @@ Parsed in `__main__.py:_parse_aliases()` and expands before command invocation.
 
 ### Test Structure
 
-Tests are organized in `tests/` with clear separation:
-- `tests/unit/` - Fast unit tests with no external dependencies
-- `tests/installer/` - Zipapp installer tests
-- `tests/integration/` - Docker-based integration tests requiring SSH
+Tests are organized in `tests/` with two categories:
+
+**Unit Tests** (`tests/test_*.py`):
+- Fast tests with mocked dependencies (~154 tests)
+- Cover error handling, user interaction, and pure logic
+- No external dependencies (SSH, Docker)
+- Examples: `test_config.py`, `test_app.py`, `test_rollback.py`
+
+**Integration Tests** (`tests/integration/`):
+- Docker-based tests with real systemd/SSH (~23 tests)
+- Verify end-to-end behavior on a simulated VPS
+- Require Docker to run
+- Test files:
+  - `test_full_deploy.py` - Deployment lifecycle (deploy, rollback, down)
+  - `test_installation.py` - Systemd units (sockets, timers, dropins)
+  - `test_server_bootstrap.py` - Server setup and user creation
+  - `test_app_management.py` - App commands (restart, logs, status)
+  - `helpers.py` - Shared assertion utilities
 
 ### Core Principles
 
-**Avoid Noise**
-- No docstrings that just repeat the function name
-- Remove comments that don't add information beyond what the code shows
-- Keep only meaningful inline comments that explain non-obvious behavior
+**Prefer Integration Tests for Command Behavior**
+- Integration tests verify actual system behavior
+- Unit tests focus on error handling and pure logic
+- Avoid brittle mock chains that just verify command strings
 
-**Consolidate Related Tests**
-- Combine related single-assert tests into comprehensive tests
-- Group multiple assertions testing the same functionality
-- Example: Instead of `test_for_case_a()` and `test_for_case_b()`, write `test_handles_cases_a_and_b()`
+**Keep Unit Tests Focused**
+- Test error handling and edge cases
+- Test pure logic functions (name resolution, formatting)
+- Test user interaction (keyboard interrupt, confirmation decline)
 
-**Test Business Logic, Not Libraries**
-- Don't test framework/library functionality (e.g., msgspec type validation)
-- Focus on our code's behavior and validation logic
-- Test edge cases and error conditions in our code
+**Shared Fixtures** (`tests/conftest.py`):
+- `minimal_config_dict` - Base configuration dict
+- `minimal_config` - Config object from dict
+- `mock_connection` - Mocked SSH connection
+- `mock_output` - Mocked output handler
 
-**Fixtures**
-- Add fixtures as needed, not upfront
-- Use descriptive names that indicate what they provide
-- Keep fixtures minimal and focused
-- Prefer function-scoped fixtures for isolation
-
-**Code Organization**
-- All imports at the top of the file (no inline imports)
-- Import constants from source instead of redefining them in tests
-- Use logical section headers to group related tests
-- Mark tests with appropriate pytest markers (`@pytest.mark.unit`, etc.)
-
-**Error Assertions**
-- Access error messages via `.message` attribute for `ImproperlyConfiguredError`
-- Check for meaningful error message content, not just exception type
-- Example: `assert "expected text" in exc_info.value.message.lower()`
+**Integration Test Helpers** (`tests/integration/helpers.py`):
+- `exec_in_container()` - Run command in Docker container
+- `wait_for_service()` - Wait for systemd service with retries
+- `assert_service_running()` - Verify service is active
+- `assert_file_exists()` / `assert_file_contains()` - File assertions
 
 ### Running Tests
 
 ```bash
-# Run all tests (excludes integration by default)
+# Run unit tests (fast, no Docker needed)
 just test
 
 # Run integration tests (requires Docker)
 just test-integration
 
 # Run specific test file
-just test tests/unit/test_config.py
+just test tests/test_config.py
 
-# Run with specific marker
-pytest -m unit
+# Update inline snapshots
+just test-fix
 ```

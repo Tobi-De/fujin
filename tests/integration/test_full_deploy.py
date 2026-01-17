@@ -5,7 +5,6 @@ These tests use Docker containers to simulate a real VPS environment.
 
 from __future__ import annotations
 
-import subprocess
 import time
 import zipfile
 from pathlib import Path
@@ -18,15 +17,7 @@ from fujin.commands.down import Down
 from fujin.commands.rollback import Rollback
 from fujin.config import Config
 
-
-def exec_in_container(container_name: str, cmd: str) -> tuple[str, bool]:
-    """Execute command in container and return (stdout, success)."""
-    result = subprocess.run(
-        ["docker", "exec", container_name, "bash", "-c", cmd],
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip(), result.returncode == 0
+from .helpers import exec_in_container, wait_for_service
 
 
 def create_minimal_wheel(wheel_path: Path, name: str, version: str):
@@ -237,20 +228,7 @@ WantedBy=multi-user.target
 
     # Verify both services are active (with retry for slow starts)
     for service in ["testapp-web.service", "testapp-worker.service"]:
-        for attempt in range(10):
-            stdout, success = exec_in_container(
-                vps_container["name"], f"systemctl is-active {service}"
-            )
-            if success and stdout == "active":
-                break
-            time.sleep(1)
-        else:
-            # Show debug info if service didn't start
-            status, _ = exec_in_container(
-                vps_container["name"], f"systemctl status {service}"
-            )
-            print(f"\n=== {service} Status ===\n{status}")
-            assert False, f"{service} not active after 10s: {stdout}"
+        wait_for_service(vps_container["name"], service)
 
     # Verify .env was deployed
     stdout, success = exec_in_container(
@@ -541,3 +519,298 @@ WantedBy=multi-user.target
     # Verify app user was deleted
     _, success = exec_in_container(vps_container["name"], "id -u downapp")
     assert not success, "App user should be deleted after down"
+
+
+def test_deploy_with_environment_secrets(vps_container, ssh_key, tmp_path, monkeypatch):
+    """Deploy resolves environment variables and writes them to .env on server."""
+    monkeypatch.chdir(tmp_path)
+
+    # Set environment variables that will be resolved as secrets
+    monkeypatch.setenv("MY_SECRET_KEY", "super-secret-value-123")
+    monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@localhost/db")
+
+    # Create mock binary
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    distfile = dist_dir / "secretapp-1.0.0"
+    distfile.write_text("#!/bin/bash\nsleep infinity\n")
+    distfile.chmod(0o755)
+
+    # Create .fujin directory with service and env file
+    fujin_dir = tmp_path / ".fujin"
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Secret app
+
+[Service]
+Type=simple
+ExecStart={app_dir}/secretapp
+WorkingDirectory={app_dir}
+EnvironmentFile={app_dir}/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    # Create env file with secret references
+    env_file = fujin_dir / "env"
+    env_file.write_text("""DEBUG=false
+SECRET_KEY=$MY_SECRET_KEY
+DATABASE_URL=$DATABASE_URL
+STATIC_VALUE=no-secret-here
+""")
+
+    config_dict = {
+        "app": "secretapp",
+        "version": "1.0.0",
+        "build_command": "echo 'building'",
+        "distfile": str(distfile),
+        "installation_mode": "binary",
+        "hosts": [
+            {
+                "address": vps_container["ip"],
+                "user": vps_container["user"],
+                "port": vps_container["port"],
+                "key_filename": ssh_key,
+                "envfile": ".fujin/env",
+            }
+        ],
+        "secrets": {"adapter": "system"},
+    }
+
+    config = msgspec.convert(config_dict, type=Config)
+
+    with patch("fujin.config.Config.read", return_value=config):
+        deploy = Deploy(no_input=True)
+        deploy()
+
+    # Verify service is running
+    wait_for_service(vps_container["name"], "secretapp-web.service")
+
+    # Verify .env file was deployed with resolved secrets
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/secretapp/.env"
+    )
+    assert success, f"Could not read .env file: {stdout}"
+
+    # Check that secrets were resolved (not literal $VAR references)
+    assert "super-secret-value-123" in stdout, f"SECRET_KEY not resolved: {stdout}"
+    assert "postgres://user:pass@localhost/db" in stdout, (
+        f"DATABASE_URL not resolved: {stdout}"
+    )
+    assert "no-secret-here" in stdout, f"STATIC_VALUE missing: {stdout}"
+
+    # Make sure the raw variable references are NOT in the file
+    assert "$MY_SECRET_KEY" not in stdout, "Secret reference should be resolved"
+    assert "$DATABASE_URL" not in stdout, "Secret reference should be resolved"
+
+
+def test_sequential_deploys_update_version(
+    vps_container, ssh_key, tmp_path, monkeypatch
+):
+    """Multiple deploys correctly update version and keep history."""
+    monkeypatch.chdir(tmp_path)
+
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+
+    fujin_dir = tmp_path / ".fujin"
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Sequential deploy test
+
+[Service]
+Type=simple
+ExecStart={app_dir}/seqapp
+WorkingDirectory={app_dir}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    def create_config(version: str):
+        distfile = dist_dir / f"seqapp-{version}"
+        distfile.write_text(
+            f"#!/bin/bash\necho 'version {version}' && sleep infinity\n"
+        )
+        distfile.chmod(0o755)
+        return msgspec.convert(
+            {
+                "app": "seqapp",
+                "version": version,
+                "build_command": "echo 'building'",
+                "distfile": str(distfile),
+                "installation_mode": "binary",
+                "hosts": [
+                    {
+                        "address": vps_container["ip"],
+                        "user": vps_container["user"],
+                        "port": vps_container["port"],
+                        "key_filename": ssh_key,
+                    }
+                ],
+            },
+            type=Config,
+        )
+
+    # Deploy v1.0.0
+    config_v1 = create_config("1.0.0")
+    with patch("fujin.config.Config.read", return_value=config_v1):
+        deploy = Deploy(no_input=True)
+        deploy()
+
+    wait_for_service(vps_container["name"], "seqapp-web.service")
+
+    # Verify v1.0.0 is deployed
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/seqapp/.version"
+    )
+    assert success and stdout.strip() == "1.0.0"
+
+    # Deploy v1.1.0
+    config_v2 = create_config("1.1.0")
+    with patch("fujin.config.Config.read", return_value=config_v2):
+        deploy = Deploy(no_input=True)
+        deploy()
+
+    wait_for_service(vps_container["name"], "seqapp-web.service")
+
+    # Verify v1.1.0 is now deployed
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/seqapp/.version"
+    )
+    assert success and stdout.strip() == "1.1.0"
+
+    # Verify bundle history exists (both versions available)
+    stdout, success = exec_in_container(
+        vps_container["name"], "ls /opt/fujin/seqapp/.versions/"
+    )
+    assert success
+    assert "seqapp-1.0.0.pyz" in stdout, f"v1.0.0 bundle should exist: {stdout}"
+    assert "seqapp-1.1.0.pyz" in stdout, f"v1.1.0 bundle should exist: {stdout}"
+
+    # Deploy v1.2.0
+    config_v3 = create_config("1.2.0")
+    with patch("fujin.config.Config.read", return_value=config_v3):
+        deploy = Deploy(no_input=True)
+        deploy()
+
+    wait_for_service(vps_container["name"], "seqapp-web.service")
+
+    # Verify v1.2.0 is now deployed
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/seqapp/.version"
+    )
+    assert success and stdout.strip() == "1.2.0"
+
+    # All three versions should be available for rollback
+    stdout, success = exec_in_container(
+        vps_container["name"], "ls /opt/fujin/seqapp/.versions/"
+    )
+    assert success
+    assert "seqapp-1.0.0.pyz" in stdout
+    assert "seqapp-1.1.0.pyz" in stdout
+    assert "seqapp-1.2.0.pyz" in stdout
+
+
+def test_deploy_preserves_app_data_between_versions(
+    vps_container, ssh_key, tmp_path, monkeypatch
+):
+    """Deploys preserve application data in app directory between versions."""
+    monkeypatch.chdir(tmp_path)
+
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+
+    fujin_dir = tmp_path / ".fujin"
+    systemd_dir = fujin_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Data persistence test
+
+[Service]
+Type=simple
+ExecStart={app_dir}/dataapp
+WorkingDirectory={app_dir}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    def create_config(version: str):
+        distfile = dist_dir / f"dataapp-{version}"
+        distfile.write_text(f"#!/bin/bash\nsleep infinity\n")
+        distfile.chmod(0o755)
+        return msgspec.convert(
+            {
+                "app": "dataapp",
+                "version": version,
+                "build_command": "echo 'building'",
+                "distfile": str(distfile),
+                "installation_mode": "binary",
+                "hosts": [
+                    {
+                        "address": vps_container["ip"],
+                        "user": vps_container["user"],
+                        "port": vps_container["port"],
+                        "key_filename": ssh_key,
+                    }
+                ],
+            },
+            type=Config,
+        )
+
+    # Deploy v1.0.0
+    config_v1 = create_config("1.0.0")
+    with patch("fujin.config.Config.read", return_value=config_v1):
+        deploy = Deploy(no_input=True)
+        deploy()
+
+    wait_for_service(vps_container["name"], "dataapp-web.service")
+
+    # Create some "application data" that should persist
+    exec_in_container(
+        vps_container["name"],
+        "echo 'user-data-12345' | sudo tee /opt/fujin/dataapp/data.txt",
+    )
+    exec_in_container(
+        vps_container["name"],
+        "sudo mkdir -p /opt/fujin/dataapp/uploads && "
+        "echo 'uploaded-file' | sudo tee /opt/fujin/dataapp/uploads/file.txt",
+    )
+
+    # Deploy v1.1.0
+    config_v2 = create_config("1.1.0")
+    with patch("fujin.config.Config.read", return_value=config_v2):
+        deploy = Deploy(no_input=True)
+        deploy()
+
+    wait_for_service(vps_container["name"], "dataapp-web.service")
+
+    # Verify data persisted through deployment
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/dataapp/data.txt"
+    )
+    assert success and "user-data-12345" in stdout, f"Data file lost: {stdout}"
+
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/dataapp/uploads/file.txt"
+    )
+    assert success and "uploaded-file" in stdout, f"Uploads lost: {stdout}"
+
+    # Verify new version is deployed
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/dataapp/.version"
+    )
+    assert success and stdout.strip() == "1.1.0"
