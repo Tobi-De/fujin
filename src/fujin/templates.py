@@ -13,7 +13,7 @@ After=network.target
 
 [Service]
 Type=simple
-User={{user}}
+User={{app_user}}
 WorkingDirectory={{app_dir}}
 EnvironmentFile={{app_dir}}/.env
 RuntimeDirectory={{app_name}}
@@ -30,12 +30,12 @@ RestartSec=5s
 # MemoryMax=512M
 # CPUQuota=50%
 
-# Security hardening (uncomment to enable)
-# NoNewPrivileges=true
-# PrivateTmp=true
-# ProtectSystem=strict
-# ProtectHome=true  # Home directories will be inaccessible
-# ReadWritePaths={{app_dir}}  # Grant write access to app directory
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true  # Home directories will be inaccessible
+ReadWritePaths={{app_dir}}  # Grant write access to app directory
 
 [Install]
 WantedBy=multi-user.target
@@ -51,7 +51,7 @@ Description={{app_name}} {name} task
 
 [Service]
 Type=oneshot
-User={{user}}
+User={{app_user}}
 WorkingDirectory={{app_dir}}
 EnvironmentFile={{app_dir}}/.env
 
@@ -61,6 +61,13 @@ ExecStart={{app_dir}}/.venv/bin/python -m myapp.{name}
 # Resource limits (uncomment to enable)
 # MemoryMax=512M
 # CPUQuota=50%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true  # Home directories will be inaccessible
+ReadWritePaths={{app_dir}}  # Grant write access to app directory
 """
 
 NEW_TIMER_TEMPLATE = """# Systemd timer for {name}

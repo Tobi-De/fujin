@@ -41,10 +41,6 @@ Indicates whether the *distfile* is a Python package or a self-contained executa
 The *binary* option disables specific Python-related features, such as virtual environment creation and requirements installation. ``fujin`` will assume the provided
 *distfile* already contains all the necessary dependencies to run your program.
 
-release_command
----------------
-Optional command to run at the end of deployment (e.g., database migrations) before your application is started.
-
 secrets
 -------
 
@@ -59,170 +55,127 @@ password_env
 ~~~~~~~~~~~~
 Environment variable containing the password for the service account. This is only required for certain adapters.
 
-Sites
------
+replicas
+--------
 
-Caddy web server routing configuration. Each site defines one or more domains and how traffic should be routed.
+A mapping of service names to their replica count. Used for systemd template units (services with ``@`` in their names).
 
-domains
-~~~~~~~
-List of domain names this site will serve. Used for Caddy reverse proxy configuration and SSL certificate generation.
+When a service has replicas > 1, Fujin creates a template unit (e.g., ``myapp-worker@.service``) and enables instances 1 through N.
 
 .. code-block:: toml
     :caption: fujin.toml
 
-    [[sites]]
-    domains = ["example.com", "www.example.com"]
+    [replicas]
+    worker = 3  # Creates myapp-worker@1, myapp-worker@2, myapp-worker@3
 
-routes
-~~~~~~
+Systemd Units
+-------------
 
-Defines how incoming requests are routed based on URL paths. Routes are evaluated in order (top-to-bottom), so place more specific routes first.
+Fujin uses a file-based approach for systemd configuration. Instead of defining processes in ``fujin.toml``, you create actual systemd unit files in the ``.fujin/systemd/`` directory.
 
-**Route Types:**
+**Directory Structure:**
 
-- **Process route** (string): Route to a process by name. The process must have a ``listen`` field.
-- **Process route with options** (dict): Route to a process with additional options like ``strip_prefix``.
-- **Static files** (dict): Serve static files from a directory using ``{ static = "path" }``.
+.. code-block:: text
 
-**Route Syntax:**
+    .fujin/
+    ├── Caddyfile              # Caddy reverse proxy configuration
+    └── systemd/
+        ├── web.service        # Web server service
+        ├── worker.service     # Background worker service
+        ├── cleanup.service    # Timer-triggered cleanup task
+        ├── cleanup.timer      # Timer for cleanup task
+        ├── common.d/          # Dropins applied to ALL services
+        │   └── limits.conf
+        └── web.service.d/     # Dropins for specific service
+            └── memory.conf
 
-Simple process route:
+**Service Files:**
 
-.. code-block:: toml
+Create standard systemd service files with Fujin-specific variable substitution:
 
-    routes = { "/" = "web" }
+.. code-block:: ini
+    :caption: .fujin/systemd/web.service
 
-Process route with path stripping:
+    [Unit]
+    Description=Web Service
+    After=network.target
 
-.. code-block:: toml
+    [Service]
+    Type=simple
+    User={app_user}
+    Group=fujin
+    WorkingDirectory={app_dir}
+    EnvironmentFile={app_dir}/.env
+    ExecStart={app_dir}/.venv/bin/gunicorn myapp.wsgi:app --bind localhost:8000
 
-    routes = { "/api/*" = { process = "api", strip_prefix = "/api" } }
+    [Install]
+    WantedBy=multi-user.target
 
-Static files route:
-
-.. code-block:: toml
-
-    routes = { "/static/*" = { static = "/var/www/app/static/" } }
-
-**Variable Interpolation:**
-
-Static file paths support variable interpolation using Python's ``str.format()`` syntax. Available variables:
+**Available Variables:**
 
 - ``{app_name}`` - Your application name
-- ``{app_dir}`` - Full path to application directory
-- ``{user}`` - Host user
+- ``{app_dir}`` - Full path to application directory (``/opt/fujin/{app_name}``)
+- ``{app_user}`` - User to run the app as (defaults to app_name)
 
-**Complete Example:**
+**Timers:**
 
-.. code-block:: toml
-    :caption: fujin.toml
+For scheduled tasks, create both a ``.service`` and ``.timer`` file:
 
-    [[sites]]
-    domains = ["example.com", "www.example.com"]
-    routes = {
-        "/ws/*" = "websocket",                          # WebSocket to daphne
-        "/api/*" = { process = "api", strip_prefix = "/api" },  # API with path stripping
-        "/static/*" = { static = "/var/www/{app_name}/static/" },
-        "/media/*" = { static = "/var/www/{app_name}/media/" },
-        "/" = "web"                                      # Default to main process
-    }
+.. code-block:: ini
+    :caption: .fujin/systemd/cleanup.timer
 
-**Multiple Sites:**
+    [Unit]
+    Description=Run cleanup daily
 
-You can define multiple sites for different domains:
+    [Timer]
+    OnCalendar=daily
+    Persistent=true
 
-.. code-block:: toml
-    :caption: fujin.toml
+    [Install]
+    WantedBy=timers.target
 
-    [[sites]]
-    domains = ["example.com"]
-    routes = { "/" = "web" }
+**Dropins:**
 
-    [[sites]]
-    domains = ["api.example.com"]
-    routes = { "/" = "api" }
+- ``common.d/*.conf`` - Applied to all services
+- ``{service}.service.d/*.conf`` - Applied to specific service
 
-processes
+Use the ``fujin new`` command to generate these files:
+
+.. code-block:: bash
+
+    fujin new service worker      # Create a new service file
+    fujin new timer cleanup       # Create a timer with its service
+    fujin new dropin resources    # Create a common dropin
+
+Caddyfile
 ---------
 
-A mapping of process names to their configuration. This section serves as the **metadata** that drives the generation of Systemd unit files.
-Fujin uses a template-based approach where the data defined here is passed to Jinja2 templates to render the final service files.
+Fujin uses Caddy as the reverse proxy. Configure it by creating a ``.fujin/Caddyfile``:
 
-Each entry in the `processes` dictionary represents a service that will be managed by Systemd. The key is the process name (e.g., `web`, `worker`), and the value is a dictionary of configuration options.
+.. code-block:: text
+    :caption: .fujin/Caddyfile
 
-**Configuration Options:**
+    example.com {
+        reverse_proxy localhost:8000
+    }
 
-- **command** (required): The command to execute. Relative paths are resolved against the application directory on the host.
-- **listen** (optional): The address where this process listens for requests. Required if the process is referenced in site routes. Supports:
+For static files (Django example):
 
-  - HTTP address (e.g., ``localhost:8000``)
-  - Unix socket (e.g., ``unix//run/project.sock``)
+.. code-block:: text
+    :caption: .fujin/Caddyfile
 
-- **replicas** (optional, default: 1): The number of instances to run. If > 1, a template unit (e.g., `app-worker@.service`) is generated. Cannot be used with ``listen`` (which replica would Caddy route to?).
-- **socket** (optional, default: false): If true, enables socket activation. Fujin will look for a corresponding socket template.
-- **timer** (optional): Configuration for systemd timer-based scheduling. Accepts a dictionary with the following options:
+    example.com {
+        handle_path /static/* {
+            root * {app_dir}/staticfiles/
+            file_server
+        }
 
-  - **on_calendar**: Calendar event expression (e.g., ``"daily"``, ``"*:*:00"`` for every minute)
-  - **on_boot_sec**: Time to wait after system boot (e.g., ``"5m"`` for 5 minutes)
-  - **on_unit_active_sec**: Time to wait after the service was last active (e.g., ``"1h"`` for recurring tasks)
-  - **on_active_sec**: Time to wait after the timer was activated
-  - **persistent** (default: true): Whether to catch up on missed runs
-  - **randomized_delay_sec**: Random delay to add (useful to prevent thundering herd)
-  - **accuracy_sec**: Timer accuracy (can save power on low-precision timers)
+        handle {
+            reverse_proxy localhost:8000
+        }
+    }
 
-  At least one trigger (``on_calendar``, ``on_boot_sec``, ``on_unit_active_sec``, or ``on_active_sec``) must be specified.
-
-**Template Selection Logic:**
-
-For each process defined, Fujin looks for a matching template in your local configuration directory (default: `.fujin/`) or falls back to the built-in defaults.
-The lookup order for a process named `worker` is:
-
-1.  `worker.service.j2` (Specific template)
-2.  `default.service.j2` (Generic fallback)
-
-This allows you to have a generic configuration for most processes while customizing specific ones (like `web`) by simply creating a `web.service.j2` file.
-
-Example:
-
-.. code-block:: toml
-    :caption: fujin.toml
-
-    # Web process - routable via Caddy
-    [processes.web]
-    command = ".venv/bin/gunicorn myproject.wsgi:application --bind unix:/run/myapp/web.sock"
-    listen = "unix//run/myapp/web.sock"
-
-    # WebSocket process - routable via Caddy
-    [processes.websocket]
-    command = ".venv/bin/daphne -u /run/myapp/ws.sock myproject.asgi:application"
-    listen = "unix//run/myapp/ws.sock"
-
-    # Background worker - not routable (no listen field)
-    [processes.worker]
-    command = ".venv/bin/celery -A myproject worker"
-    replicas = 2
-
-    # Simple timer - run daily
-    [processes.beat]
-    command = ".venv/bin/celery -A myproject beat"
-    timer = { on_calendar = "daily" }
-
-    # Advanced timer - run hourly with randomized delay to prevent thundering herd
-    [processes.cleanup]
-    command = ".venv/bin/cleanup"
-    timer = { on_calendar = "hourly", randomized_delay_sec = "5m" }
-
-    # Run 5 minutes after boot, then every hour after last completion
-    [processes.health]
-    command = ".venv/bin/healthcheck"
-    timer = { on_boot_sec = "5m", on_unit_active_sec = "1h" }
-
-
-.. note::
-
-    When generating systemd service files, the full path to the command is automatically constructed based on the *apps_dir* setting.
-    You can inspect the default templates in the source code or by running `fujin init --templates` to copy them to your project.
+The ``{app_dir}`` variable is substituted during deployment.
 
 Host Configuration
 -------------------
@@ -285,7 +238,7 @@ address
 
 **(Required)**
 
-The IP address or hostname to connect to via SSH. This is purely for SSH connection purposes.
+The IP address or hostname to connect to via SSH.
 
 .. code-block:: toml
 
@@ -294,10 +247,6 @@ The IP address or hostname to connect to via SSH. This is purely for SSH connect
 
    [[hosts]]
    address = "example.com"    # Connect via hostname
-
-.. note::
-
-   Domain names for Caddy/SSL are now configured in the ``sites`` section, not in host configuration.
 
 user
 ^^^^
@@ -343,25 +292,6 @@ check out the `integrations guide </integrations.html>`_
 .. important::
 
     *envfile* and *env* are mutually exclusive—you can define only one.
-
-apps_dir
-^^^^^^^^
-
-**(Optional, default: .local/share/fujin)**
-
-Base directory for project storage on the host. Path is relative to user's home directory unless it starts with ``/``.
-
-This value determines your project's **app_dir**, which is **{apps_dir}/{app}**.
-
-.. code-block:: toml
-
-   [[hosts]]
-   apps_dir = "/opt/apps"  # Absolute path
-   # Results in: /opt/apps/myapp
-
-   [[hosts]]
-   apps_dir = ".local/share/fujin"  # Relative to home
-   # Results in: /home/user/.local/share/fujin/myapp
 
 password_env
 ^^^^^^^^^^^^
@@ -425,36 +355,61 @@ Example:
     [aliases]
     console = "app exec -i shell_plus" # open an interactive django shell
     dbconsole = "app exec -i dbshell" # open an interactive django database shell
-    shell = "server exec --appenv -i bash" # SSH into the project directory with environment variables loaded
+    shell = "exec --appenv bash" # SSH into the project directory with environment variables loaded
 
 
-Example
--------
+Complete Example
+----------------
 
-This is a minimal working example.
+This is a minimal working example for a Python web application:
 
-.. tab-set::
+.. code-block:: toml
+    :caption: fujin.toml
 
-    .. tab-item:: python package
+    app = "myapp"
+    build_command = "uv build && uv pip compile pyproject.toml -o requirements.txt > /dev/null"
+    distfile = "dist/myapp-{version}-py3-none-any.whl"
+    requirements = "requirements.txt"
+    installation_mode = "python-package"
 
-        .. exec_code::
-            :language_output: toml
+    [aliases]
+    shell = "exec --appenv bash"
+    status = "app info"
+    logs = "app logs"
+    restart = "app restart"
 
-            # --- hide: start ---
-            from fujin.commands.init import simple_config
-            from tomli_w import dumps
+    [[hosts]]
+    user = "deploy"
+    address = "myapp.com"
+    envfile = ".env.prod"
 
-            print(dumps(simple_config("bookstore"),  multiline_strings=True))
-            #hide:toggle
+.. code-block:: ini
+    :caption: .fujin/systemd/web.service
 
-    .. tab-item:: binary mode
+    [Unit]
+    Description=Web Service
+    After=network.target
 
-        .. exec_code::
-            :language_output: toml
+    [Service]
+    Type=simple
+    User={app_user}
+    Group=fujin
+    WorkingDirectory={app_dir}
+    EnvironmentFile={app_dir}/.env
+    ExecStart={app_dir}/.venv/bin/gunicorn myapp.wsgi:app --bind localhost:8000
 
-            # --- hide: start ---
-            from fujin.commands.init import binary_config
-            from tomli_w import dumps
+    NoNewPrivileges=true
+    PrivateTmp=true
+    ProtectSystem=strict
+    ProtectHome=read-only
+    ReadWritePaths={app_dir}
 
-            print(dumps(binary_config("bookstore"),  multiline_strings=True))
-            #hide:toggle
+    [Install]
+    WantedBy=multi-user.target
+
+.. code-block:: text
+    :caption: .fujin/Caddyfile
+
+    myapp.com {
+        reverse_proxy localhost:8000
+    }

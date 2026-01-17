@@ -25,7 +25,7 @@ uv run fujin --help
 just test
 # Or: uv run pytest --ignore=tests/integration -sv
 
-# Run integration tests (requires VM)
+# Run integration tests (requires Docker)
 just test-integration
 # Or: uv run pytest tests/integration
 
@@ -91,23 +91,53 @@ just build-bin
 The `Config` class (msgspec struct) is the central configuration object, loaded from `fujin.toml` in the project root.
 
 **Key components:**
-- `Config`: Main configuration with app metadata, processes, host config, and webserver settings
-- `ProcessConfig`: Defines how each process runs (command, replicas, socket/timer options)
-- `TimerConfig`: Systemd timer configuration (on_calendar, on_boot_sec, on_unit_active_sec, persistent, etc.)
+- `Config`: Main configuration with app metadata, host config, and deployment settings
 - `HostConfig`: SSH connection details, environment files, and deployment target info
-- `Webserver`: Caddy reverse proxy configuration (upstream, statics, config directory)
+- `SecretConfig`: Secret adapter configuration (adapter name, password env var)
 - `InstallationMode`: Enum for `python-package` vs `binary` deployment
+
+**Important Config fields:**
+- `app_name`: Application name (used for systemd unit naming)
+- `app_user`: System user to run the app as (defaults to app_name)
+- `version`: App version (defaults to reading from `pyproject.toml`)
+- `replicas`: Dict mapping service name to replica count (e.g., `{"worker": 3}`)
+- `hosts`: List of `HostConfig` for deployment targets
+- `local_config_dir`: Path to `.fujin/` directory (default)
+
+**Important Config properties:**
+- `app_dir`: Returns `/opt/fujin/{app_name}` (deployment location)
+- `deployed_units`: List of `DeployedUnit` discovered from `.fujin/systemd/`
+- `systemd_units`: All unit names that should be enabled/started
+- `caddyfile_exists`: Whether `.fujin/Caddyfile` exists
+- `caddy_config_path`: Remote Caddy config path (`/etc/caddy/conf.d/{app_name}.caddy`)
 
 **Important behaviors:**
 - Version defaults to reading from `pyproject.toml`
 - Python version can be read from `.python-version` file if not specified
-- Template rendering uses Jinja2 with search paths: `.fujin/` (local overrides) then `src/fujin/templates/` (defaults)
-- Systemd unit names follow pattern: `{app_name}.service` for single replica, `{app_name}@.service` for multiple replicas
-- The config validates that a `web` process exists if webserver is enabled
+- Apps are always deployed to `/opt/fujin/{app_name}`
+- Systemd unit names follow pattern: `{app_name}-{service}.service` for single replica, `{app_name}-{service}@.service` for multiple replicas
+
+### Service Discovery (`discovery.py`)
+
+The `DeployedUnit` class represents a discovered systemd service from the `.fujin/systemd/` directory.
+
+**DeployedUnit fields:**
+- `service_name`: Base name (e.g., "web", "worker")
+- `is_template`: True if using `@.service` format for replicas
+- `service_file`, `socket_file`, `timer_file`: Paths to unit files
+- `template_service_name`: Full systemd name (e.g., `myapp-web@.service`)
+- `replica_count`: Number of instances to run
+- `instance_service_names`: List of instance names for operations
+
+**Discovery process:**
+- Scans `.fujin/systemd/` for `.service` files
+- Detects template services (ending with `@`)
+- Finds matching `.socket` and `.timer` files
+- Generates instance names based on `config.replicas`
 
 ### Connection & SSH (`connection.py`)
 
-`SSH2Connection` wraps ssh2-python for executing remote commands. Uses context manager pattern via `connection()` function.
+`SSH2Connection` wraps ssh2-python for executing remote commands. Uses context manager pattern via `connection()` method.
 
 **Key features:**
 - Non-blocking I/O with select() for real-time output streaming
@@ -121,19 +151,22 @@ The `Config` class (msgspec struct) is the central configuration object, loaded 
 
 ### Commands Structure (`commands/`)
 
-All commands inherit from `BaseCommand` which provides `config`, `stdout`, and `connection` properties. Uses Cappa for CLI parsing.
+All commands inherit from `BaseCommand` which provides `config`, `output`, and `connection()` properties. Uses Cappa for CLI parsing.
 
 **Main commands:**
-- `deploy`: Build → transfer → install → configure services (the core deployment workflow)
-- `init`: Initialize fujin.toml configuration for a new project
-- `up`: Bootstrap server (install system deps, caddy, etc.)
-- `rollback`: Roll back to previous version by symlinking and restarting services
-- `app`: Manage application (exec commands in app context, logs, restart)
-- `server`: Server-level operations (exec, install caddy)
-- `config`: Show/print caddy config, test config, reload caddy
-- `down`: Stop and disable services
-- `prune`: Remove old releases (keeps N versions based on config)
-- `printenv`: Show resolved environment variables (useful for debugging secrets)
+- `init`: Initialize fujin.toml and `.fujin/` directory structure for a new project
+- `deploy`: Build → create zipapp → upload → execute installer (the core deployment workflow)
+- `up`: Alias for `server bootstrap`
+- `rollback`: Roll back to previous version using stored `.pyz` bundles
+- `app`: Manage application (status, start/stop/restart, logs, shell, cat)
+- `server`: Server-level operations (bootstrap, create-user, setup-ssh, status)
+- `exec`: Execute commands on server (with `--app` or `--appenv` flags)
+- `down`: Tear down project (stop services, remove files, delete app user)
+- `prune`: Remove old version bundles (keeps N versions based on config)
+- `new`: Create new systemd service, timer, or dropin files
+- `scale`: Scale a service to run multiple replicas
+- `migrate`: Migrate old fujin.toml format to file-based structure
+- `audit`: View deployment audit log
 
 **Command pattern**: Each command is a Cappa command class that implements `__call__()`.
 
@@ -142,46 +175,56 @@ All commands inherit from `BaseCommand` which provides `config`, `stdout`, and `
 Supports fetching secrets from external sources during deployment. Environment variables prefixed with `$` trigger secret resolution.
 
 **Adapters:**
-- `system`: Read from local environment variables
+- `system`: Read from local environment variables (default)
 - `bitwarden`: Bitwarden CLI (`bw get password`)
 - `1password`: 1Password CLI (`op read`)
 - `doppler`: Doppler CLI (`doppler secrets get`)
 
 Secrets are resolved concurrently using ThreadPoolExecutor for performance.
 
-### Template System
+### Template System (`templates.py`)
 
-**Jinja2 templates** in `src/fujin/templates/`:
-- `install.sh.j2`: Deployment script (uploaded and executed on remote)
-- `uninstall.sh.j2`: Cleanup script for removing deployments
-- `default.service.j2`: Systemd service unit template
-- `web.service.j2`: Special template for web processes
-- `default.socket.j2`: Systemd socket activation template
-- `default.timer.j2`: Systemd timer template
-- `Caddyfile.j2`: Caddy reverse proxy configuration
+Templates are Python string constants used by the `new` and `init` commands to generate files:
+- `NEW_SERVICE_TEMPLATE`: Systemd service unit template
+- `NEW_TIMER_SERVICE_TEMPLATE`: Systemd service for timer-triggered tasks
+- `NEW_TIMER_TEMPLATE`: Systemd timer configuration
+- `NEW_DROPIN_TEMPLATE`: Systemd dropin for overrides/extensions
+- `CADDYFILE_TEMPLATE`: Simple Caddyfile template
 
-**Template overrides**: Users can place custom templates in `.fujin/` directory to override defaults.
+Templates use `{variable}` placeholders for Python string formatting and `{{variable}}` for values resolved at deploy time.
 
 ### Deployment Flow
 
 1. **Build** (`deploy.py`): Run build_command locally
 2. **Resolve secrets**: Parse env file and fetch secrets from configured adapter
-3. **Bundle**: Create tarball with distfile, requirements.txt, .env, systemd units, install script
-4. **Transfer**: Upload bundle to server via SCP
-5. **Install** (`install.sh.j2`):
-   - Extract to versioned directory (e.g., `~/apps/myapp/v1.0.0/`)
-   - Install Python/dependencies or binary
-   - Copy systemd units
-   - Symlink current → version directory
-   - Reload systemd, restart services
-6. **Configure Caddy**: Upload Caddyfile and reload if webserver enabled
+3. **Create bundle** (in temp directory):
+   - Copy distfile and requirements.txt
+   - Create `.env` with resolved variables
+   - Copy systemd units from `.fujin/systemd/`
+   - Copy dropins (common.d/ and service-specific)
+   - Copy Caddyfile if exists
+   - Create `config.json` with deployment metadata
+4. **Create zipapp**: Bundle everything with `_installer/__main__.py` into `.pyz` file
+5. **Upload**: SCP zipapp to `/opt/fujin/{app_name}/.versions/{app_name}-{version}.pyz`
+6. **Verify**: SHA256 checksum verification
+7. **Execute**: Run `python3 installer.pyz install` on server
+8. **Prune**: Remove old versions (keeps `versions_to_keep` most recent)
+
+**Installer actions** (`_installer/__main__.py`):
+- Create app user if needed
+- Set up `/opt/fujin/{app_name}` directory
+- Install Python package (via uv) or copy binary
+- Create `.appenv` shell script for environment setup
+- Install systemd units and dropins
+- Enable and start services
+- Configure Caddy if enabled
 
 ### Testing
 
 - Uses pytest with inline-snapshot for snapshot testing
 - `pytest-subprocess` for mocking subprocess calls
 - Tests in `tests/` directory, integration tests in `tests/integration/`
-- Markers: `@pytest.mark.use_recorder` for mock recording
+- Integration tests use Docker with real systemd
 
 ### Tools & Dependencies
 
@@ -190,7 +233,7 @@ Secrets are resolved concurrently using ThreadPoolExecutor for performance.
 - **msgspec**: Fast serialization library for config parsing (TOML support)
 - **ssh2-python**: Python bindings for libssh2 (lower-level than paramiko)
 - **Rich**: Terminal formatting and output
-- **Jinja2**: Template rendering
+- **tomli-w**: TOML writing for config updates
 
 ## Common Patterns
 
@@ -200,33 +243,29 @@ Secrets are resolved concurrently using ThreadPoolExecutor for performance.
 2. Inherit from `BaseCommand` or use standalone `@cappa.command`
 3. Add to imports and `Fujin.subcommands` union in `__main__.py`
 4. Use `self.config` for configuration access
-5. Use `self.stdout.output()` for user-facing output (supports Rich markup)
-6. Use `with self.connection as conn:` for SSH operations
+5. Use `self.output.output()` for user-facing output (supports Rich markup)
+6. Use `with self.connection() as conn:` for SSH operations
 
 ### Working with configuration
 
 ```python
 # Access config
 self.config.app_name
-self.config.processes["web"]
-self.config.host.domain_name
+self.config.app_dir  # property, returns /opt/fujin/{app_name}
+self.config.replicas  # dict of service -> replica count
 
-# Render templates
-units, user_units = self.config.render_systemd_units()
-caddyfile = self.config.render_caddyfile()
+# Access discovered units
+for du in self.config.deployed_units:
+    print(du.service_name, du.is_template, du.replica_count)
 
-# Build context for install script
-context = self.config.build_context(
-    distfile_name="app.whl",
-    user_units=user_units,
-    new_units=units
-)
+# Get all systemd unit names
+units = self.config.systemd_units
 ```
 
 ### Remote command execution
 
 ```python
-with self.connection as conn:
+with self.connection() as conn:
     # Simple command
     stdout, success = conn.run("ls -la")
 
@@ -241,6 +280,16 @@ with self.connection as conn:
     conn.run("bash", pty=True)
 ```
 
+### Output formatting
+
+```python
+self.output.success("Operation completed!")  # green
+self.output.error("Something failed")        # red
+self.output.warning("Be careful")            # yellow
+self.output.info("FYI...")                   # blue
+self.output.output("Plain text")             # no color
+```
+
 ## Project-Specific Notes
 
 - **Versioning**: Uses bump-my-version, updates both pyproject.toml and src/fujin/__init__.py
@@ -252,55 +301,43 @@ with self.connection as conn:
 
 ## Systemd Security Directives
 
-Fujin uses systemd security directives to harden services. **IMPORTANT**: When apps are deployed to `/home/{user}/.local/share/fujin`, you MUST use `ProtectHome=read-only` instead of `ProtectHome=true`.
+Fujin uses systemd security directives to harden services. Apps are deployed to `/opt/fujin/{app_name}`.
 
-### Correct Security Configuration
+### Recommended Security Configuration
 
-For apps in `/home/*`:
 ```ini
 [Service]
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-only  # NOT "true" - apps need to read from /home
-ReadWritePaths={app_dir}
-ReadWritePaths={app_dir}/.venv  # Python needs to write bytecode
+ProtectHome=true
+ReadWritePaths=/opt/fujin/{app_name}
 ```
 
 ### Why These Settings?
 
-- `ProtectHome=true` makes `/home` completely inaccessible (exit code 203/EXEC)
-- `ProtectHome=read-only` allows reading app code/venv but prevents writes
-- `ProtectSystem=strict` makes most of filesystem read-only
-- `ReadWritePaths={app_dir}/.venv` allows Python to write `.pyc` bytecode files
-- Without `.venv` write access, Python can't compile bytecode (exit code 203/EXEC)
-
-### Alternative: System-Wide Installation
-
-If using `/opt/fujin` instead of `/home`:
-- Can use `ProtectHome=true` (home dirs not needed)
-- Still need `ReadWritePaths={app_dir}/.venv` for Python bytecode
-- Cleaner separation but requires sudo for directory creation
+- `ProtectHome=true`: Home directories inaccessible (safe since apps are in /opt)
+- `ProtectSystem=strict`: Most of filesystem read-only
+- `ReadWritePaths`: Grant write access to app directory for logs, database, etc.
 
 ### Debugging Permission Issues
 
 Common exit codes:
-- **203/EXEC**: Executable not found or not accessible (check ProtectHome, ProtectSystem, file permissions)
+- **203/EXEC**: Executable not found or not accessible (check file permissions)
 - **226**: Namespace/cgroup setup failed (usually ProtectSystem incompatibility)
 
 Test manually:
 ```bash
 # Check if binary is accessible
-ls -la /path/to/app/.venv/bin/app
+ls -la /opt/fujin/myapp/.venv/bin/myapp
 
 # Test with systemd restrictions
 sudo systemd-run --pty \
   --property=ProtectSystem=strict \
-  --property=ProtectHome=read-only \
-  --property=ReadWritePaths=/path/to/app \
-  --property=ReadWritePaths=/path/to/app/.venv \
-  --property=User=username \
-  /path/to/app/.venv/bin/app --version
+  --property=ProtectHome=true \
+  --property=ReadWritePaths=/opt/fujin/myapp \
+  --property=User=myapp \
+  /opt/fujin/myapp/.venv/bin/myapp --version
 ```
 
 ## Alias System
@@ -309,7 +346,8 @@ Fujin supports command aliases defined in `fujin.toml`:
 
 ```toml
 [aliases]
-console = "app exec -i shell"
+shell = "exec --appenv bash"
+logs = "app logs"
 ```
 
 Parsed in `__main__.py:_parse_aliases()` and expands before command invocation.
@@ -321,13 +359,13 @@ Parsed in `__main__.py:_parse_aliases()` and expands before command invocation.
 Tests are organized in `tests/` with two categories:
 
 **Unit Tests** (`tests/test_*.py`):
-- Fast tests with mocked dependencies (~154 tests)
+- Fast tests with mocked dependencies
 - Cover error handling, user interaction, and pure logic
 - No external dependencies (SSH, Docker)
 - Examples: `test_config.py`, `test_app.py`, `test_rollback.py`
 
 **Integration Tests** (`tests/integration/`):
-- Docker-based tests with real systemd/SSH (~23 tests)
+- Docker-based tests with real systemd/SSH
 - Verify end-to-end behavior on a simulated VPS
 - Require Docker to run
 - Test files:
