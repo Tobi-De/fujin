@@ -9,7 +9,6 @@ import cappa
 
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
-from fujin.templates import NEW_DROPIN_TEMPLATE
 from fujin.templates import NEW_SERVICE_TEMPLATE
 
 # Migration-specific Caddy templates for converting old config format
@@ -164,6 +163,11 @@ class Migrate(BaseCommand):
         if release_command:
             changes.append("  - release_command (moved to ExecStartPre in service)")
 
+        # Check if any host has apps_dir field
+        hosts = config.get("hosts", [])
+        if any("apps_dir" in host for host in hosts):
+            changes.append("  - apps_dir from host configs (deprecated)")
+
         for change in changes:
             self.output.output(change)
 
@@ -173,6 +177,7 @@ class Migrate(BaseCommand):
         processes = config.get("processes", {})
         sites = config.get("sites", [])
         release_command = config.get("release_command")
+        installation_mode = config.get("installation_mode", "python-package")
 
         fujin_dir = Path(".fujin")
         systemd_dir = fujin_dir / "systemd"
@@ -204,6 +209,8 @@ class Migrate(BaseCommand):
                 replicas=num_replicas,
                 socket=socket,
                 release_command=release_command if name == "web" else None,
+                installation_mode=installation_mode,
+                app_name=app_name,
             )
 
             # Write service file (templated if replicas > 1)
@@ -229,13 +236,6 @@ class Migrate(BaseCommand):
                 timer_path.write_text(timer_file)
                 self.output.success(f"Created {timer_path}")
 
-        # Generate common drop-ins
-        common_dir = systemd_dir / "common.d"
-        common_dir.mkdir(exist_ok=True)
-        base_conf = self._generate_base_conf(app_name)
-        (common_dir / "base.conf").write_text(base_conf)
-        self.output.success(f"Created {common_dir / 'base.conf'}")
-
         # Generate Caddyfile from sites
         if sites:
             caddyfile = self._generate_caddyfile(sites, processes)
@@ -255,6 +255,11 @@ class Migrate(BaseCommand):
         updated_config.pop("webserver", None)
         updated_config.pop("release_command", None)
 
+        # Remove deprecated host config fields
+        if "hosts" in updated_config:
+            for host in updated_config["hosts"]:
+                host.pop("apps_dir", None)  # Remove deprecated apps_dir
+
         # Write updated fujin.toml
         import tomli_w
 
@@ -270,6 +275,8 @@ class Migrate(BaseCommand):
         replicas: int,
         socket: bool,
         release_command: str | None,
+        installation_mode: str,
+        app_name: str,
     ) -> str:
         """Generate systemd service file content."""
         instance_suffix = "%i" if replicas > 1 else ""
@@ -284,7 +291,38 @@ class Migrate(BaseCommand):
 
         # Add ExecStartPre if release_command exists
         if release_command:
-            exec_start_pre = f"# Run release command before starting\nExecStartPre={{app_dir}}/{release_command}\n\n"
+            # Split release_command by && to get multiple commands
+            commands = [cmd.strip() for cmd in release_command.split("&&")]
+            exec_start_pre_lines = []
+
+            for cmd in commands:
+                # Check if command starts with the app name (the binary)
+                parts = cmd.split(None, 1)  # Split on first whitespace
+                if parts and parts[0] == app_name:
+                    # Replace app binary with full path template
+                    rest_of_cmd = parts[1] if len(parts) > 1 else ""
+                    if installation_mode == "python-package":
+                        # Use python -m for python packages
+                        full_cmd = f"{{app_dir}}/.venv/bin/python -m {{app_name}}" + (
+                            f" {rest_of_cmd}" if rest_of_cmd else ""
+                        )
+                    else:
+                        # For binary mode, use {app_dir}/{app_name}
+                        full_cmd = f"{{app_dir}}/{{app_name}}" + (
+                            f" {rest_of_cmd}" if rest_of_cmd else ""
+                        )
+                else:
+                    # Command doesn't start with app binary, prefix with {app_dir}/
+                    full_cmd = f"{{app_dir}}/{cmd}"
+
+                exec_start_pre_lines.append(f"ExecStartPre={full_cmd}")
+
+            # Join all ExecStartPre lines with newlines
+            exec_start_pre = (
+                "# Run release command before starting\n"
+                + "\n".join(exec_start_pre_lines)
+                + "\n\n"
+            )
             service_content = service_content.replace(
                 "# Main command - adjust to match your application\n", exec_start_pre
             )
@@ -352,10 +390,6 @@ class Migrate(BaseCommand):
             instance_suffix=instance_suffix,
             timer_config=timer_content,
         )
-
-    def _generate_base_conf(self, app_name: str) -> str:
-        """Generate common.d/base.conf content."""
-        return NEW_DROPIN_TEMPLATE
 
     def _generate_caddyfile(self, sites: list, processes: dict) -> str:
         """Generate Caddyfile from sites configuration."""
