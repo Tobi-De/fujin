@@ -126,24 +126,11 @@ NEW_DROPIN_TEMPLATE = """# Systemd dropin configuration
 # More options: https://www.freedesktop.org/software/systemd/man/systemd.exec.html
 """
 
-# Caddyfile Templates
-CADDYFILE_HEADER = """# Caddyfile for {app_name}
+# Caddyfile Template
+CADDYFILE_TEMPLATE = """# Caddyfile for {app_name}
 # Learn more: https://caddyserver.com/docs/caddyfile
 
 {domain} {{
-"""
-
-CADDY_HANDLE_STATIC = """
-    # Serve static files
-    handle_path {path} {{
-        root * {root}
-        file_server
-    }}
-"""
-
-CADDY_HANDLE_PROXY = """
-    # Proxy to {name} service
-    handle {path} {{
-{extra_directives}        reverse_proxy {upstream}
-    }}
+    reverse_proxy {upstream}
+}}
 """

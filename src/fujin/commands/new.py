@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -38,7 +37,7 @@ class New(BaseCommand):
         service_file = systemd_dir / f"{name}.service"
         if service_file.exists():
             self.output.error(f"{service_file} already exists")
-            sys.exit(1)
+            raise cappa.Exit(code=1)
 
         service_content = NEW_SERVICE_TEMPLATE.format(name=name)
         service_file.write_text(service_content)
@@ -67,7 +66,7 @@ class New(BaseCommand):
 
         if service_file.exists() or timer_file.exists():
             self.output.error(f"Service or timer file already exists for '{name}'")
-            sys.exit(1)
+            raise cappa.Exit(code=1)
 
         service_content = NEW_TIMER_SERVICE_TEMPLATE.format(name=name)
         service_file.write_text(service_content)
@@ -115,7 +114,7 @@ class New(BaseCommand):
 
         if dropin_file.exists():
             self.output.error(f"{dropin_file} already exists")
-            sys.exit(1)
+            raise cappa.Exit(code=1)
 
         dropin_file.write_text(NEW_DROPIN_TEMPLATE)
         self.output.success(f"Created {dropin_file}")

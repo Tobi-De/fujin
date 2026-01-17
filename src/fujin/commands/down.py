@@ -51,7 +51,7 @@ class Down(BaseCommand):
         with self.connection() as conn:
             self.output.info("Tearing down project...")
 
-            app_dir = shlex.quote(self.config.app_dir())
+            app_dir = shlex.quote(self.config.app_dir)
             res, ok = conn.run(f"cat {app_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
             bundle_path = f"{app_dir}/.versions/{self.config.app_name}-{version}.pyz"

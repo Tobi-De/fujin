@@ -46,7 +46,7 @@ class App(BaseCommand):
                 names.append(du.template_timer_name)
 
         with self.connection() as conn:
-            app_dir = shlex.quote(self.config.app_dir())
+            app_dir = shlex.quote(self.config.app_dir)
             remote_version, _ = conn.run(
                 f"cat {app_dir}/.version 2>/dev/null || echo N/A", warn=True, hide=True
             )
@@ -120,22 +120,25 @@ class App(BaseCommand):
 
     def _format_status(self, status: str) -> str:
         """Format a status string with color."""
-        if status == "active":
-            return f"[bold green]{status}[/bold green]"
-        elif status == "failed":
-            return f"[bold red]{status}[/bold red]"
-        elif status in ("inactive", "unknown"):
-            return f"[dim]{status}[/dim]"
-        elif "/" in status:
+        styles = {
+            "active": "bold green",
+            "failed": "bold red",
+            "inactive": "dim",
+            "unknown": "dim",
+        }
+        if status in styles:
+            return f"[{styles[status]}]{status}[/{styles[status]}]"
+        if "/" in status:
             running, total = map(int, status.split("/"))
-            if running == total:
-                return f"[bold green]{status}[/bold green]"
-            elif running == 0:
-                return f"[bold red]{status}[/bold red]"
-            else:
-                return f"[bold yellow]{status}[/bold yellow]"
-        else:
-            return status
+            style = (
+                "bold green"
+                if running == total
+                else "bold red"
+                if running == 0
+                else "bold yellow"
+            )
+            return f"[{style}]{status}[/{style}]"
+        return status
 
     def _show_service_detail(self, service_name: str):
         """Show detailed information for a specific service."""
@@ -233,7 +236,7 @@ class App(BaseCommand):
         if host.key_filename:
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
-        full_remote_cmd = f"cd {self.config.app_dir()} && source .appenv && {command}"
+        full_remote_cmd = f"cd {self.config.app_dir} && source .appenv && {command}"
         ssh_cmd.extend([ssh_target, full_remote_cmd])
         subprocess.run(ssh_cmd)
 
@@ -396,7 +399,7 @@ class App(BaseCommand):
                 return
 
             if name == "env":
-                app_dir = shlex.quote(self.config.app_dir())
+                app_dir = shlex.quote(self.config.app_dir)
                 env_path = f"{app_dir}/.env"
                 self.output.output(f"[cyan]# {env_path}[/cyan]")
                 print()

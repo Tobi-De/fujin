@@ -30,7 +30,7 @@ class Prune(BaseCommand):
         if keep < 1:
             raise cappa.Exit("The minimum value for the --keep option is 1", code=1)
 
-        versions_dir = f"{self.config.app_dir()}/.versions"
+        versions_dir = f"{self.config.app_dir}/.versions"
         with self.connection() as conn:
             _, success = conn.run(f"test -d {versions_dir}", warn=True, hide=True)
             if not success:

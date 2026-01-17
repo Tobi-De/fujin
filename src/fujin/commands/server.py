@@ -30,7 +30,7 @@ class Server(BaseCommand):
     @cappa.command(help="Display information about the host system")
     def status(self):
         with self.connection() as conn:
-            _, result_ok = conn.run(f"command -v fastfetch", warn=True, hide=True)
+            _, result_ok = conn.run("command -v fastfetch", warn=True, hide=True)
             if result_ok:
                 conn.run("fastfetch", pty=True)
             else:
@@ -75,7 +75,7 @@ class Server(BaseCommand):
 
             if self.config.caddyfile_exists:
                 self.output.info("Setting up Caddy web server...")
-                _, result_ok = conn.run(f"command -v caddy", warn=True, hide=True)
+                _, result_ok = conn.run("command -v caddy", warn=True, hide=True)
                 if result_ok:
                     self.output.warning("Caddy is already installed.")
                     self.output.output(

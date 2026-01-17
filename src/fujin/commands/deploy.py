@@ -96,7 +96,7 @@ class Deploy(BaseCommand):
                 "app_name": self.config.app_name,
                 "app_user": self.config.app_user,
                 "version": version,
-                "app_dir": self.config.app_dir(),
+                "app_dir": self.config.app_dir,
                 "user": self.selected_host.user,
             }
 
@@ -200,7 +200,7 @@ class Deploy(BaseCommand):
                 "app_name": self.config.app_name,
                 "app_user": self.config.app_user,
                 "deploy_user": self.selected_host.user,
-                "app_dir": self.config.app_dir(),
+                "app_dir": self.config.app_dir,
                 "version": version,
                 "installation_mode": self.config.installation_mode.value,
                 "python_version": self.config.python_version,
@@ -251,7 +251,7 @@ class Deploy(BaseCommand):
 
             self._show_deployment_summary(zipapp_path)
 
-            remote_bundle_dir = Path(self.config.app_dir()) / ".versions"
+            remote_bundle_dir = Path(self.config.app_dir) / ".versions"
             remote_bundle_path = (
                 f"{remote_bundle_dir}/{self.config.app_name}-{version}.pyz"
             )
