@@ -357,6 +357,7 @@ class App(BaseCommand):
                 cmd_parts = ["sudo journalctl", units]
                 if not follow:
                     cmd_parts.append(f"-n {lines}")
+                    cmd_parts.append("--no-pager")  # Prevent pager when not following
                 if level:
                     cmd_parts.append(f"-p {level}")
                 if since:

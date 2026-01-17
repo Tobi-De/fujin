@@ -39,25 +39,25 @@ def test_config_reads_version_from_pyproject_when_not_specified(
     assert config.version == "2.5.0"
 
 
-def test_read_version_from_pyproject_raises_when_file_missing(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    with pytest.raises(Exception) as exc_info:  # msgspec.ValidationError
-        read_version_from_pyproject()
-
-    assert "version was not found" in str(exc_info.value).lower()
-
-
-def test_read_version_from_pyproject_raises_when_version_key_missing(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "pyproject_content,expected_error",
+    [
+        (None, "version was not found"),  # No pyproject.toml file
+        ("[project]\nname = 'test'", "version was not found"),  # No version key
+    ],
+)
+def test_read_version_from_pyproject_errors(
+    tmp_path, monkeypatch, pyproject_content, expected_error
 ):
+    """read_version_from_pyproject raises clear errors for missing file or version."""
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'")
+    if pyproject_content:
+        (tmp_path / "pyproject.toml").write_text(pyproject_content)
 
     with pytest.raises(Exception) as exc_info:
         read_version_from_pyproject()
 
-    assert "version was not found" in str(exc_info.value).lower()
+    assert expected_error in str(exc_info.value).lower()
 
 
 # ============================================================================
@@ -105,25 +105,36 @@ def test_config_binary_mode_doesnt_require_python_version(minimal_config_dict):
 # ============================================================================
 
 
-def test_config_requires_at_least_one_host(minimal_config_dict):
-    minimal_config_dict["hosts"] = []
+@pytest.mark.parametrize(
+    "hosts_config,expected_error",
+    [
+        ([], "at least one host"),
+        (
+            [
+                {"address": "h1.com", "user": "deploy"},
+                {"address": "h2.com", "user": "deploy"},
+            ],
+            "must have a 'name'",
+        ),
+        (
+            [
+                {"name": "prod", "address": "h1.com", "user": "deploy"},
+                {"name": "prod", "address": "h2.com", "user": "deploy"},
+            ],
+            "unique",
+        ),
+    ],
+)
+def test_config_host_validation_errors(
+    minimal_config_dict, hosts_config, expected_error
+):
+    """Config validates host configuration and raises clear errors."""
+    minimal_config_dict["hosts"] = hosts_config
 
     with pytest.raises(ImproperlyConfiguredError) as exc_info:
         msgspec.convert(minimal_config_dict, type=Config)
 
-    assert "at least one host" in exc_info.value.message.lower()
-
-
-def test_config_with_multiple_hosts_requires_names(minimal_config_dict):
-    minimal_config_dict["hosts"] = [
-        {"address": "host1.com", "user": "deploy"},
-        {"address": "host2.com", "user": "deploy"},  # Missing name
-    ]
-
-    with pytest.raises(ImproperlyConfiguredError) as exc_info:
-        msgspec.convert(minimal_config_dict, type=Config)
-
-    assert "must have a 'name'" in exc_info.value.message.lower()
+    assert expected_error in exc_info.value.message.lower()
 
 
 def test_config_with_multiple_named_hosts_succeeds(minimal_config_dict):
@@ -136,46 +147,26 @@ def test_config_with_multiple_named_hosts_succeeds(minimal_config_dict):
     assert len(config.hosts) == 2
 
 
-def test_config_requires_unique_host_names(minimal_config_dict):
-    minimal_config_dict["hosts"] = [
-        {"name": "prod", "address": "host1.com", "user": "deploy"},
-        {"name": "prod", "address": "host2.com", "user": "deploy"},  # Duplicate
-    ]
-
-    with pytest.raises(ImproperlyConfiguredError) as exc_info:
-        msgspec.convert(minimal_config_dict, type=Config)
-
-    assert "unique" in exc_info.value.message.lower()
-
-
-def test_select_host_returns_first_when_no_name_specified(minimal_config_dict):
+def test_select_host_functionality(minimal_config_dict):
+    """select_host returns correct host based on name parameter."""
+    # Setup: single host (no name needed)
     minimal_config_dict["hosts"] = [{"address": "example.com", "user": "deploy"}]
-
     config = msgspec.convert(minimal_config_dict, type=Config)
-    selected = config.select_host()
-    assert selected.address == "example.com"
+    assert config.select_host().address == "example.com"
 
-
-def test_select_host_by_name(minimal_config_dict):
+    # Setup: multiple named hosts
     minimal_config_dict["hosts"] = [
         {"name": "prod", "address": "prod.com", "user": "deploy"},
         {"name": "staging", "address": "staging.com", "user": "deploy"},
     ]
-
     config = msgspec.convert(minimal_config_dict, type=Config)
-    selected = config.select_host("staging")
-    assert selected.address == "staging.com"
 
+    # Test selecting by name
+    assert config.select_host("staging").address == "staging.com"
 
-def test_select_host_raises_when_name_not_found(minimal_config_dict):
-    minimal_config_dict["hosts"] = [
-        {"name": "prod", "address": "prod.com", "user": "deploy"}
-    ]
-
-    config = msgspec.convert(minimal_config_dict, type=Config)
+    # Test error when name not found
     with pytest.raises(ImproperlyConfiguredError) as exc_info:
-        config.select_host("staging")
-
+        config.select_host("nonexistent")
     assert "not found" in exc_info.value.message.lower()
 
 

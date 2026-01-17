@@ -93,36 +93,31 @@ WantedBy=timers.target
 # Name Resolution Tests
 
 
-def test_resolve_single_replica_service_templates(app_test_env):
-    """Single replica service resolves to template name when use_templates=True."""
+def test_resolve_single_replica_service(app_test_env):
+    """Single replica service resolution works for both templates and instances."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        result = app._resolve_units("web", use_templates=True)
-        assert result == ["testapp-web.service"]
+
+        # Template mode and instance mode return same result for single replica
+        template_result = app._resolve_units("web", use_templates=True)
+        instance_result = app._resolve_units("web", use_templates=False)
+
+        assert template_result == ["testapp-web.service"]
+        assert instance_result == ["testapp-web.service"]
 
 
-def test_resolve_single_replica_service_instances(app_test_env):
-    """Single replica service resolves to same name when use_templates=False."""
+def test_resolve_multi_replica_service(app_test_env):
+    """Multi-replica service resolves to template or instances based on use_templates flag."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        result = app._resolve_units("web", use_templates=False)
-        assert result == ["testapp-web.service"]
 
+        # Template mode returns template name with @
+        template_result = app._resolve_units("worker", use_templates=True)
+        assert template_result == ["testapp-worker@.service"]
 
-def test_resolve_multi_replica_service_template(app_test_env):
-    """Multi-replica service resolves to template name with @ when use_templates=True."""
-    with patch("fujin.config.Config.read", return_value=app_test_env):
-        app = App()
-        result = app._resolve_units("worker", use_templates=True)
-        assert result == ["testapp-worker@.service"]
-
-
-def test_resolve_multi_replica_service_instances(app_test_env):
-    """Multi-replica service resolves to all instance names when use_templates=False."""
-    with patch("fujin.config.Config.read", return_value=app_test_env):
-        app = App()
-        result = app._resolve_units("worker", use_templates=False)
-        assert result == [
+        # Instance mode returns all numbered instances
+        instance_result = app._resolve_units("worker", use_templates=False)
+        assert instance_result == [
             "testapp-worker@1.service",
             "testapp-worker@2.service",
             "testapp-worker@3.service",
@@ -202,52 +197,23 @@ def test_resolve_none_returns_all_units(app_test_env):
 # Helper Method Tests
 
 
-def test_format_status_active():
-    """Active status formatted in green."""
+@pytest.mark.parametrize(
+    "status,expected_color",
+    [
+        ("active", "[bold green]"),
+        ("failed", "[bold red]"),
+        ("inactive", "[dim]"),
+        ("3/3", "[bold green]"),  # All replicas running
+        ("2/3", "[bold yellow]"),  # Some replicas running
+        ("0/3", "[bold red]"),  # No replicas running
+    ],
+)
+def test_format_status_formatting(status, expected_color):
+    """Status values are formatted with appropriate colors."""
     app = App()
-    result = app._format_status("active")
-    assert "[bold green]" in result
-    assert "active" in result
-
-
-def test_format_status_failed():
-    """Failed status formatted in red."""
-    app = App()
-    result = app._format_status("failed")
-    assert "[bold red]" in result
-    assert "failed" in result
-
-
-def test_format_status_inactive():
-    """Inactive status formatted as dim."""
-    app = App()
-    result = app._format_status("inactive")
-    assert "[dim]" in result
-    assert "inactive" in result
-
-
-def test_format_status_all_replicas_running():
-    """All replicas running shows green."""
-    app = App()
-    result = app._format_status("3/3")
-    assert "[bold green]" in result
-    assert "3/3" in result
-
-
-def test_format_status_some_replicas_running():
-    """Some replicas running shows yellow."""
-    app = App()
-    result = app._format_status("2/3")
-    assert "[bold yellow]" in result
-    assert "2/3" in result
-
-
-def test_format_status_no_replicas_running():
-    """No replicas running shows red."""
-    app = App()
-    result = app._format_status("0/3")
-    assert "[bold red]" in result
-    assert "0/3" in result
+    result = app._format_status(status)
+    assert expected_color in result, f"Expected {expected_color} in formatted status"
+    assert status in result, f"Expected status '{status}' in result"
 
 
 def test_find_dropins_no_dropins(app_test_env):
@@ -259,36 +225,32 @@ def test_find_dropins_no_dropins(app_test_env):
         assert result == []
 
 
-def test_find_dropins_with_common(app_test_env, tmp_path):
-    """Finds common dropins."""
+def test_find_dropins_discovers_all_types(app_test_env, tmp_path):
+    """Finds both common and service-specific dropins."""
+    # Create common dropin
     common_dir = tmp_path / ".fujin" / "systemd" / "common.d"
     common_dir.mkdir(parents=True)
     (common_dir / "limits.conf").write_text("[Service]\nLimitNOFILE=65536")
 
-    with patch("fujin.config.Config.read", return_value=app_test_env):
-        app = App()
-        deployed_unit = app.config.deployed_units[0]
-        result = app._find_dropins(deployed_unit)
-
-        assert len(result) == 1
-        assert "common.d/limits.conf" in result
-
-
-def test_find_dropins_with_service_specific(app_test_env, tmp_path):
-    """Finds service-specific dropins."""
+    # Create service-specific dropin
     service_dir = tmp_path / ".fujin" / "systemd" / "web.service.d"
     service_dir.mkdir(parents=True)
     (service_dir / "override.conf").write_text("[Service]\nEnvironment=DEBUG=1")
 
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        deployed_unit = [
-            u for u in app.config.deployed_units if u.service_name == "web"
-        ][0]
-        result = app._find_dropins(deployed_unit)
 
-        assert len(result) == 1
-        assert "web.service.d/override.conf" in result
+        # Test common dropin is found
+        deployed_unit = app.config.deployed_units[0]
+        result = app._find_dropins(deployed_unit)
+        assert len(result) >= 1
+        assert any("common.d/limits.conf" in r for r in result)
+
+        # Test service-specific dropin is found for web service
+        web_unit = [u for u in app.config.deployed_units if u.service_name == "web"][0]
+        result = app._find_dropins(web_unit)
+        assert len(result) >= 1
+        assert any("web.service.d/override.conf" in r for r in result)
 
 
 def test_get_available_options(app_test_env):
