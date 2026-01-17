@@ -11,20 +11,19 @@ from fujin.discovery import (
 )
 
 
-def test_discover_services_empty_directory(tmp_path):
-    """Should return empty list if no services found."""
+@pytest.mark.parametrize(
+    "setup_dirs",
+    [
+        ["systemd"],  # Empty systemd directory
+        [],  # No systemd directory
+    ],
+)
+def test_discover_services_returns_empty_when_no_services(tmp_path, setup_dirs):
+    """Should return empty list if no services found or systemd dir missing."""
     fujin_dir = tmp_path / ".fujin"
     fujin_dir.mkdir()
-    (fujin_dir / "systemd").mkdir()
-
-    units = discover_deployed_units(fujin_dir, "myapp", {})
-    assert units == []
-
-
-def test_discover_services_no_systemd_directory(tmp_path):
-    """Should return empty list if systemd directory doesn't exist."""
-    fujin_dir = tmp_path / ".fujin"
-    fujin_dir.mkdir()
+    for dir_name in setup_dirs:
+        (fujin_dir / dir_name).mkdir()
 
     units = discover_deployed_units(fujin_dir, "myapp", {})
     assert units == []
@@ -93,12 +92,13 @@ WantedBy=multi-user.target
     ]
 
 
-def test_discover_service_with_socket(tmp_path):
-    """Should discover service and associated socket file."""
+def test_discover_service_with_socket_and_replicas(tmp_path):
+    """Should discover service with socket for both single and multi-replica configs."""
     fujin_dir = tmp_path / ".fujin"
     systemd_dir = fujin_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
+    # Test single replica (web.service + web.socket)
     service_file = systemd_dir / "web.service"
     service_file.write_text("""[Unit]
 Description=Web
@@ -122,20 +122,17 @@ WantedBy=sockets.target
 """)
 
     units = discover_deployed_units(fujin_dir, "myapp", {})
-
     assert len(units) == 1
     assert units[0].socket_file == socket_file
     assert units[0].template_socket_name == "myapp-web.socket"
 
+    # Clean up for template test
+    service_file.unlink()
+    socket_file.unlink()
 
-def test_discover_template_service_with_socket(tmp_path):
-    """Should discover template service with template socket."""
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
-    systemd_dir.mkdir(parents=True)
-
-    service_file = systemd_dir / "web@.service"
-    service_file.write_text("""[Unit]
+    # Test multi-replica (web@.service + web@.socket)
+    template_service = systemd_dir / "web@.service"
+    template_service.write_text("""[Unit]
 Description=Web %i
 
 [Service]
@@ -145,8 +142,8 @@ ExecStart=/bin/true
 WantedBy=multi-user.target
 """)
 
-    socket_file = systemd_dir / "web@.socket"
-    socket_file.write_text("""[Unit]
+    template_socket = systemd_dir / "web@.socket"
+    template_socket.write_text("""[Unit]
 Description=Web socket %i
 
 [Socket]
@@ -157,9 +154,8 @@ WantedBy=sockets.target
 """)
 
     units = discover_deployed_units(fujin_dir, "myapp", {})
-
     assert len(units) == 1
-    assert units[0].socket_file == socket_file
+    assert units[0].socket_file == template_socket
     assert units[0].template_socket_name == "myapp-web@.socket"
 
 

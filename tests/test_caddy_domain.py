@@ -20,48 +20,64 @@ def test_get_domain_name_returns_none_if_caddyfile_missing(config):
     assert config.get_domain_name() is None
 
 
-def test_get_domain_name_simple_domain(config, tmp_path):
-    """Extracts simple domain."""
-    caddyfile = tmp_path / ".fujin" / "Caddyfile"
-    caddyfile.parent.mkdir(parents=True)
-    caddyfile.write_text("""
+@pytest.mark.parametrize(
+    "caddyfile_content,expected_domain",
+    [
+        # Simple domain
+        (
+            """
 example.com {
     reverse_proxy localhost:8000
 }
-""")
-    assert config.get_domain_name() == "example.com"
-
-
-def test_get_domain_name_subdomain(config, tmp_path):
-    """Extracts subdomain."""
-    caddyfile = tmp_path / ".fujin" / "Caddyfile"
-    caddyfile.parent.mkdir(parents=True)
-    caddyfile.write_text("""
+""",
+            "example.com",
+        ),
+        # Subdomain
+        (
+            """
 app.example.com {
     reverse_proxy localhost:8000
 }
-""")
-    assert config.get_domain_name() == "app.example.com"
-
-
-def test_get_domain_name_skips_comments(config, tmp_path):
-    """Skips commented lines."""
+""",
+            "app.example.com",
+        ),
+        # Multiple domains on line (returns first)
+        (
+            """
+example.com, www.example.com {
+    reverse_proxy localhost:8000
+}
+""",
+            "example.com",
+        ),
+    ],
+)
+def test_get_domain_name_extraction(
+    config, tmp_path, caddyfile_content, expected_domain
+):
+    """Extracts domain names from various Caddyfile formats."""
     caddyfile = tmp_path / ".fujin" / "Caddyfile"
     caddyfile.parent.mkdir(parents=True)
-    caddyfile.write_text("""
+    caddyfile.write_text(caddyfile_content)
+    assert config.get_domain_name() == expected_domain
+
+
+@pytest.mark.parametrize(
+    "caddyfile_content,expected_domain",
+    [
+        # Skips comments
+        (
+            """
 # old-domain.com {
 example.com {
     reverse_proxy localhost:8000
 }
-""")
-    assert config.get_domain_name() == "example.com"
-
-
-def test_get_domain_name_skips_global_options(config, tmp_path):
-    """Skips global options block."""
-    caddyfile = tmp_path / ".fujin" / "Caddyfile"
-    caddyfile.parent.mkdir(parents=True)
-    caddyfile.write_text("""
+""",
+            "example.com",
+        ),
+        # Skips global options block
+        (
+            """
 {
     email admin@example.com
 }
@@ -69,30 +85,12 @@ def test_get_domain_name_skips_global_options(config, tmp_path):
 example.com {
     reverse_proxy localhost:8000
 }
-""")
-    assert config.get_domain_name() == "example.com"
-
-
-def test_get_domain_name_handles_multiple_domains_on_line(config, tmp_path):
-    """
-    Extracts first domain from comma-separated list.
-    """
-    caddyfile = tmp_path / ".fujin" / "Caddyfile"
-    caddyfile.parent.mkdir(parents=True)
-    caddyfile.write_text("""
-example.com, www.example.com {
-    reverse_proxy localhost:8000
-}
-""")
-    # Should now return just the first domain
-    assert config.get_domain_name() == "example.com"
-
-
-def test_get_domain_name_ignores_blocks_without_dot(config, tmp_path):
-    """Ignores blocks that don't look like domains (no dot)."""
-    caddyfile = tmp_path / ".fujin" / "Caddyfile"
-    caddyfile.parent.mkdir(parents=True)
-    caddyfile.write_text("""
+""",
+            "example.com",
+        ),
+        # Ignores blocks without dot (localhost)
+        (
+            """
 localhost {
     respond "Hello"
 }
@@ -100,16 +98,12 @@ localhost {
 example.com {
     reverse_proxy localhost:8000
 }
-""")
-    # "localhost" has no dot, so it should be skipped by the heuristic
-    assert config.get_domain_name() == "example.com"
-
-
-def test_get_domain_name_ignores_matchers(config, tmp_path):
-    """Ignores named matchers that might look like domains."""
-    caddyfile = tmp_path / ".fujin" / "Caddyfile"
-    caddyfile.parent.mkdir(parents=True)
-    caddyfile.write_text("""
+""",
+            "example.com",
+        ),
+        # Ignores named matchers
+        (
+            """
 example.com {
     @static {
         file
@@ -117,5 +111,16 @@ example.com {
     }
     reverse_proxy localhost:8000
 }
-""")
-    assert config.get_domain_name() == "example.com"
+""",
+            "example.com",
+        ),
+    ],
+)
+def test_get_domain_name_filters_and_skips(
+    config, tmp_path, caddyfile_content, expected_domain
+):
+    """Correctly filters out non-domain blocks and comments."""
+    caddyfile = tmp_path / ".fujin" / "Caddyfile"
+    caddyfile.parent.mkdir(parents=True)
+    caddyfile.write_text(caddyfile_content)
+    assert config.get_domain_name() == expected_domain

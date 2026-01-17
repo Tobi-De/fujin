@@ -155,14 +155,22 @@ version = "1.2.3"
         assert config["app"] == "my-awesome-app"
 
 
-def test_init_omits_version_when_in_pyproject(tmp_path, monkeypatch):
-    """init omits version field when it exists in pyproject.toml."""
+@pytest.mark.parametrize(
+    "has_version_in_pyproject,expected_in_config",
+    [
+        (True, False),  # Has version in pyproject -> omit from fujin.toml
+        (False, True),  # No version in pyproject -> include in fujin.toml
+    ],
+)
+def test_init_version_handling(
+    tmp_path, monkeypatch, has_version_in_pyproject, expected_in_config
+):
+    """init handles version field based on pyproject.toml presence."""
     monkeypatch.chdir(tmp_path)
-    pyproject_content = """
-[project]
-name = "myapp"
-version = "1.2.3"
-"""
+    if has_version_in_pyproject:
+        pyproject_content = '[project]\nname = "myapp"\nversion = "1.2.3"\n'
+    else:
+        pyproject_content = '[project]\nname = "myapp"\n'
     (tmp_path / "pyproject.toml").write_text(pyproject_content)
 
     with patch.object(Init, "output", MagicMock()):
@@ -170,26 +178,10 @@ version = "1.2.3"
         init()
 
         config = tomllib.loads((tmp_path / "fujin.toml").read_text())
-        # Version should not be in config (fujin will read from pyproject)
-        assert "version" not in config
-
-
-def test_init_keeps_version_when_not_in_pyproject(tmp_path, monkeypatch):
-    """init keeps version field when not in pyproject.toml."""
-    monkeypatch.chdir(tmp_path)
-    pyproject_content = """
-[project]
-name = "myapp"
-"""
-    (tmp_path / "pyproject.toml").write_text(pyproject_content)
-
-    with patch.object(Init, "output", MagicMock()):
-        init = Init()
-        init()
-
-        config = tomllib.loads((tmp_path / "fujin.toml").read_text())
-        # Version should be in config
-        assert config["version"] == "0.0.1"
+        if expected_in_config:
+            assert config["version"] == "0.0.1"
+        else:
+            assert "version" not in config
 
 
 # ============================================================================
@@ -197,31 +189,30 @@ name = "myapp"
 # ============================================================================
 
 
-def test_init_adds_python_version_when_no_python_version_file(tmp_path, monkeypatch):
-    """init adds python_version to config when .python-version doesn't exist."""
-    monkeypatch.chdir(tmp_path)
-    with patch.object(Init, "output", MagicMock()):
-        init = Init()
-        init()
-
-        config = tomllib.loads((tmp_path / "fujin.toml").read_text())
-        assert config["python_version"] == "3.12"
-
-
-def test_init_omits_python_version_when_python_version_file_exists(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "has_python_version_file,expected_in_config",
+    [
+        (False, True),  # No .python-version file -> include in fujin.toml
+        (True, False),  # Has .python-version file -> omit from fujin.toml
+    ],
+)
+def test_init_python_version_handling(
+    tmp_path, monkeypatch, has_python_version_file, expected_in_config
 ):
-    """init omits python_version when .python-version file exists."""
+    """init handles python_version field based on .python-version file presence."""
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".python-version").write_text("3.11.5")
+    if has_python_version_file:
+        (tmp_path / ".python-version").write_text("3.11.5")
 
     with patch.object(Init, "output", MagicMock()):
         init = Init()
         init()
 
         config = tomllib.loads((tmp_path / "fujin.toml").read_text())
-        # python_version should NOT be in config (fujin will read from .python-version)
-        assert "python_version" not in config
+        if expected_in_config:
+            assert config["python_version"] == "3.12"
+        else:
+            assert "python_version" not in config
 
 
 # ============================================================================
@@ -229,9 +220,16 @@ def test_init_omits_python_version_when_python_version_file_exists(
 # ============================================================================
 
 
-def test_init_derives_app_name_from_directory_name(tmp_path, monkeypatch):
-    """init derives app name from current directory name."""
-    app_dir = tmp_path / "my-test-app"
+@pytest.mark.parametrize(
+    "dir_name,expected_app_name",
+    [
+        ("my-test-app", "my_test_app"),  # Hyphens to underscores
+        ("my test app", "my_test_app"),  # Spaces to underscores
+    ],
+)
+def test_init_normalizes_app_name(tmp_path, monkeypatch, dir_name, expected_app_name):
+    """init normalizes app name by replacing hyphens and spaces with underscores."""
+    app_dir = tmp_path / dir_name
     app_dir.mkdir()
     monkeypatch.chdir(app_dir)
 
@@ -240,22 +238,7 @@ def test_init_derives_app_name_from_directory_name(tmp_path, monkeypatch):
         init()
 
         config = tomllib.loads((app_dir / "fujin.toml").read_text())
-        # Should normalize hyphens and spaces to underscores
-        assert config["app"] == "my_test_app"
-
-
-def test_init_normalizes_app_name_with_spaces(tmp_path, monkeypatch):
-    """init normalizes app name by replacing spaces with underscores."""
-    app_dir = tmp_path / "my test app"
-    app_dir.mkdir()
-    monkeypatch.chdir(app_dir)
-
-    with patch.object(Init, "output", MagicMock()):
-        init = Init()
-        init()
-
-        config = tomllib.loads((app_dir / "fujin.toml").read_text())
-        assert config["app"] == "my_test_app"
+        assert config["app"] == expected_app_name
 
 
 # ============================================================================
