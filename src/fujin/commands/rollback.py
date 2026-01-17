@@ -16,8 +16,9 @@ from fujin.audit import log_operation
 class Rollback(BaseCommand):
     def __call__(self):
         with self.connection() as conn:
-            app_dir = shlex.quote(self.config.app_dir)
-            result, _ = conn.run(f"ls -1t {app_dir}/.versions", warn=True, hide=True)
+            shlex.quote(self.config.app_dir)
+            fujin_dir = shlex.quote(self.config.install_dir)
+            result, _ = conn.run(f"ls -1t {fujin_dir}/.versions", warn=True, hide=True)
             if not result:
                 self.output.info("No rollback targets available")
                 return
@@ -44,7 +45,7 @@ class Rollback(BaseCommand):
                 raise cappa.Exit("Rollback aborted by user.", code=0) from e
 
             current_version, _ = conn.run(
-                f"cat {app_dir}/.version", warn=True, hide=True
+                f"cat {fujin_dir}/.version", warn=True, hide=True
             )
             current_version = current_version.strip()
 
@@ -63,9 +64,7 @@ class Rollback(BaseCommand):
             # Uninstall current
             if current_version:
                 self.output.info(f"Uninstalling current version {current_version}...")
-                current_bundle = (
-                    f"{app_dir}/.versions/{self.config.app_name}-{current_version}.pyz"
-                )
+                current_bundle = f"{fujin_dir}/.versions/{self.config.app_name}-{current_version}.pyz"
                 _, exists = conn.run(f"test -f {current_bundle}", warn=True, hide=True)
 
                 if exists:
@@ -82,12 +81,14 @@ class Rollback(BaseCommand):
 
             # Install target
             self.output.info(f"Installing version {version}...")
-            target_bundle = f"{app_dir}/.versions/{self.config.app_name}-{version}.pyz"
+            target_bundle = (
+                f"{fujin_dir}/.versions/{self.config.app_name}-{version}.pyz"
+            )
             install_cmd = f"python3 {target_bundle} install || (echo 'install failed' >&2; exit 1)"
 
             # delete all versions after new target
             cleanup_cmd = (
-                f"cd {app_dir}/.versions && ls -1t | "
+                f"cd {fujin_dir}/.versions && ls -1t | "
                 f"awk '/{self.config.app_name}-{version}\\.pyz/{{exit}} {{print}}' | "
                 "xargs -r rm"
             )

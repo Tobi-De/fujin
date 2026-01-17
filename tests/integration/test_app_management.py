@@ -37,8 +37,8 @@ def deployed_app(vps_container, ssh_key, tmp_path):
     distfile.chmod(0o755)
 
     # Create systemd unit files
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True, exist_ok=True)
 
     # Web service
@@ -47,7 +47,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/mgmtapp
+ExecStart={app_dir}/.fujin/mgmtapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -61,7 +61,7 @@ Description=Worker
 
 [Service]
 Type=simple
-ExecStart={app_dir}/mgmtapp
+ExecStart={app_dir}/.fujin/mgmtapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -70,7 +70,7 @@ WantedBy=multi-user.target
 """)
 
     # Create env file
-    (fujin_dir / "env").write_text("DEBUG=true\nAPP_NAME=mgmtapp\n")
+    (install_dir / "env").write_text("DEBUG=true\nAPP_NAME=mgmtapp\n")
 
     config_dict = {
         "app": "mgmtapp",
@@ -234,7 +234,7 @@ def test_app_introspection(deployed_app, vps_container, monkeypatch):
 
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/mgmtapp/.env",
+        "cat /opt/fujin/mgmtapp/.fujin/.env",
     )
     assert success, f"Reading .env should succeed: {stdout}"
     # Note: .env file exists but may be empty for binary installations

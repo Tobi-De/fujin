@@ -129,7 +129,7 @@ def read_file(container_name: str, path: str) -> str:
 def get_deployed_version(container_name: str, app_name: str) -> str:
     """Get currently deployed version of app."""
     stdout, ok = exec_in_container(
-        container_name, f"cat /opt/fujin/{app_name}/.version"
+        container_name, f"cat /opt/fujin/{app_name}/.fujin/.version"
     )
     assert ok, f"Could not read version for {app_name}"
     return stdout.strip()

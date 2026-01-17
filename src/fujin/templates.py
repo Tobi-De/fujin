@@ -15,12 +15,12 @@ After=network.target
 Type=simple
 User={{app_user}}
 WorkingDirectory={{app_dir}}
-EnvironmentFile={{app_dir}}/.env
+EnvironmentFile={{install_dir}}/.env
 RuntimeDirectory={{app_name}}
 RuntimeDirectoryMode=0755
 
 # Main command - adjust to match your application
-ExecStart={{app_dir}}/.venv/bin/python -m myapp.{name}
+ExecStart={{install_dir}}/.venv/bin/python -m myapp.{name}
 
 # Restart policy
 Restart=on-failure
@@ -53,10 +53,10 @@ Description={{app_name}} {name} task
 Type=oneshot
 User={{app_user}}
 WorkingDirectory={{app_dir}}
-EnvironmentFile={{app_dir}}/.env
+EnvironmentFile={{install_dir}}/.env
 
 # Main command - this runs when triggered by the timer
-ExecStart={{app_dir}}/.venv/bin/python -m myapp.{name}
+ExecStart={{install_dir}}/.venv/bin/python -m myapp.{name}
 
 # Resource limits (uncomment to enable)
 # MemoryMax=512M

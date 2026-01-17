@@ -111,7 +111,7 @@ def test_init_skips_when_fujin_toml_exists(tmp_path, monkeypatch):
         )
 
 
-def test_init_skips_when_fujin_dir_exists(tmp_path, monkeypatch):
+def test_init_skips_when_install_dir_exists(tmp_path, monkeypatch):
     """init skips and shows warning when .fujin/ directory already exists."""
     monkeypatch.chdir(tmp_path)
     # Create existing directory

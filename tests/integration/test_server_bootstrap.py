@@ -102,9 +102,9 @@ def test_bootstrap_sets_up_caddy_when_caddyfile_exists(
     monkeypatch.chdir(tmp_path)
 
     # Create .fujin directory with Caddyfile
-    fujin_dir = tmp_path / ".fujin"
-    fujin_dir.mkdir()
-    caddyfile = fujin_dir / "Caddyfile"
+    install_dir = tmp_path / ".fujin"
+    install_dir.mkdir()
+    caddyfile = install_dir / "Caddyfile"
     caddyfile.write_text("""example.com {
     reverse_proxy localhost:8000
 }
