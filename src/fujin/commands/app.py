@@ -46,9 +46,12 @@ class App(BaseCommand):
                 names.append(du.template_timer_name)
 
         with self.connection() as conn:
-            app_dir = shlex.quote(self.config.app_dir)
+            shlex.quote(self.config.app_dir)
+            fujin_dir = shlex.quote(self.config.install_dir)
             remote_version, _ = conn.run(
-                f"cat {app_dir}/.version 2>/dev/null || echo N/A", warn=True, hide=True
+                f"cat {fujin_dir}/.version 2>/dev/null || echo N/A",
+                warn=True,
+                hide=True,
             )
             remote_version = remote_version.strip()
 
@@ -236,7 +239,9 @@ class App(BaseCommand):
         if host.key_filename:
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
-        full_remote_cmd = f"cd {self.config.app_dir} && source .appenv && {command}"
+        full_remote_cmd = (
+            f"cd {self.config.app_dir} && source .fujin/.appenv && {command}"
+        )
         ssh_cmd.extend([ssh_target, full_remote_cmd])
         subprocess.run(ssh_cmd)
 
@@ -399,8 +404,8 @@ class App(BaseCommand):
                 return
 
             if name == "env":
-                app_dir = shlex.quote(self.config.app_dir)
-                env_path = f"{app_dir}/.env"
+                fujin_dir = shlex.quote(self.config.install_dir)
+                env_path = f"{fujin_dir}/.env"
                 self.output.output(f"[cyan]# {env_path}[/cyan]")
                 print()
                 conn.run(f"cat {env_path}", warn=True)

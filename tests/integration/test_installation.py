@@ -38,8 +38,8 @@ def test_socket_activated_service(vps_container, ssh_key, tmp_path, monkeypatch)
     distfile.chmod(0o755)
 
     # Create .fujin/systemd directory with service and socket files
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     # Web service that accepts socket activation
@@ -51,7 +51,7 @@ After={app_name}-web.socket
 
 [Service]
 Type=simple
-ExecStart={app_dir}/socketapp
+ExecStart={app_dir}/.fujin/socketapp
 WorkingDirectory={app_dir}
 StandardInput=socket
 
@@ -120,8 +120,8 @@ def test_timer_scheduled_service(vps_container, ssh_key, tmp_path, monkeypatch):
     distfile.chmod(0o755)
 
     # Create .fujin/systemd directory with service and timer files
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     # Oneshot service triggered by timer
@@ -131,7 +131,7 @@ Description=Cleanup task
 
 [Service]
 Type=oneshot
-ExecStart={app_dir}/timerapp
+ExecStart={app_dir}/.fujin/timerapp
 WorkingDirectory={app_dir}
 """)
 
@@ -196,8 +196,8 @@ def test_stale_unit_cleanup(vps_container, ssh_key, tmp_path, monkeypatch):
     dist_dir.mkdir()
 
     # Create .fujin/systemd directory
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     def create_config(version: str):
@@ -230,7 +230,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/staleapp
+ExecStart={app_dir}/.fujin/staleapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -244,7 +244,7 @@ Description=Worker
 
 [Service]
 Type=simple
-ExecStart={app_dir}/staleapp
+ExecStart={app_dir}/.fujin/staleapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -295,8 +295,8 @@ def test_dropin_directory_handling(vps_container, ssh_key, tmp_path, monkeypatch
     distfile.chmod(0o755)
 
     # Create .fujin/systemd directory
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     # Web service
@@ -306,7 +306,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/dropinapp
+ExecStart={app_dir}/.fujin/dropinapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -397,8 +397,8 @@ def test_stale_dropin_cleanup(vps_container, ssh_key, tmp_path, monkeypatch):
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir()
 
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     def create_config(version: str):
@@ -431,7 +431,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/dropinclean
+ExecStart={app_dir}/.fujin/dropinclean
 WorkingDirectory={app_dir}
 Restart=always
 

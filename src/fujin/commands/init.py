@@ -152,8 +152,8 @@ class Init(BaseCommand):
         service_content = NEW_SERVICE_TEMPLATE.format(name="web")
         # Customize ExecStart for gunicorn
         service_content = service_content.replace(
-            "ExecStart={app_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{app_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
+            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/.fujin/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
         )
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
@@ -172,8 +172,8 @@ class Init(BaseCommand):
         # Add ExecStartPre for migrations and collectstatic
         exec_start_pre_lines = (
             f"# Run migrations and collect static files before starting\n"
-            f"ExecStartPre={{app_dir}}/.venv/bin/{app_name} migrate\n"
-            f"ExecStartPre={{app_dir}}/.venv/bin/{app_name} collectstatic --no-input\n"
+            f"ExecStartPre={{app_dir}}/.fujin/.venv/bin/{app_name} migrate\n"
+            f"ExecStartPre={{app_dir}}/.fujin/.venv/bin/{app_name} collectstatic --no-input\n"
             f"ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/ {{app_dir}}/staticfiles/'\n"
         )
         service_content = service_content.replace(
@@ -182,8 +182,8 @@ class Init(BaseCommand):
 
         # Customize ExecStart for gunicorn
         service_content = service_content.replace(
-            "ExecStart={app_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{app_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
+            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/.fujin/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
         )
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
@@ -204,13 +204,13 @@ class Init(BaseCommand):
         # Add ExecStartPre for setup
         service_content = service_content.replace(
             "# Main command - adjust to match your application\n",
-            f"# Run setup before starting\nExecStartPre={{app_dir}}/.venv/bin/{app_name} setup\n\n",
+            f"# Run setup before starting\nExecStartPre={{app_dir}}/.fujin/.venv/bin/{app_name} setup\n\n",
         )
 
         # Customize ExecStart for Falco
         service_content = service_content.replace(
-            "ExecStart={app_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{app_dir}}/.venv/bin/{app_name} prodserver",
+            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/.fujin/.venv/bin/{app_name} prodserver",
         )
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
@@ -221,8 +221,8 @@ class Init(BaseCommand):
 
         # Customize ExecStart for worker
         worker_content = worker_content.replace(
-            "ExecStart={app_dir}/.venv/bin/python -m myapp.worker",
-            f"ExecStart={{app_dir}}/.venv/bin/{app_name} db_worker",
+            "ExecStart={install_dir}/.venv/bin/python -m myapp.worker",
+            f"ExecStart={{app_dir}}/.fujin/.venv/bin/{app_name} db_worker",
         )
         worker_service.write_text(worker_content)
         self.output.success(f"  Created {worker_service}")
@@ -246,7 +246,7 @@ class Init(BaseCommand):
 
         # Customize ExecStart for binary (no .venv)
         service_content = service_content.replace(
-            "ExecStart={app_dir}/.venv/bin/python -m myapp.web",
+            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
             f"ExecStart={{app_dir}}/{app_name} prodserver",
         )
         web_service.write_text(service_content)

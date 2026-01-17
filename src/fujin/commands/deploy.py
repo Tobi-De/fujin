@@ -97,6 +97,7 @@ class Deploy(BaseCommand):
                 "app_user": self.config.app_user,
                 "version": version,
                 "app_dir": self.config.app_dir,
+                "install_dir": self.config.install_dir,
                 "user": self.selected_host.user,
             }
 
@@ -208,7 +209,7 @@ class Deploy(BaseCommand):
                 "distfile_name": distfile_path.name,
                 "webserver_enabled": self.config.caddyfile_exists,
                 "caddy_config_path": self.config.caddy_config_path,
-                "app_bin": self.config.app_bin,
+                "app_bin": self.config.app_name,  # Just the binary name, not full path
                 "deployed_units": deployed_units_data,
             }
 
@@ -251,7 +252,7 @@ class Deploy(BaseCommand):
 
             self._show_deployment_summary(zipapp_path)
 
-            remote_bundle_dir = Path(self.config.app_dir) / ".versions"
+            remote_bundle_dir = Path(self.config.install_dir) / ".versions"
             remote_bundle_path = (
                 f"{remote_bundle_dir}/{self.config.app_name}-{version}.pyz"
             )

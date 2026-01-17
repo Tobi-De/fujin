@@ -13,14 +13,14 @@ Type=simple
 User={app_user}
 Group={app_user}
 WorkingDirectory={app_dir}
-EnvironmentFile={app_dir}/.env
+EnvironmentFile={install_dir}/.env
 RuntimeDirectory={app_name}
 RuntimeDirectoryMode=0755
 
 # PermissionsStartOnly=true
-ExecStartPre={app_dir}/.venv/bin/bookstore collectstatic --no-input
-ExecStartPre={app_dir}/.venv/bin/bookstore migrate
-ExecStart={app_dir}/.venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/{app_name}/{app_name}.sock --access-logfile - --error-logfile -
+ExecStartPre={install_dir}/.venv/bin/bookstore collectstatic --no-input
+ExecStartPre={install_dir}/.venv/bin/bookstore migrate
+ExecStart={install_dir}/.venv/bin/gunicorn bookstore.wsgi:application --bind unix:/run/{app_name}/{app_name}.sock --access-logfile - --error-logfile -
 
 # Restart policy
 Restart=on-failure

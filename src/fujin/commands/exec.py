@@ -39,16 +39,14 @@ class Exec(BaseCommand):
         with self.connection() as conn:
             if self.app:
                 # Run via app binary as app user
-                command = f"cd {self.config.app_dir} && source .appenv && {self.config.app_bin} {self.command}"
+                command = f"cd {self.config.app_dir} && source .fujin/.appenv && {self.config.app_bin} {self.command}"
                 conn.run(
                     f"sudo -u {self.config.app_user} bash -c {shlex.quote(command)}",
                     pty=True,
                 )
             elif self.appenv:
                 # Run in app directory with app environment as app user
-                command = (
-                    f"cd {self.config.app_dir} && source .appenv && {self.command}"
-                )
+                command = f"cd {self.config.app_dir} && source .fujin/.appenv && {self.command}"
                 conn.run(
                     f"sudo -u {self.config.app_user} bash -c {shlex.quote(command)}",
                     pty=True,

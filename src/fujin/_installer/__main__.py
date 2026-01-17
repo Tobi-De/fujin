@@ -84,28 +84,31 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
     app_dir = Path(config.app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
 
-    # Move .env file
+    install_dir = app_dir / ".fujin"
+    install_dir.mkdir(exist_ok=True)
+
+    # Move .env file to .fujin/
     env_file = bundle_dir / ".env"
     if env_file.exists():
-        env_file.rename(app_dir / ".env")
+        env_file.rename(install_dir / ".env")
 
     log("Installing application...")
-    os.chdir(app_dir)
+    os.chdir(install_dir)
 
     if config.installation_mode == "python-package":
         log("Installing Python package...")
 
         uv_python_install_dir = "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python"
 
-        (app_dir / ".appenv").write_text(f"""set -a
-source .env
+        (install_dir / ".appenv").write_text(f"""set -a
+source {install_dir}/.env
 set +a
 export {uv_python_install_dir}
-export PATH=".venv/bin:$PATH"
+export PATH="{install_dir}/.venv/bin:$PATH"
 
 # Wrapper function to run app binary as app user
 {config.app_name}() {{
-    sudo -u {config.app_user} {app_dir}/.venv/bin/{config.app_name} "$@"
+    sudo -u {config.app_user} {install_dir}/.venv/bin/{config.app_name} "$@"
 }}
 export -f {config.app_name}
 """)
@@ -123,36 +126,40 @@ export -f {config.app_name}
             run(dist_install)
     else:
         log("Installing binary...")
-        (app_dir / ".appenv").write_text(f"""set -a
-source .env
+        (install_dir / ".appenv").write_text(f"""set -a
+source {install_dir}/.env
 set +a
-export PATH="{app_dir}:$PATH"
+export PATH="{install_dir}:$PATH"
 
 # Wrapper function to run app binary as app user
 {config.app_name}() {{
-    sudo -u {config.app_user} {app_dir}/{config.app_name} "$@"
+    sudo -u {config.app_user} {install_dir}/{config.app_name} "$@"
 }}
 export -f {config.app_name}
 """)
-        full_path_app_bin = app_dir / config.app_bin
+        full_path_app_bin = install_dir / config.app_bin
         full_path_app_bin.unlink(missing_ok=True)
         full_path_app_bin.write_bytes((bundle_dir / config.distfile_name).read_bytes())
         full_path_app_bin.chmod(0o755)
 
-    (app_dir / ".version").write_text(config.version)
+    (install_dir / ".version").write_text(config.version)
 
     log("Setting file ownership and permissions...")
-    run(f"sudo chown -R {config.deploy_user}:{config.app_user} {app_dir}")
-    # Make app directory group-writable (for database, logs, etc.)
-    run(f"sudo chmod 775 {app_dir}")
-    run(f"sudo chmod 640 {app_dir}/.env")
+    # Only chown the .fujin directory - leave app runtime data untouched
+    run(f"sudo chown -R {config.deploy_user}:{config.app_user} {install_dir}")
+    # Make .fujin directory group-writable (deploy user can update, app user can read)
+    run(f"sudo chmod 775 {install_dir}")
+    run(f"sudo chmod 640 {install_dir}/.env")
 
     # .venv permissions: readable/executable by group, writable by owner
-    if (app_dir / ".venv").exists():
-        run(f"sudo find {app_dir}/.venv -type d -exec chmod 755 {{}} +")
-        run(f"sudo find {app_dir}/.venv -type f -exec chmod 644 {{}} +")
-        run(f"sudo find {app_dir}/.venv/bin -type f -exec chmod 755 {{}} +")
+    if (install_dir / ".venv").exists():
+        run(f"sudo find {install_dir}/.venv -type d -exec chmod 755 {{}} +")
+        run(f"sudo find {install_dir}/.venv -type f -exec chmod 644 {{}} +")
+        run(f"sudo find {install_dir}/.venv/bin -type f -exec chmod 755 {{}} +")
 
+    # Ensure app_dir itself is group-writable so app can create files
+    run(f"sudo chown {config.deploy_user}:{config.app_user} {app_dir}")
+    run(f"sudo chmod 775 {app_dir}")
     os.chdir(bundle_dir)
 
     log("Configuring systemd services...")

@@ -66,8 +66,8 @@ with socketserver.TCPServer(("", PORT), Handler) as httpd:
     distfile.chmod(0o755)
 
     # Create .fujin/systemd directory with service file
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "web.service"
@@ -76,9 +76,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/myapp
+ExecStart={app_dir}/.fujin/myapp
 WorkingDirectory={app_dir}
-EnvironmentFile=-{app_dir}/.env
+EnvironmentFile=-{app_dir}/.fujin/.env
 Restart=always
 
 [Install]
@@ -165,8 +165,8 @@ def test_python_package_deployment(vps_container, ssh_key, tmp_path, monkeypatch
     env_file.write_text("DEBUG=true\n")
 
     # Create .fujin/systemd directory with service files
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     web_service = systemd_dir / "web.service"
@@ -175,9 +175,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.venv/bin/python3 -m http.server 8000
+ExecStart={app_dir}/.fujin/.venv/bin/python3 -m http.server 8000
 WorkingDirectory={app_dir}
-EnvironmentFile=-{app_dir}/.env
+EnvironmentFile=-{app_dir}/.fujin/.env
 Restart=always
 
 [Install]
@@ -190,9 +190,9 @@ Description=Worker
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.venv/bin/python3 -c 'import time; print("worker running"); time.sleep(99999)'
+ExecStart={app_dir}/.fujin/.venv/bin/python3 -c 'import time; print("worker running"); time.sleep(99999)'
 WorkingDirectory={app_dir}
-EnvironmentFile=-{app_dir}/.env
+EnvironmentFile=-{app_dir}/.fujin/.env
 Restart=always
 
 [Install]
@@ -233,7 +233,7 @@ WantedBy=multi-user.target
     # Verify .env was deployed
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/testapp/.env",
+        "cat /opt/fujin/testapp/.fujin/.env",
     )
     assert success and "DEBUG=true" in stdout, f".env not deployed correctly: {stdout}"
 
@@ -250,8 +250,8 @@ def test_deployment_with_webserver(vps_container, ssh_key, tmp_path, monkeypatch
     distfile.chmod(0o755)
 
     # Create .fujin/systemd directory with service file
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "web.service"
@@ -260,9 +260,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/webapp
+ExecStart={app_dir}/.fujin/webapp
 WorkingDirectory={app_dir}
-EnvironmentFile=-{app_dir}/.env
+EnvironmentFile=-{app_dir}/.fujin/.env
 Restart=always
 
 [Install]
@@ -270,7 +270,7 @@ WantedBy=multi-user.target
 """)
 
     # Create Caddyfile
-    caddyfile = fujin_dir / "Caddyfile"
+    caddyfile = install_dir / "Caddyfile"
     caddyfile.write_text("""example.com {
     handle /static/* {
         root * /var/www/static/
@@ -332,8 +332,8 @@ def test_rollback_to_previous_version(vps_container, ssh_key, tmp_path, monkeypa
     dist_dir.mkdir()
 
     # Create .fujin/systemd directory with service file
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "web.service"
@@ -342,9 +342,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/rollapp
+ExecStart={app_dir}/.fujin/rollapp
 WorkingDirectory={app_dir}
-EnvironmentFile=-{app_dir}/.env
+EnvironmentFile=-{app_dir}/.fujin/.env
 Restart=always
 
 [Install]
@@ -388,7 +388,7 @@ WantedBy=multi-user.target
     # Verify v1.0.0 is running
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/rollapp/.version",
+        "cat /opt/fujin/rollapp/.fujin/.version",
     )
     assert success and stdout == "1.0.0", f"Expected version 1.0.0, got: '{stdout}'"
 
@@ -401,7 +401,7 @@ WantedBy=multi-user.target
     # Verify v2.0.0 is running
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/rollapp/.version",
+        "cat /opt/fujin/rollapp/.fujin/.version",
     )
     assert success and stdout == "2.0.0", f"Expected version 2.0.0, got: '{stdout}'"
 
@@ -417,11 +417,14 @@ WantedBy=multi-user.target
     # Verify v1.0.0 is running again
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/rollapp/.version",
+        "cat /opt/fujin/rollapp/.fujin/.version",
     )
     assert success and stdout == "1.0.0", (
         f"Expected version 1.0.0 after rollback, got: '{stdout}'"
     )
+
+    # Wait for service to be active after rollback
+    wait_for_service(vps_container["name"], "rollapp-web.service")
 
     # Verify service is still active
     stdout, success = exec_in_container(
@@ -446,8 +449,8 @@ def test_down_command(vps_container, ssh_key, tmp_path, monkeypatch):
     pyproject.write_text('[project]\nname = "downapp"\nversion = "1.0.0"\n')
 
     # Create .fujin/systemd directory with service file
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "web.service"
@@ -456,9 +459,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/downapp
+ExecStart={app_dir}/.fujin/downapp
 WorkingDirectory={app_dir}
-EnvironmentFile=-{app_dir}/.env
+EnvironmentFile=-{app_dir}/.fujin/.env
 Restart=always
 
 [Install]
@@ -537,8 +540,8 @@ def test_deploy_with_environment_secrets(vps_container, ssh_key, tmp_path, monke
     distfile.chmod(0o755)
 
     # Create .fujin directory with service and env file
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "web.service"
@@ -547,9 +550,9 @@ Description=Secret app
 
 [Service]
 Type=simple
-ExecStart={app_dir}/secretapp
+ExecStart={app_dir}/.fujin/secretapp
 WorkingDirectory={app_dir}
-EnvironmentFile={app_dir}/.env
+EnvironmentFile={app_dir}/.fujin/.env
 Restart=always
 
 [Install]
@@ -557,7 +560,7 @@ WantedBy=multi-user.target
 """)
 
     # Create env file with secret references
-    env_file = fujin_dir / "env"
+    env_file = install_dir / "env"
     env_file.write_text("""DEBUG=false
 SECRET_KEY=$MY_SECRET_KEY
 DATABASE_URL=$DATABASE_URL
@@ -593,7 +596,7 @@ STATIC_VALUE=no-secret-here
 
     # Verify .env file was deployed with resolved secrets
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/secretapp/.env"
+        vps_container["name"], "cat /opt/fujin/secretapp/.fujin/.env"
     )
     assert success, f"Could not read .env file: {stdout}"
 
@@ -618,8 +621,8 @@ def test_sequential_deploys_update_version(
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir()
 
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "web.service"
@@ -628,7 +631,7 @@ Description=Sequential deploy test
 
 [Service]
 Type=simple
-ExecStart={app_dir}/seqapp
+ExecStart={app_dir}/.fujin/seqapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -671,7 +674,7 @@ WantedBy=multi-user.target
 
     # Verify v1.0.0 is deployed
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/seqapp/.version"
+        vps_container["name"], "cat /opt/fujin/seqapp/.fujin/.version"
     )
     assert success and stdout.strip() == "1.0.0"
 
@@ -685,13 +688,13 @@ WantedBy=multi-user.target
 
     # Verify v1.1.0 is now deployed
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/seqapp/.version"
+        vps_container["name"], "cat /opt/fujin/seqapp/.fujin/.version"
     )
     assert success and stdout.strip() == "1.1.0"
 
     # Verify bundle history exists (both versions available)
     stdout, success = exec_in_container(
-        vps_container["name"], "ls /opt/fujin/seqapp/.versions/"
+        vps_container["name"], "ls /opt/fujin/seqapp/.fujin/.versions/"
     )
     assert success
     assert "seqapp-1.0.0.pyz" in stdout, f"v1.0.0 bundle should exist: {stdout}"
@@ -707,13 +710,13 @@ WantedBy=multi-user.target
 
     # Verify v1.2.0 is now deployed
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/seqapp/.version"
+        vps_container["name"], "cat /opt/fujin/seqapp/.fujin/.version"
     )
     assert success and stdout.strip() == "1.2.0"
 
     # All three versions should be available for rollback
     stdout, success = exec_in_container(
-        vps_container["name"], "ls /opt/fujin/seqapp/.versions/"
+        vps_container["name"], "ls /opt/fujin/seqapp/.fujin/.versions/"
     )
     assert success
     assert "seqapp-1.0.0.pyz" in stdout
@@ -730,8 +733,8 @@ def test_deploy_preserves_app_data_between_versions(
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir()
 
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "web.service"
@@ -740,7 +743,7 @@ Description=Data persistence test
 
 [Service]
 Type=simple
-ExecStart={app_dir}/dataapp
+ExecStart={app_dir}/.fujin/dataapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -811,6 +814,6 @@ WantedBy=multi-user.target
 
     # Verify new version is deployed
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/dataapp/.version"
+        vps_container["name"], "cat /opt/fujin/dataapp/.fujin/.version"
     )
     assert success and stdout.strip() == "1.1.0"
