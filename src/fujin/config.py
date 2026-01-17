@@ -122,6 +122,7 @@ class Config(msgspec.Struct, kw_only=True):
         """Apps are always deployed to /opt/fujin."""
         return "/opt/fujin"
 
+    @property
     def app_dir(self) -> str:
         """Get app directory."""
         return f"{self.apps_dir}/{self.app_name}"

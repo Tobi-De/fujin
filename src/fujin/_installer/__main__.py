@@ -231,18 +231,9 @@ export -f {config.app_name}
                     print(f"→ Removing stale dropin: {dropin_file}")
                     run(f"sudo rm -f {dropin_file}")
 
-            try:
-                # Check if directory is empty (will fail if not)
-                result = run(
-                    f'[ -z "$(ls -A {dropin_dir})" ] && echo empty || echo not_empty',
-                    capture_output=True,
-                    text=True,
-                )
-                if "empty" in result.stdout:
-                    print(f"→ Removing empty dropin directory: {dropin_dir}")
-                    run(f"sudo rmdir {dropin_dir}")
-            except subprocess.CalledProcessError:
-                pass  # Directory not empty, keep it
+            if not any(dropin_dir.iterdir()):
+                print(f"→ Removing empty dropin directory: {dropin_dir}")
+                run(f"sudo rmdir {dropin_dir}")
 
     log("Installing new service files...")
     for unit in config.deployed_units:
@@ -326,18 +317,10 @@ export -f {config.app_name}
     active_units = []
     for unit in config.deployed_units:
         active_units.extend(unit["instance_service_names"])
-        # Add sockets/timers (not templates, they're activated via instances)
-        if not unit["is_template"]:
-            if unit["template_socket_name"]:
-                active_units.append(unit["template_socket_name"])
-            if unit["template_timer_name"]:
-                active_units.append(unit["template_timer_name"])
-        else:
-            # Template sockets/timers use @ without instance number
-            if unit["template_socket_name"]:
-                active_units.append(unit["template_socket_name"])
-            if unit["template_timer_name"]:
-                active_units.append(unit["template_timer_name"])
+        if unit["template_socket_name"]:
+            active_units.append(unit["template_socket_name"])
+        if unit["template_timer_name"]:
+            active_units.append(unit["template_timer_name"])
 
     units_str = " ".join(active_units)
     run(
@@ -408,30 +391,20 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     Assumes it's running from a directory with extracted bundle files.
     """
     log("Uninstalling application...")
-    log("Stopping and disabling services...")
 
-    # Build list of units from deployed_units
-    valid_units = []
+    regular_units = []
+    template_units = []
     for unit in config.deployed_units:
-        valid_units.append(unit["template_service_name"])
+        target = template_units if unit["is_template"] else regular_units
+        target.append(unit["template_service_name"])
         if unit["template_socket_name"]:
-            valid_units.append(unit["template_socket_name"])
+            target.append(unit["template_socket_name"])
         if unit["template_timer_name"]:
-            valid_units.append(unit["template_timer_name"])
+            target.append(unit["template_timer_name"])
 
-    regular_units = [
-        u
-        for u in valid_units
-        if not u.endswith("@.service")
-        and not u.endswith("@.socket")
-        and not u.endswith("@.timer")
-    ]
-    template_units = [
-        u
-        for u in valid_units
-        if u.endswith("@.service") or u.endswith("@.socket") or u.endswith("@.timer")
-    ]
+    valid_units = regular_units + template_units
 
+    log("Stopping and disabling services...")
     if regular_units:
         run(
             f"sudo systemctl disable --now {' '.join(regular_units)} --quiet",
