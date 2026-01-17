@@ -10,9 +10,7 @@ import tomli_w
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
 from fujin.config import tomllib
-from fujin.templates import CADDY_HANDLE_PROXY
-from fujin.templates import CADDY_HANDLE_STATIC
-from fujin.templates import CADDYFILE_HEADER
+from fujin.templates import CADDYFILE_TEMPLATE
 from fujin.templates import NEW_SERVICE_TEMPLATE
 
 
@@ -111,37 +109,37 @@ class Init(BaseCommand):
 
         return config
 
-    def _create_caddyfile(self, fujin_dir: Path, app_name: str, routes: dict):
-        """Create Caddyfile with given routes."""
-        caddyfile_content = CADDYFILE_HEADER.format(
-            app_name=app_name, domain=f"{app_name}.com"
-        )
+    def _create_caddyfile(
+        self,
+        fujin_dir: Path,
+        app_name: str,
+        upstream: str,
+        static_path: str | None = None,
+    ):
+        """Create Caddyfile."""
+        if static_path:
+            # Django-style with static files
+            content = f"""# Caddyfile for {app_name}
+# Learn more: https://caddyserver.com/docs/caddyfile
 
-        for route, target in routes.items():
-            if isinstance(target, dict) and "static" in target:
-                # Static file serving
-                static_path = target["static"]
-                caddyfile_content += CADDY_HANDLE_STATIC.format(
-                    path=route, root=static_path
-                )
-            else:
-                # Reverse proxy to service
-                if target == "web":
-                    upstream = f"unix//run/{{app_name}}.sock"
-                else:
-                    upstream = "localhost:8000"
+{app_name}.com {{
+    handle_path /static/* {{
+        root * {static_path}
+        file_server
+    }}
 
-                caddyfile_content += CADDY_HANDLE_PROXY.format(
-                    name=target if isinstance(target, str) else "web",
-                    path=route,
-                    upstream=upstream,
-                    extra_directives="",
-                )
-
-        caddyfile_content += "}\n"
+    handle {{
+        reverse_proxy {upstream}
+    }}
+}}
+"""
+        else:
+            content = CADDYFILE_TEMPLATE.format(
+                app_name=app_name, domain=f"{app_name}.com", upstream=upstream
+            )
 
         caddyfile = fujin_dir / "Caddyfile"
-        caddyfile.write_text(caddyfile_content)
+        caddyfile.write_text(content)
         self.output.success(f"  Created {caddyfile}")
 
     def _generate_simple(self, app_name: str, fujin_dir: Path):
@@ -160,7 +158,7 @@ class Init(BaseCommand):
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
-        self._create_caddyfile(fujin_dir, app_name, {"/*": "web"})
+        self._create_caddyfile(fujin_dir, app_name, "localhost:8000")
 
     def _generate_django(self, app_name: str, fujin_dir: Path):
         """Generate Django profile: web service with migrations."""
@@ -191,12 +189,7 @@ class Init(BaseCommand):
         self.output.success(f"  Created {web_service}")
 
         self._create_caddyfile(
-            fujin_dir,
-            app_name,
-            {
-                "/static/*": {"static": f"{{app_dir}}/staticfiles/"},
-                "/*": "web",
-            },
+            fujin_dir, app_name, "localhost:8000", static_path="{app_dir}/staticfiles/"
         )
 
     def _generate_falco(self, app_name: str, fujin_dir: Path):
@@ -234,7 +227,7 @@ class Init(BaseCommand):
         worker_service.write_text(worker_content)
         self.output.success(f"  Created {worker_service}")
 
-        self._create_caddyfile(fujin_dir, app_name, {"/*": "web"})
+        self._create_caddyfile(fujin_dir, app_name, "localhost:8000")
 
     def _generate_binary(self, app_name: str, fujin_dir: Path):
         """Generate binary profile: single binary deployment."""
@@ -259,4 +252,4 @@ class Init(BaseCommand):
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
-        self._create_caddyfile(fujin_dir, app_name, {"/*": "web"})
+        self._create_caddyfile(fujin_dir, app_name, "localhost:8000")

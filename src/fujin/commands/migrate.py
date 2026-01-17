@@ -9,11 +9,30 @@ import cappa
 
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
-from fujin.templates import CADDY_HANDLE_PROXY
-from fujin.templates import CADDY_HANDLE_STATIC
-from fujin.templates import CADDYFILE_HEADER
 from fujin.templates import NEW_DROPIN_TEMPLATE
 from fujin.templates import NEW_SERVICE_TEMPLATE
+
+# Migration-specific Caddy templates for converting old config format
+_CADDYFILE_HEADER = """# Caddyfile for {app_name}
+# Learn more: https://caddyserver.com/docs/caddyfile
+
+{domain} {{
+"""
+
+_CADDY_HANDLE_STATIC = """
+    # Serve static files
+    handle_path {path} {{
+        root * {root}
+        file_server
+    }}
+"""
+
+_CADDY_HANDLE_PROXY = """
+    # Proxy to {name} service
+    handle {path} {{
+{extra_directives}        reverse_proxy {upstream}
+    }}
+"""
 
 
 @cappa.command(help="Migrate fujin.toml and generate .fujin/ directory structure")
@@ -350,7 +369,7 @@ class Migrate(BaseCommand):
         domain = domains[0] if domains else "example.com"
 
         # We need {app_name} to be literal in the Caddyfile for deploy time substitution
-        content = CADDYFILE_HEADER.format(app_name="{app_name}", domain=domain)
+        content = _CADDYFILE_HEADER.format(app_name="{app_name}", domain=domain)
 
         # Process routes
         for path, target in routes.items():
@@ -358,7 +377,7 @@ class Migrate(BaseCommand):
                 # RouteConfig format
                 if "static" in target:
                     static_path = target["static"]
-                    content += CADDY_HANDLE_STATIC.format(path=path, root=static_path)
+                    content += _CADDY_HANDLE_STATIC.format(path=path, root=static_path)
                 elif "process" in target:
                     process_name = target["process"]
                     strip_prefix = target.get("strip_prefix")
@@ -381,7 +400,7 @@ class Migrate(BaseCommand):
                         if strip_prefix
                         else ""
                     )
-                    content += CADDY_HANDLE_PROXY.format(
+                    content += _CADDY_HANDLE_PROXY.format(
                         name=process_name,
                         path=path,
                         upstream=upstream,
@@ -404,7 +423,7 @@ class Migrate(BaseCommand):
                 else:
                     upstream = "localhost:8000"
 
-                content += CADDY_HANDLE_PROXY.format(
+                content += _CADDY_HANDLE_PROXY.format(
                     name=process_name, path=path, upstream=upstream, extra_directives=""
                 )
 
