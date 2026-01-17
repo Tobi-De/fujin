@@ -20,19 +20,19 @@ from fujin.discovery import (
 )
 def test_discover_services_returns_empty_when_no_services(tmp_path, setup_dirs):
     """Should return empty list if no services found or systemd dir missing."""
-    fujin_dir = tmp_path / ".fujin"
-    fujin_dir.mkdir()
+    install_dir = tmp_path / ".fujin"
+    install_dir.mkdir()
     for dir_name in setup_dirs:
-        (fujin_dir / dir_name).mkdir()
+        (install_dir / dir_name).mkdir()
 
-    units = discover_deployed_units(fujin_dir, "myapp", {})
+    units = discover_deployed_units(install_dir, "myapp", {})
     assert units == []
 
 
 def test_discover_single_service(tmp_path):
     """Should discover a single service."""
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     # Create a simple service file
@@ -47,7 +47,7 @@ ExecStart=/bin/true
 WantedBy=multi-user.target
 """)
 
-    units = discover_deployed_units(fujin_dir, "myapp", {})
+    units = discover_deployed_units(install_dir, "myapp", {})
 
     assert len(units) == 1
     assert units[0].service_name == "web"
@@ -62,8 +62,8 @@ WantedBy=multi-user.target
 
 def test_discover_template_service(tmp_path):
     """Should discover a template service (with @)."""
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "web@.service"
@@ -77,7 +77,7 @@ ExecStart=/bin/true
 WantedBy=multi-user.target
 """)
 
-    units = discover_deployed_units(fujin_dir, "myapp", {"web": 3})
+    units = discover_deployed_units(install_dir, "myapp", {"web": 3})
 
     assert len(units) == 1
     assert units[0].service_name == "web"
@@ -94,8 +94,8 @@ WantedBy=multi-user.target
 
 def test_discover_service_with_socket_and_replicas(tmp_path):
     """Should discover service with socket for both single and multi-replica configs."""
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     # Test single replica (web.service + web.socket)
@@ -121,7 +121,7 @@ ListenStream=/run/web.sock
 WantedBy=sockets.target
 """)
 
-    units = discover_deployed_units(fujin_dir, "myapp", {})
+    units = discover_deployed_units(install_dir, "myapp", {})
     assert len(units) == 1
     assert units[0].socket_file == socket_file
     assert units[0].template_socket_name == "myapp-web.socket"
@@ -153,7 +153,7 @@ ListenStream=/run/web-%i.sock
 WantedBy=sockets.target
 """)
 
-    units = discover_deployed_units(fujin_dir, "myapp", {})
+    units = discover_deployed_units(install_dir, "myapp", {})
     assert len(units) == 1
     assert units[0].socket_file == template_socket
     assert units[0].template_socket_name == "myapp-web@.socket"
@@ -161,8 +161,8 @@ WantedBy=sockets.target
 
 def test_discover_service_with_timer(tmp_path):
     """Should discover service and associated timer file."""
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     service_file = systemd_dir / "cleanup.service"
@@ -185,7 +185,7 @@ OnCalendar=daily
 WantedBy=timers.target
 """)
 
-    units = discover_deployed_units(fujin_dir, "myapp", {})
+    units = discover_deployed_units(install_dir, "myapp", {})
 
     assert len(units) == 1
     assert units[0].timer_file == timer_file
@@ -194,8 +194,8 @@ WantedBy=timers.target
 
 def test_discover_multiple_services(tmp_path):
     """Should discover multiple services."""
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     for name in ["web", "worker", "cleanup"]:
@@ -209,7 +209,7 @@ ExecStart=/bin/true
 WantedBy=multi-user.target
 """)
 
-    units = discover_deployed_units(fujin_dir, "myapp", {})
+    units = discover_deployed_units(install_dir, "myapp", {})
 
     assert len(units) == 3
     names = [u.service_name for u in units]
@@ -218,8 +218,8 @@ WantedBy=multi-user.target
 
 def test_discover_services_fails_on_malformed_file(tmp_path):
     """Should fail with clear error on malformed service file."""
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     # Create malformed file (invalid INI)
@@ -227,6 +227,6 @@ def test_discover_services_fails_on_malformed_file(tmp_path):
     service_file.write_text("This is not valid INI\n[[[broken")
 
     with pytest.raises(ServiceDiscoveryError) as exc_info:
-        discover_deployed_units(fujin_dir, "myapp", {})
+        discover_deployed_units(install_dir, "myapp", {})
 
     assert "Failed to parse web.service" in exc_info.value.message

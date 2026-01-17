@@ -285,7 +285,7 @@ class Migrate(BaseCommand):
 
         # Customize ExecStart
         service_content = service_content.replace(
-            f"ExecStart={{app_dir}}/.venv/bin/python -m myapp.{name}",
+            f"ExecStart={{install_dir}}/.venv/bin/python -m myapp.{name}",
             f"ExecStart={{app_dir}}/{command}",
         )
 
@@ -303,12 +303,13 @@ class Migrate(BaseCommand):
                     rest_of_cmd = parts[1] if len(parts) > 1 else ""
                     if installation_mode == "python-package":
                         # Use python -m for python packages
-                        full_cmd = f"{{app_dir}}/.venv/bin/python -m {{app_name}}" + (
-                            f" {rest_of_cmd}" if rest_of_cmd else ""
+                        full_cmd = (
+                            f"{{install_dir}}/.venv/bin/python -m {{app_name}}"
+                            + (f" {rest_of_cmd}" if rest_of_cmd else "")
                         )
                     else:
-                        # For binary mode, use {app_dir}/{app_name}
-                        full_cmd = f"{{app_dir}}/{{app_name}}" + (
+                        # For binary mode, use {install_dir}/{app_name}
+                        full_cmd = f"{{install_dir}}/{{app_name}}" + (
                             f" {rest_of_cmd}" if rest_of_cmd else ""
                         )
                 else:

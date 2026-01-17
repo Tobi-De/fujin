@@ -264,7 +264,7 @@ def test_config_app_dir(minimal_config):
 
 def test_config_app_bin_for_python_package(minimal_config):
     assert minimal_config.installation_mode == InstallationMode.PY_PACKAGE
-    assert minimal_config.app_bin == ".venv/bin/testapp"
+    assert minimal_config.app_bin == ".fujin/.venv/bin/testapp"
 
 
 def test_config_app_bin_for_binary(minimal_config_dict):
@@ -272,4 +272,4 @@ def test_config_app_bin_for_binary(minimal_config_dict):
     del minimal_config_dict["python_version"]
 
     config = msgspec.convert(minimal_config_dict, type=Config)
-    assert config.app_bin == "testapp"
+    assert config.app_bin == ".fujin/testapp"

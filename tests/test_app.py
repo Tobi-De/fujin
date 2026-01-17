@@ -18,8 +18,8 @@ def app_test_env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     # Create .fujin/systemd directory structure
-    fujin_dir = tmp_path / ".fujin"
-    systemd_dir = fujin_dir / "systemd"
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
     # Create web service (single replica)
