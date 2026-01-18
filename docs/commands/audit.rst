@@ -17,7 +17,7 @@ Fujin automatically logs every deployment operation to a server-side audit file.
 - Understand what changed between deployments
 - Maintain compliance and accountability
 
-The audit log is stored on the server at ``~/.fujin/{app_name}-audit.log``.
+The audit log is stored on the server at ``/opt/fujin/.audit/{app_name}.log``.
 
 Usage
 -----
@@ -85,7 +85,7 @@ Audit Log Format
 
    {"timestamp": "2024-12-28T14:30:00+00:00", "operation": "deploy", "host": "production", "app_name": "myapp", "version": "1.2.3", "git_commit": "abc1234567890", "user": "tobi"}
 
-**File location:** ``~/.fujin/{app_name}-audit.log`` on the server
+**File location:** ``/opt/fujin/.audit/{app_name}.log`` on the server
 
 Programmatic Access
 -------------------
@@ -95,13 +95,13 @@ Since the audit log uses JSONL format, you can process it with standard tools:
 .. code-block:: bash
 
    # SSH to server and analyze logs with jq
-   ssh user@server "cat ~/.fujin/myapp-audit.log" | jq -s 'group_by(.user) | map({user: .[0].user, deployments: length})'
+   ssh user@server "cat /opt/fujin/.audit/myapp.log" | jq -s 'group_by(.user) | map({user: .[0].user, deployments: length})'
 
    # Find all rollbacks
-   ssh user@server "cat ~/.fujin/myapp-audit.log" | jq 'select(.operation == "rollback")'
+   ssh user@server "cat /opt/fujin/.audit/myapp.log" | jq 'select(.operation == "rollback")'
 
    # Get last deployment with git commit
-   ssh user@server "tail -1 ~/.fujin/myapp-audit.log" | jq '{version, git_commit, timestamp}'
+   ssh user@server "tail -1 /opt/fujin/.audit/myapp.log" | jq '{version, git_commit, timestamp}'
 
 Troubleshooting
 ---------------
@@ -134,14 +134,14 @@ If you want to clean up old audit logs:
    ssh user@server
 
    # View log size
-   wc -l ~/.fujin/myapp-audit.log
+   wc -l /opt/fujin/.audit/myapp.log
 
    # Keep only last 100 entries
-   tail -100 ~/.fujin/myapp-audit.log > ~/.fujin/myapp-audit.log.tmp
-   mv ~/.fujin/myapp-audit.log.tmp ~/.fujin/myapp-audit.log
+   tail -100 /opt/fujin/.audit/myapp.log > /opt/fujin/.audit/myapp.log.tmp
+   mv /opt/fujin/.audit/myapp.log.tmp /opt/fujin/.audit/myapp.log
 
    # Or delete entirely
-   rm ~/.fujin/myapp-audit.log
+   rm /opt/fujin/.audit/myapp.log
 
 See Also
 --------

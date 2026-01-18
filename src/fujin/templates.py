@@ -34,8 +34,10 @@ RestartSec=5s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true  # Home directories will be inaccessible
-ReadWritePaths={{app_dir}}  # Grant write access to app directory
+# Home directories will be inaccessible
+ProtectHome=true
+# Grant write access to app directory
+ReadWritePaths={{app_dir}}
 
 [Install]
 WantedBy=multi-user.target
@@ -66,8 +68,10 @@ ExecStart={{install_dir}}/.venv/bin/python -m myapp.{name}
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true  # Home directories will be inaccessible
-ReadWritePaths={{app_dir}}  # Grant write access to app directory
+# Home directories will be inaccessible
+ProtectHome=true
+# Grant write access to app directory
+ReadWritePaths={{app_dir}}
 """
 
 NEW_TIMER_TEMPLATE = """# Systemd timer for {name}

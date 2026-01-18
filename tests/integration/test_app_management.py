@@ -47,7 +47,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.fujin/mgmtapp
+ExecStart={install_dir}/mgmtapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -61,7 +61,7 @@ Description=Worker
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.fujin/mgmtapp
+ExecStart={install_dir}/mgmtapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -234,7 +234,7 @@ def test_app_introspection(deployed_app, vps_container, monkeypatch):
 
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/mgmtapp/.fujin/.env",
+        "cat /opt/fujin/mgmtapp/.install/.env",
     )
     assert success, f"Reading .env should succeed: {stdout}"
     # Note: .env file exists but may be empty for binary installations

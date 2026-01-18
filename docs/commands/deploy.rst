@@ -39,12 +39,12 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
    - Installer script (``_installer/__main__.py``)
    - Installation metadata (``config.json``)
 
-4. **Upload Bundle**: The zipapp is uploaded to ``{app_dir}/.fujin/.versions/{app_name}-{version}.pyz`` and verified using SHA256 checksum.
+4. **Upload Bundle**: The zipapp is uploaded to ``{app_dir}/.install/.versions/{app_name}-{version}.pyz`` and verified using SHA256 checksum.
 
 5. **Execute Installer**: The remote Python interpreter runs the zipapp (``python3 installer.pyz install``), which:
 
    - Creates the app user if needed
-   - Sets up the ``.fujin/`` directory structure
+   - Sets up the ``.install/`` directory structure
    - Installs the application (creates virtualenv for Python packages, copies binary for binary mode)
    - Creates ``.appenv`` shell environment setup
    - Installs systemd units and dropin configurations
@@ -52,7 +52,7 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
    - Enables and restarts services
    - Configures and reloads Caddy (when enabled)
 
-6. **Prune Old Bundles**: Old zipapp bundles are removed from ``.fujin/.versions/`` according to ``versions_to_keep`` configuration.
+6. **Prune Old Bundles**: Old zipapp bundles are removed from ``.install/.versions/`` according to ``versions_to_keep`` configuration.
 
 7. **Record Deployment**: Deployment metadata (version, timestamp, git commit) is appended to the audit log.
 
@@ -73,7 +73,7 @@ Directory Structure
         .. code-block:: shell
 
             /opt/fujin/{app_name}/
-            ├── .fujin/                           # Deployment infrastructure
+            ├── .install/                         # Deployment infrastructure
             │   ├── .env                          # Environment variables file (640)
             │   ├── .appenv                       # Application-specific environment setup
             │   ├── .version                      # Current deployed version
@@ -89,7 +89,7 @@ Directory Structure
         .. code-block:: shell
 
             /opt/fujin/{app_name}/
-            ├── .fujin/                           # Deployment infrastructure
+            ├── .install/                         # Deployment infrastructure
             │   ├── .env                          # Environment variables file (640)
             │   ├── .appenv                       # Application-specific environment setup
             │   ├── .version                      # Current deployed version
@@ -132,7 +132,7 @@ Fujin uses a multi-user security model with three components:
 
    - Member of ``fujin`` group
    - Can deploy and manage applications
-   - Owns ``.fujin/`` directory (deployment infrastructure)
+   - Owns ``.install/`` directory (deployment infrastructure)
 
 3. **App user** (e.g., ``bookstore``): Runs services
 
@@ -141,9 +141,9 @@ Fujin uses a multi-user security model with three components:
    - Can write to database files and logs within app directory
    - Used automatically for ``fujin exec --appenv`` and ``fujin app`` commands
 
-The ``.fujin/`` subdirectory isolates deployment infrastructure from application runtime data. This means:
+The ``.install/`` subdirectory isolates deployment infrastructure from application runtime data. This means:
 
-- Deployment operations (like ``chown``) only affect ``.fujin/``, not app data
+- Deployment operations (like ``chown``) only affect ``.install/``, not app data
 - App runtime files (databases, caches, uploads) remain owned by the app user
 - No risk of permission conflicts between deployment and runtime operations
 
@@ -174,7 +174,7 @@ Example permissions:
     /opt/fujin/                      root:fujin       drwxrwxr-x (775)
       ├── .python/                   root:fujin       drwxrwxr-x (775)
       └── bookstore/                 tobi:bookstore   drwxrwxr-x (775)
-          ├── .fujin/                tobi:bookstore   drwxrwx--- (770)
+          ├── .install/              tobi:bookstore   drwxrwx--- (770)
           │   ├── .env               tobi:bookstore   -rw-r----- (640)
           │   └── .venv/             tobi:bookstore   drwxr-xr-x (755)
           └── db.sqlite3             bookstore:...    -rw-r--r-- (664)
