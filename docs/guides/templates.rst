@@ -86,7 +86,7 @@ Basic structure of ``default.service.j2``:
    Type={% if process.socket %}notify{% else %}simple{% endif %}
    User={{ user }}
    WorkingDirectory={{ app_dir }}
-   EnvironmentFile={{ app_dir }}/.env
+   EnvironmentFile={{ install_dir }}/.env
 
    # The command to run
    ExecStart={{ process.command }}
@@ -142,7 +142,9 @@ Global Variables
    * - ``{{ user }}``
      - Deployment user
    * - ``{{ app_dir }}``
-     - Full path to application directory
+     - Full path to application directory (``/opt/fujin/{app_name}``)
+   * - ``{{ install_dir }}``
+     - Full path to deployment infrastructure directory (``/opt/fujin/{app_name}/.fujin``)
    * - ``{{ domain_name }}``
      - Host domain name
    * - ``{{ upstream }}``
@@ -206,7 +208,7 @@ Add environment variables directly in the service file:
 .. code-block:: jinja
 
    [Service]
-   EnvironmentFile={{ app_dir }}/.env
+   EnvironmentFile={{ install_dir }}/.env
 
    # Additional environment variables
    Environment="PYTHONUNBUFFERED=1"
@@ -251,7 +253,7 @@ Working Directory and Paths
    WorkingDirectory={{ app_dir }}
 
    # Add virtualenv to PATH
-   Environment="PATH={{ app_dir }}/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+   Environment="PATH={{ install_dir }}/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 
    # Python path
    Environment="PYTHONPATH={{ app_dir }}"
@@ -379,10 +381,10 @@ Create ``.fujin/web.service.j2``:
    User={{ user }}
    Group=www-data
    WorkingDirectory={{ app_dir }}
-   EnvironmentFile={{ app_dir }}/.env
+   EnvironmentFile={{ install_dir }}/.env
 
    # Gunicorn with custom settings
-   ExecStart={{ app_dir }}/.venv/bin/gunicorn \
+   ExecStart={{ install_dir }}/.venv/bin/gunicorn \
        --bind unix:/run/{{ app_name }}/{{ app_name }}.sock \
        --workers 4 \
        --worker-class sync \
@@ -421,10 +423,10 @@ Create ``.fujin/worker.service.j2``:
    Type=simple
    User={{ user }}
    WorkingDirectory={{ app_dir }}
-   EnvironmentFile={{ app_dir }}/.env
+   EnvironmentFile={{ install_dir }}/.env
 
    # Celery worker
-   ExecStart={{ app_dir }}/.venv/bin/celery \
+   ExecStart={{ install_dir }}/.venv/bin/celery \
        -A config worker \
        --loglevel=info \
        --concurrency=4 \
@@ -539,8 +541,8 @@ Common Mistakes
       # Wrong: Relative path
       ExecStart=.venv/bin/gunicorn  # Won't work in systemd
 
-      # Correct: Absolute path
-      ExecStart={{ app_dir }}/.venv/bin/gunicorn
+       # Correct: Absolute path
+       ExecStart={{ install_dir }}/.venv/bin/gunicorn
 
 Validate Systemd Units
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -574,7 +576,7 @@ Full Django Production Template
    WorkingDirectory={{ app_dir }}
 
    # Environment
-   EnvironmentFile={{ app_dir }}/.env
+   EnvironmentFile={{ install_dir }}/.env
    Environment="PYTHONUNBUFFERED=1"
    Environment="DJANGO_SETTINGS_MODULE=config.settings"
 
@@ -594,7 +596,7 @@ Full Django Production Template
    ExecStartPre=/bin/mkdir -p /run/{{ app_name }}
    ExecStartPre=/bin/chown {{ user }}:www-data /run/{{ app_name }}
 
-   ExecStart={{ app_dir }}/.venv/bin/gunicorn \
+   ExecStart={{ install_dir }}/.venv/bin/gunicorn \
        config.wsgi:application \
        --name {{ app_name }} \
        --bind unix:/run/{{ app_name }}/{{ app_name }}.sock \
@@ -711,7 +713,7 @@ See Also
 --------
 
 - :doc:`../configuration` - Configuration reference
-- :doc:`../commands/show` - Preview rendered templates
+- :doc:`../commands/app` - View deployed unit files with ``fujin app cat``
 - :doc:`django-complete` - Django deployment with custom templates
 - `Jinja2 Documentation <https://jinja.palletsprojects.com/>`_
 - `Systemd Service Documentation <https://www.freedesktop.org/software/systemd/man/systemd.service.html>`_

@@ -22,22 +22,20 @@ Use ``fujin app`` (or the shorter ``fj``) to control your application's systemd 
 - Access systemd unit configurations
 - View deployment history
 
-The app command works with process names defined in your ``fujin.toml`` and intelligently handles related units (sockets, timers).
+The app command works with service names from your ``.fujin/systemd/`` directory and intelligently handles related units (sockets, timers).
 
 Usage Examples
 --------------
 
-Given the following configuration in ``fujin.toml``:
+Given the following systemd units in ``.fujin/systemd/``:
 
-.. code-block:: toml
+.. code-block:: text
 
-    [processes.web]
-    command = "uvicorn app:app"
-    socket = true
-
-    [processes.worker]
-    command = "celery -A app worker"
-    timer = { on_calendar = "*:00" }  # Run hourly
+    .fujin/systemd/
+    ├── web.service       # Web server with socket activation
+    ├── web.socket        # Socket for web service
+    ├── worker.service    # Background worker
+    └── worker.timer      # Timer for worker (hourly)
 
 You can interact with services in various ways (examples show both ``fujin app`` and the ``fj`` shortcut):
 

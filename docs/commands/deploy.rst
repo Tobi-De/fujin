@@ -24,21 +24,39 @@ How it works
 
 Here's a high-level overview of what happens when you run the ``deploy`` command:
 
-1. **Resolve secrets**: If you have defined a ``secrets`` configuration, it will be used to retrieve pull the ``secrets`` defined in your ``envfile``.
+1. **Resolve Secrets**: If you have a ``secrets`` configuration, Fujin retrieves secrets defined in your environment file from the configured adapter (Bitwarden, 1Password, Doppler, etc.).
 
-2. **Build the Application**: Your application is built using the ``build_command`` specified in your configuration.
+2. **Build the Application**: Your application is built locally using the ``build_command`` specified in your configuration.
 
-3. **Bundle Artifacts**: All deployment assets are staged locally into a single tarball (``deploy.tar.gz``). The bundle contains your dist file, optional ``requirements.txt``, the rendered ``.env``, generated systemd unit files, the Caddyfile (when enabled), and install/uninstall scripts. A checksum is calculated for integrity verification.
+3. **Create Deployment Bundle**: Fujin creates a Python zipapp (`.pyz` file) containing:
 
-4. **Upload Once**: The bundle is uploaded to the host under ``{app_dir}/.versions/`` and its checksum is verified remotely. Retries are offered on mismatch.
+   - Your distribution file (wheel or binary)
+   - Optional ``requirements.txt`` (for Python packages)
+   - Resolved ``.env`` file with secrets
+   - Rendered systemd unit files (services, sockets, timers)
+   - Systemd dropin configurations
+   - Caddyfile (if available)
+   - Installer script (``_installer/__main__.py``)
+   - Installation metadata (``config.json``)
 
-5. **Install from Bundle**: The bundle is extracted on the host and ``install.sh`` installs the project: Python mode creates/uses the virtualenv and installs dependencies; binary mode copies the binary into place.
+4. **Upload Bundle**: The zipapp is uploaded to ``{app_dir}/.fujin/.versions/{app_name}-{version}.pyz`` and verified using SHA256 checksum.
 
-6. **Configure and Start Services**: Generated ``systemd`` unit files are installed (stale ones are cleaned up), services are enabled and restarted, and the Caddy configuration is applied/reloaded when enabled.  
+5. **Execute Installer**: The remote Python interpreter runs the zipapp (``python3 installer.pyz install``), which:
 
-7. **Prune Old Bundles**: Old bundles are removed from ``.versions`` according to ``versions_to_keep``.
+   - Creates the app user if needed
+   - Sets up the ``.fujin/`` directory structure
+   - Installs the application (creates virtualenv for Python packages, copies binary for binary mode)
+   - Creates ``.appenv`` shell environment setup
+   - Installs systemd units and dropin configurations
+   - Cleans up stale units and dropins
+   - Enables and restarts services
+   - Configures and reloads Caddy (when enabled)
 
-8. **Completion**: A success message is displayed, and the URL to access the deployed project is provided.
+6. **Prune Old Bundles**: Old zipapp bundles are removed from ``.fujin/.versions/`` according to ``versions_to_keep`` configuration.
+
+7. **Record Deployment**: Deployment metadata (version, timestamp, git commit) is appended to the audit log.
+
+8. **Completion**: A success message is displayed with deployment details.
 
 Deployment Layout and Permissions
 ----------------------------------
@@ -55,26 +73,32 @@ Directory Structure
         .. code-block:: shell
 
             /opt/fujin/{app_name}/
-            ├── .env                              # Environment variables file (640)
-            ├── .appenv                           # Application-specific environment setup
-            ├── .version                          # Current deployed version
-            ├── .venv/                            # Virtual environment (Python from shared dir)
-            └── .versions/                        # Stored deployment bundles
-                ├── app-1.2.3.pyz
-                └── app-1.2.2.pyz
+            ├── .fujin/                           # Deployment infrastructure
+            │   ├── .env                          # Environment variables file (640)
+            │   ├── .appenv                       # Application-specific environment setup
+            │   ├── .version                      # Current deployed version
+            │   ├── .venv/                        # Virtual environment (Python from shared dir)
+            │   └── .versions/                    # Stored deployment bundles
+            │       ├── app-1.2.3.pyz
+            │       └── app-1.2.2.pyz
+            ├── db.sqlite3                        # App runtime data (owned by app user)
+            └── uploads/                          # App runtime data (owned by app user)
 
     .. tab-item:: binary
 
         .. code-block:: shell
 
             /opt/fujin/{app_name}/
-            ├── .env                              # Environment variables file (640)
-            ├── .appenv                           # Application-specific environment setup
-            ├── .version                          # Current deployed version
-            ├── app_binary                        # Installed binary (755)
-            └── .versions/                        # Stored deployment bundles
-                ├── app-1.2.3.pyz
-                └── app-1.2.2.pyz
+            ├── .fujin/                           # Deployment infrastructure
+            │   ├── .env                          # Environment variables file (640)
+            │   ├── .appenv                       # Application-specific environment setup
+            │   ├── .version                      # Current deployed version
+            │   ├── app_binary                    # Installed binary (755)
+            │   └── .versions/                    # Stored deployment bundles
+            │       ├── app-1.2.3.pyz
+            │       └── app-1.2.2.pyz
+            ├── data/                             # App runtime data (owned by app user)
+            └── cache/                            # App runtime data (owned by app user)
 
 Shared Python Directory
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -108,7 +132,7 @@ Fujin uses a multi-user security model with three components:
 
    - Member of ``fujin`` group
    - Can deploy and manage applications
-   - Owns ``.venv``, code, configuration files
+   - Owns ``.fujin/`` directory (deployment infrastructure)
 
 3. **App user** (e.g., ``bookstore``): Runs services
 
@@ -116,6 +140,12 @@ Fujin uses a multi-user security model with three components:
    - Cannot modify application code or ``.venv``
    - Can write to database files and logs within app directory
    - Used automatically for ``fujin exec --appenv`` and ``fujin app`` commands
+
+The ``.fujin/`` subdirectory isolates deployment infrastructure from application runtime data. This means:
+
+- Deployment operations (like ``chown``) only affect ``.fujin/``, not app data
+- App runtime files (databases, caches, uploads) remain owned by the app user
+- No risk of permission conflicts between deployment and runtime operations
 
 .. note::
 
@@ -144,8 +174,9 @@ Example permissions:
     /opt/fujin/                      root:fujin       drwxrwxr-x (775)
       ├── .python/                   root:fujin       drwxrwxr-x (775)
       └── bookstore/                 tobi:bookstore   drwxrwxr-x (775)
-          ├── .env                   tobi:bookstore   -rw-r----- (640)
-          ├── .venv/                 tobi:bookstore   drwxr-xr-x (755)
+          ├── .fujin/                tobi:bookstore   drwxrwx--- (770)
+          │   ├── .env               tobi:bookstore   -rw-r----- (640)
+          │   └── .venv/             tobi:bookstore   drwxr-xr-x (755)
           └── db.sqlite3             bookstore:...    -rw-r--r-- (664)
 
 Security Benefits

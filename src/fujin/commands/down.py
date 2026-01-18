@@ -73,7 +73,6 @@ class Down(BaseCommand):
                 self.output.warning(
                     "Teardown encountered errors but continuing due to --force"
                 )
-                # Force cleanup - just remove app directory
                 conn.run(f"sudo rm -rf {app_dir}", warn=True, pty=True)
 
             if self.full:
