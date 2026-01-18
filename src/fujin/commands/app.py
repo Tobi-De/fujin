@@ -240,7 +240,7 @@ class App(BaseCommand):
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
         full_remote_cmd = (
-            f"cd {self.config.app_dir} && source .fujin/.appenv && {command}"
+            f"cd {self.config.app_dir} && source .install/.appenv && {command}"
         )
         ssh_cmd.extend([ssh_target, full_remote_cmd])
         subprocess.run(ssh_cmd)
