@@ -6,6 +6,7 @@ Run with: python3 installer.pyz [install|uninstall]
 """
 
 import json
+import shutil
 import os
 import subprocess
 import sys
@@ -453,6 +454,7 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     else:
         print(f"User {config.app_user} does not exist, skipping deletion")
 
+    shutil.rmtree(config.app_dir, ignore_errors=True)
     log("Uninstall completed.")
 
 
