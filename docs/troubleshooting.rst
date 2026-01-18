@@ -672,7 +672,7 @@ If you're still stuck:
 See Also
 --------
 
-- :doc:`commands/show` - Inspect configuration
+- :doc:`configuration` - Configuration reference
 - :doc:`commands/audit` - View deployment history
 - :doc:`commands/rollback` - Roll back failed deployments
 - :doc:`guides/django-complete` - Complete Django setup
