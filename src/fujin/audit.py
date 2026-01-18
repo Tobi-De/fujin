@@ -52,12 +52,13 @@ def log_operation(
     if to_version is not None:
         record["to_version"] = to_version
 
-    # Create .fujin directory if it doesn't exist and append to log file
-    log_file = f"~/.fujin/{app_name}-audit.log"
+    # Append to centralized audit log outside app directory
+    log_file = f"/opt/fujin/.audit/{app_name}.log"
     json_line = json.dumps(record)
 
-    connection.run(f"mkdir -p ~/.fujin")
-    connection.run(f"echo {json.dumps(json_line)} >> {log_file}")
+    # Ensure audit directory exists
+    connection.run("sudo mkdir -p /opt/fujin/.audit")
+    connection.run(f"echo {json.dumps(json_line)} | sudo tee -a {log_file} >/dev/null")
 
 
 def read_logs(
@@ -76,7 +77,7 @@ def read_logs(
     Returns:
         List of audit log records
     """
-    log_file = f"~/.fujin/{app_name}-audit.log"
+    log_file = f"/opt/fujin/.audit/{app_name}.log"
 
     # Check if log file exists
     stdout, success = connection.run(f"test -f {log_file}", warn=True, hide=True)

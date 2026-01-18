@@ -114,8 +114,8 @@ class Config(msgspec.Struct, kw_only=True):
     @property
     def app_bin(self) -> str:
         if self.installation_mode == InstallationMode.PY_PACKAGE:
-            return f".fujin/.venv/bin/{self.app_name}"
-        return f".fujin/{self.app_name}"
+            return f".install/.venv/bin/{self.app_name}"
+        return f".install/{self.app_name}"
 
     @property
     def apps_dir(self) -> str:
@@ -129,8 +129,8 @@ class Config(msgspec.Struct, kw_only=True):
 
     @property
     def install_dir(self) -> str:
-        """Get .fujin subdirectory path (deployment infrastructure)."""
-        return f"{self.app_dir}/.fujin"
+        """Get .install subdirectory path (deployment infrastructure)."""
+        return f"{self.app_dir}/.install"
 
     def get_distfile_path(self, version: str | None = None) -> Path:
         version = version or self.version

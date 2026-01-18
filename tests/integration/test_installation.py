@@ -51,7 +51,7 @@ After={app_name}-web.socket
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.fujin/socketapp
+ExecStart={install_dir}/socketapp
 WorkingDirectory={app_dir}
 StandardInput=socket
 
@@ -131,7 +131,7 @@ Description=Cleanup task
 
 [Service]
 Type=oneshot
-ExecStart={app_dir}/.fujin/timerapp
+ExecStart={install_dir}/timerapp
 WorkingDirectory={app_dir}
 """)
 
@@ -230,7 +230,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.fujin/staleapp
+ExecStart={install_dir}/staleapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -244,7 +244,7 @@ Description=Worker
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.fujin/staleapp
+ExecStart={install_dir}/staleapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -306,7 +306,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.fujin/dropinapp
+ExecStart={install_dir}/dropinapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -431,7 +431,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={app_dir}/.fujin/dropinclean
+ExecStart={install_dir}/dropinclean
 WorkingDirectory={app_dir}
 Restart=always
 

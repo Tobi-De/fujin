@@ -6,7 +6,6 @@ Run with: python3 installer.pyz [install|uninstall]
 """
 
 import json
-import shutil
 import os
 import subprocess
 import sys
@@ -85,10 +84,10 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
     app_dir = Path(config.app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
 
-    install_dir = app_dir / ".fujin"
+    install_dir = app_dir / ".install"
     install_dir.mkdir(exist_ok=True)
 
-    # Move .env file to .fujin/
+    # Move .env file to .install/
     env_file = bundle_dir / ".env"
     if env_file.exists():
         env_file.rename(install_dir / ".env")
@@ -116,7 +115,7 @@ export -f {config.app_name}
 
         distfile_path = bundle_dir / config.distfile_name
         run(
-            f"{uv_python_install_dir} uv venv -p {config.python_version} --managed-python --clear"
+            f"test -d .venv || {uv_python_install_dir} uv venv -p {config.python_version} --managed-python"
         )
 
         dist_install = f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} uv pip install {distfile_path}"
@@ -146,9 +145,9 @@ export -f {config.app_name}
     (install_dir / ".version").write_text(config.version)
 
     log("Setting file ownership and permissions...")
-    # Only chown the .fujin directory - leave app runtime data untouched
+    # Only chown the .install directory - leave app runtime data untouched
     run(f"sudo chown -R {config.deploy_user}:{config.app_user} {install_dir}")
-    # Make .fujin directory group-writable (deploy user can update, app user can read)
+    # Make .install directory group-writable (deploy user can update, app user can read)
     run(f"sudo chmod 775 {install_dir}")
     run(f"sudo chmod 640 {install_dir}/.env")
 
@@ -454,7 +453,6 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     else:
         print(f"User {config.app_user} does not exist, skipping deletion")
 
-    shutil.rmtree(config.app_dir, ignore_errors=True)
     log("Uninstall completed.")
 
 
