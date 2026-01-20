@@ -8,13 +8,13 @@ The ``fujin app`` command provides tools to manage your running application serv
    :width: 100%
 
 .. note::
-   The ``fj`` command is available as a convenient shortcut for ``fujin app``.
-   For example, ``fj status`` is equivalent to ``fujin app status``.
+   The ``fa`` command is available as a convenient shortcut for ``fujin app``.
+   For example, ``fa status`` is equivalent to ``fujin app status``.
 
 Overview
 --------
 
-Use ``fujin app`` (or the shorter ``fj``) to control your application's systemd services:
+Use ``fujin app`` (or the shorter ``fa``) to control your application's systemd services:
 
 - Start, stop, and restart services
 - View real-time logs
@@ -37,16 +37,16 @@ Given the following systemd units in ``.fujin/systemd/``:
     ├── worker.service    # Background worker
     └── worker.timer      # Timer for worker (hourly)
 
-You can interact with services in various ways (examples show both ``fujin app`` and the ``fj`` shortcut):
+You can interact with services in various ways (examples show both ``fujin app`` and the ``fa`` shortcut):
 
 **Manage all services**
 
 .. code-block:: bash
 
     # Start/Stop/Restart all services (web, worker, socket, timer)
-    fj start
-    fj stop
-    fj restart
+    fa start
+    fa stop
+    fa restart
 
 **Manage specific process groups**
 
@@ -55,10 +55,10 @@ When targeting a process by name, it includes related units (sockets, timers).
 .. code-block:: bash
 
     # Starts web.service AND web.socket
-    fj start web
+    fa start web
 
     # Logs for worker.service AND worker.timer
-    fj logs worker
+    fa logs worker
 
 **Manage specific systemd units**
 
@@ -67,13 +67,13 @@ You can be specific by appending the unit type.
 .. code-block:: bash
 
     # Only restart the service, not the socket
-    fj restart web.service
+    fa restart web.service
 
     # Only show logs for the timer
-    fj logs worker.timer
+    fa logs worker.timer
 
     # Only stop the socket
-    fj stop web.socket
+    fa stop web.socket
 
 Logs Command
 ------------
@@ -85,23 +85,23 @@ The ``logs`` command is one of the most frequently used app subcommands. It prov
 .. code-block:: bash
 
    # Show logs for all services
-   fj logs
+   fa logs
 
    # Show logs for specific process
-   fj logs web
+   fa logs web
 
    # Show logs for specific unit
-   fj logs web.service
+   fa logs web.service
 
 **Follow logs in real-time**
 
 .. code-block:: bash
 
    # Follow logs (like tail -f)
-   fj logs -f
+   fa logs -f
 
    # Follow logs for specific process
-   fj logs -f web
+   fa logs -f web
 
 **Control log output**
 

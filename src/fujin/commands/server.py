@@ -56,7 +56,7 @@ class Server(BaseCommand):
                 conn.run(
                     "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool update-shell"
                 )
-            conn.run("uv tool install fastfetch-bin-edge")
+            conn.run("uv tool install fastfetch-bin")
 
             self.output.info("Setting up fujin group...")
             conn.run("sudo groupadd -f fujin", pty=True)
