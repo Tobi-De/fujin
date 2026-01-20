@@ -139,7 +139,7 @@ Fujin uses a multi-user security model with three components:
    - Non-privileged user created per-application
    - Cannot modify application code or ``.venv``
    - Can write to database files and logs within app directory
-   - Used automatically for ``fujin exec --appenv`` and ``fujin app`` commands
+   - Used automatically for ``fujin server exec --appenv`` and ``fujin app`` commands
 
 The ``.install/`` subdirectory isolates deployment infrastructure from application runtime data. This means:
 
@@ -151,7 +151,7 @@ The ``.install/`` subdirectory isolates deployment infrastructure from applicati
 
    **Running Commands as App User**
 
-   When you use ``fujin exec --appenv`` or ``fujin app exec``, commands automatically run as the app user (not the deploy user). This ensures commands can write to app-owned files like databases, logs, and uploads.
+   When you use ``fujin server exec --appenv`` or ``fujin app exec``, commands automatically run as the app user (not the deploy user). This ensures commands can write to app-owned files like databases, logs, and uploads.
 
    For example, Django's ``createsuperuser`` command needs to write to ``db.sqlite3`` (owned by ``bookstore:bookstore``). Running it as the deploy user would fail with permission errors. Fujin handles this automatically:
 
@@ -159,11 +159,11 @@ The ``.install/`` subdirectory isolates deployment infrastructure from applicati
 
       # These commands run as the app user
       fujin app shell                    # Opens shell as 'bookstore'
-      fujin exec --appenv python         # Runs Python as 'bookstore'
-      fujin exec --app migrate           # Runs Django migration as 'bookstore'
+      fujin server exec --appenv python  # Runs Python as 'bookstore'
+      fujin app exec migrate             # Runs Django migration as 'bookstore'
 
       # Plain server commands still run as deploy user
-      fujin exec ls -la                  # Runs as 'tobi' (deploy user)
+      fujin server exec ls -la           # Runs as 'tobi' (deploy user)
 
    **Inside the shell**: The ``.appenv`` file contains a wrapper function that automatically runs the app binary (e.g., ``bookstore``) as the app user. This means when you're in ``fujin app shell``, you can simply type ``bookstore migrate`` and it will work correctly without manual ``sudo``.
 

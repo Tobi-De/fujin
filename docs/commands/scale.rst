@@ -1,12 +1,12 @@
 scale
 =====
 
-The ``fujin scale`` command adjusts the number of replicas for a service.
+The ``fujin app scale`` command adjusts the number of replicas for a service.
 
 Overview
 --------
 
-When you need multiple instances of a service (e.g., multiple worker processes), use the ``scale`` command to convert between single-instance and template-based systemd units.
+When you need multiple instances of a service (e.g., multiple worker processes), use the ``app scale`` command to convert between single-instance and template-based systemd units.
 
 Usage
 -----
@@ -16,7 +16,7 @@ Scale to multiple replicas
 
 .. code-block:: bash
 
-   fujin scale worker 3
+   fujin app scale worker 3
 
 This:
 
@@ -33,7 +33,7 @@ Scale back to single instance
 
 .. code-block:: bash
 
-   fujin scale worker 1
+   fujin app scale worker 1
 
 This:
 
@@ -87,7 +87,7 @@ Example
    # .fujin/systemd/worker.service
 
    # Scale to 4 workers
-   fujin scale worker 4
+   fujin app scale worker 4
 
    # Deploy
    fujin deploy

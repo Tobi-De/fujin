@@ -81,7 +81,7 @@ class Init(BaseCommand):
             "requirements": "requirements.txt",
             "installation_mode": InstallationMode.PY_PACKAGE,
             "aliases": {
-                "shell": "exec --appenv bash",
+                "shell": "server exec --appenv bash",
                 "status": "app info",
                 "logs": "app logs",
                 "restart": "app restart",

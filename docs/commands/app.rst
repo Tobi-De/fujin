@@ -214,7 +214,7 @@ Open an interactive shell on the server in your app's directory.
 
    **Runs as app user**: The shell runs as the app user (e.g., ``bookstore``), not the deploy user. This gives you write access to app-owned files like databases, logs, and uploads.
 
-   This is equivalent to: ``fujin exec --appenv bash``
+   This is equivalent to: ``fujin server exec --appenv bash``
 
    **App binary wrapper**: Inside the shell, the app binary command (e.g., ``bookstore``) is automatically wrapped to run as the app user. This means you can simply type:
 

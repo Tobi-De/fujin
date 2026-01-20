@@ -327,9 +327,9 @@ Edit ``fujin.toml``:
 
    # Convenient aliases
    [aliases]
-   console = "exec -i shell"
-   shell = "exec --appenv -i bash"
-   migrate = "exec migrate"
+   console = "app exec shell"
+   shell = "server exec --appenv bash"
+   migrate = "app exec migrate"
    logs-web = "app logs web"
    logs-worker = "app logs worker"
 
@@ -544,7 +544,7 @@ Test Health Check
 .. code-block:: bash
 
    # Run health check manually
-   fujin exec healthcheck -H production
+   fujin app exec healthcheck -H production
 
    # View healthcheck timer logs
    fujin app logs healthcheck.timer -H production
@@ -621,7 +621,7 @@ Recommended Workflow
    .. code-block:: bash
 
       # Run tests
-      fujin exec "pytest" -H staging
+      fujin server exec "pytest" -H staging
 
       # Check logs
       fujin app logs -H staging
@@ -729,7 +729,7 @@ Application Won't Start
    fujin show env -H production
 
    # Test manually
-   fujin exec --appenv ".venv/bin/gunicorn config.wsgi:application" -H production
+   fujin server exec --appenv ".venv/bin/gunicorn config.wsgi:application" -H production
 
 Static Files Not Loading
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -737,13 +737,13 @@ Static Files Not Loading
 .. code-block:: bash
 
    # Check if files exist
-   fujin exec --appenv "ls -la /var/www/bookstore/static/" -H production
+   fujin server exec --appenv "ls -la /var/www/bookstore/static/" -H production
 
    # Check permissions
-   fujin exec --appenv "ls -ld /var/www/bookstore" -H production
+   fujin server exec --appenv "ls -ld /var/www/bookstore" -H production
 
    # Re-collect static files
-   fujin exec collectstatic -H production
+   fujin app exec collectstatic -H production
 
    # Check Caddy config
    fujin show caddy -H production
@@ -754,7 +754,7 @@ Database Connection Issues
 .. code-block:: bash
 
    # Test database connection
-   fujin exec --appenv "psql -h localhost -U bookstore -d bookstore -c 'SELECT 1;'" -H production
+   fujin server exec --appenv "psql -h localhost -U bookstore -d bookstore -c 'SELECT 1;'" -H production
 
    # Check database is running
    ssh deploy@example.com sudo systemctl status postgresql
@@ -774,7 +774,7 @@ Workers Not Processing Tasks
    ssh deploy@example.com sudo systemctl status redis
 
    # Test Celery connection
-   fujin exec "celery -A config inspect ping" -H production
+   fujin server exec "celery -A config inspect ping" -H production
 
    # Restart workers
    fujin app restart worker -H production
@@ -952,11 +952,11 @@ Here's the complete ``fujin.toml`` with all features:
 
    # Convenient command aliases
    [aliases]
-   console = "exec -i shell"
-   dbconsole = "exec -i dbshell"
-   shell = "exec --appenv -i bash"
-   migrate = "exec migrate"
-   makemigrations = "exec makemigrations"
+   console = "app exec shell"
+   dbconsole = "app exec dbshell"
+   shell = "server exec --appenv bash"
+   migrate = "app exec migrate"
+   makemigrations = "app exec makemigrations"
    logs-web = "app logs web"
    logs-worker = "app logs worker"
    logs-beat = "app logs beat"

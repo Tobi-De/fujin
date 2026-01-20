@@ -353,9 +353,9 @@ Example:
     :caption: fujin.toml
 
     [aliases]
-    console = "app exec -i shell_plus" # open an interactive django shell
-    dbconsole = "app exec -i dbshell" # open an interactive django database shell
-    shell = "exec --appenv bash" # SSH into the project directory with environment variables loaded
+    console = "app exec shell_plus" # open an interactive django shell
+    dbconsole = "app exec dbshell" # open an interactive django database shell
+    shell = "server exec --appenv bash" # SSH into the project directory with environment variables loaded
 
 
 Complete Example
@@ -373,7 +373,7 @@ This is a minimal working example for a Python web application:
     installation_mode = "python-package"
 
     [aliases]
-    shell = "exec --appenv bash"
+    shell = "server exec --appenv bash"
     status = "app info"
     logs = "app logs"
     restart = "app restart"

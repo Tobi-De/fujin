@@ -5,22 +5,16 @@ from __future__ import annotations
 
 import pytest
 
-from fujin.commands.scale import Scale
+from fujin.commands.app import App
 from fujin.config import tomllib
-
-
-@pytest.fixture
-def scale_command(mock_output):
-    """Fixture to create Scale command instance with mocked output."""
-    return Scale(service="worker", count=1)
 
 
 def test_scale_zero_raises_error(mock_output):
     """Scaling to 0 raises error."""
-    scale = Scale(service="worker", count=0)
+    app = App()
 
     with pytest.raises(SystemExit) as exc:
-        scale()
+        app.scale(service="worker", count=0)
 
     assert exc.value.code == 1
     mock_output.error.assert_called()
@@ -29,10 +23,10 @@ def test_scale_zero_raises_error(mock_output):
 
 def test_scale_negative_raises_error(mock_output):
     """Scaling to negative number raises error."""
-    scale = Scale(service="worker", count=-1)
+    app = App()
 
     with pytest.raises(SystemExit) as exc:
-        scale()
+        app.scale(service="worker", count=-1)
 
     assert exc.value.code == 1
     mock_output.error.assert_called_with("Replica count must be 1 or greater")
@@ -57,10 +51,10 @@ address = "example.com"
 user = "deploy"
 """)
 
-    scale = Scale(service="worker", count=2)
+    app = App()
 
     with pytest.raises(SystemExit) as exc:
-        scale()
+        app.scale(service="worker", count=2)
 
     assert exc.value.code == 1
     mock_output.error.assert_called()
@@ -87,10 +81,10 @@ address = "example.com"
 user = "deploy"
 """)
 
-    scale = Scale(service="worker", count=2)
+    app = App()
 
     with pytest.raises(SystemExit) as exc:
-        scale()
+        app.scale(service="worker", count=2)
 
     assert exc.value.code == 1
     mock_output.error.assert_called()
@@ -127,8 +121,8 @@ user = "deploy"
 worker = 3
 """)
 
-    scale = Scale(service="worker", count=1)
-    scale()
+    app = App()
+    app.scale(service="worker", count=1)
 
     # Check conversion
     assert not template_file.exists()
@@ -176,8 +170,8 @@ address = "example.com"
 user = "deploy"
 """)
 
-    scale = Scale(service="worker", count=3)
-    scale()
+    app = App()
+    app.scale(service="worker", count=3)
 
     # Check conversion
     assert not regular_file.exists()
@@ -223,8 +217,8 @@ address = "example.com"
 user = "deploy"
 """)
 
-    scale = Scale(service="web", count=2)
-    scale()
+    app = App()
+    app.scale(service="web", count=2)
 
     mock_output.warning.assert_called()
     assert (
@@ -264,8 +258,8 @@ worker = 2
 """)
 
     # Scale from 2 to 4
-    scale = Scale(service="worker", count=4)
-    scale()
+    app = App()
+    app.scale(service="worker", count=4)
 
     # Should have called server to start instances 3 and 4
     mock_connection.run.assert_called()
@@ -311,8 +305,8 @@ worker = 5
 """)
 
     # Scale from 5 to 2
-    scale = Scale(service="worker", count=2)
-    scale()
+    app = App()
+    app.scale(service="worker", count=2)
 
     # Should have called server to stop instances 3, 4, and 5
     mock_connection.run.assert_called()
