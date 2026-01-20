@@ -69,7 +69,7 @@ Simple Profile
    installation_mode = "python-package"
 
    [aliases]
-   shell = "exec --appenv bash"
+   shell = "server exec --appenv bash"
    status = "app info"
    logs = "app logs"
    restart = "app restart"

@@ -11,13 +11,11 @@ from fujin.commands.app import App
 from fujin.commands.audit import Audit
 from fujin.commands.deploy import Deploy
 from fujin.commands.down import Down
-from fujin.commands.exec import Exec
 from fujin.commands.init import Init
 from fujin.commands.migrate import Migrate
 from fujin.commands.new import New
 from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
-from fujin.commands.scale import Scale
 from fujin.commands.server import Server
 from fujin.commands.up import Up
 
@@ -50,12 +48,10 @@ class Fujin:
         | Server
         | Migrate
         | Audit
-        | Exec
         | Down
         | Rollback
         | Prune
         | New
-        | Scale
     ]
     verbose: Annotated[
         int,

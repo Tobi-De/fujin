@@ -7,9 +7,9 @@ distfile = "./../../../dist/bookstore-{version}-py3-none-any.whl"
 installation_mode = "python-package"
 
 [aliases]
-console = "app exec -i shell"
-dbconsole = "app exec -i dbshell"
-shell = "server exec --appenv -i bash"
+console = "app exec shell"
+dbconsole = "app exec dbshell"
+shell = "server exec --appenv bash"
 
 [[hosts]]
 name = "default"

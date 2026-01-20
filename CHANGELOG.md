@@ -11,6 +11,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Scale now run apply to the server
 - Add caddy to user group during deployment
 
+### 🚜 Refactor
+
+- Split back exec to app exec and server exec
+
 ## [0.18.0] - 2026-01-18
 
 ### 🚀 Features

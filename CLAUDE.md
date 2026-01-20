@@ -158,13 +158,11 @@ All commands inherit from `BaseCommand` which provides `config`, `output`, and `
 - `deploy`: Build → create zipapp → upload → execute installer (the core deployment workflow)
 - `up`: Alias for `server bootstrap`
 - `rollback`: Roll back to previous version using stored `.pyz` bundles
-- `app`: Manage application (status, start/stop/restart, logs, shell, cat)
-- `server`: Server-level operations (bootstrap, create-user, setup-ssh, status)
-- `exec`: Execute commands on server (with `--app` or `--appenv` flags)
+- `app`: Manage application (status, start/stop/restart, logs, shell, exec, scale)
+- `server`: Server-level operations (bootstrap, create-user, setup-ssh, status, exec)
 - `down`: Tear down project (stop services, remove files, delete app user)
 - `prune`: Remove old version bundles (keeps N versions based on config)
 - `new`: Create new systemd service, timer, or dropin files
-- `scale`: Scale a service to run multiple replicas
 - `migrate`: Migrate old fujin.toml format to file-based structure
 - `audit`: View deployment audit log
 
@@ -366,7 +364,7 @@ Fujin supports command aliases defined in `fujin.toml`:
 
 ```toml
 [aliases]
-shell = "exec --appenv bash"
+shell = "server exec --appenv bash"
 logs = "app logs"
 ```
 

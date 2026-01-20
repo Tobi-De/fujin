@@ -371,7 +371,7 @@ Static files not loading (404 errors)
    .. code-block:: bash
 
       # Run collectstatic
-      fujin exec collectstatic --no-input
+      fujin app exec collectstatic --no-input
 
       # Or redeploy (release_command should collect)
       fujin deploy
@@ -463,7 +463,7 @@ Celery workers not processing tasks
    fujin app logs worker
 
    # Test Celery connection
-   fujin exec "celery -A yourapp inspect ping"
+   fujin server exec "celery -A yourapp inspect ping"
 
 **Solutions:**
 

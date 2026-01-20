@@ -1,8 +1,8 @@
-from __future__ import annotations
-
+import shlex
 import shutil
 import secrets
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
@@ -19,6 +19,7 @@ from fujin.errors import SSHKeyError
 @cappa.command(
     help="Manage server operations",
 )
+@dataclass
 class Server(BaseCommand):
     """
     Examples:
@@ -222,3 +223,24 @@ class Server(BaseCommand):
         self.output.output("")
         self.output.success("SSH setup completed successfully!")
         self.output.info(f"You can now connect to {username}@{ip} without a password.")
+
+    @cappa.command(help="Execute command on the server")
+    def exec(
+        self,
+        command: Annotated[str, cappa.Arg(help="Command to execute")],
+        appenv: Annotated[
+            bool,
+            cappa.Arg(
+                long="--appenv",
+                help="Change to app directory and enable app environment",
+            ),
+        ] = field(default=False, kw_only=True),
+    ):
+        with self.connection() as conn:
+            if not appenv:
+                return conn.run(command, pty=True)
+            cmd = f"cd {self.config.app_dir} && source .install/.appenv && {command}"
+            conn.run(
+                f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
+                pty=True,
+            )
