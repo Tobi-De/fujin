@@ -367,6 +367,7 @@ export -f {config.app_name}
         log("Configuring Caddy...")
         caddy_config_dir = Path(config.caddy_config_path).parent
         run(f"sudo mkdir -p {caddy_config_dir}")
+        run(f"sudo usermod -aG {config.app_user} caddy", check=False)
 
         caddyfile_path = bundle_dir / "Caddyfile"
         if caddyfile_path.exists():
@@ -384,10 +385,7 @@ export -f {config.app_name}
                     f"sudo systemctl reload caddy"
                 )
             else:
-                print(
-                    "Caddyfile validation failed, leaving local Caddyfile for inspection",
-                    file=sys.stderr,
-                )
+                print("Caddyfile validation failed", file=sys.stderr)
 
     log("Install completed successfully.")
 
@@ -447,9 +445,8 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
 
         # Force kill any stubborn processes
         run(f"sudo pkill -9 -u {config.app_user}", check=False)
-
-        # Now delete the user
         run(f"sudo userdel {config.app_user}", check=False)
+        run(f"sudo groupdel {config.app_user}", check=False)
     else:
         print(f"User {config.app_user} does not exist, skipping deletion")
 

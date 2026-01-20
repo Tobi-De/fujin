@@ -312,13 +312,33 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/fujin/{app_name}
+UMask=0002  # Create files/sockets as group-writable
 ```
+
+### Permission Model
+
+**App Services:**
+- Run as `{app_user}:{app_user}` (defaults to `{app_name}`)
+- RuntimeDirectory (`/run/{app_name}/`) created with mode `0755`
+- `UMask=0002` ensures sockets/files are group-writable (e.g., `0775` for sockets)
+
+**Caddy Integration:**
+- Caddy runs as `caddy:caddy`
+- During deployment, `caddy` user is added to `{app_user}` group
+- This allows Caddy to connect to Unix sockets in `/run/{app_name}/`
+- Command: `sudo usermod -aG {app_user} caddy` (non-fatal if caddy user doesn't exist)
+
+**File Ownership:**
+- `/opt/fujin/{app_name}`: owned by `{deploy_user}:{app_user}`, mode `775`
+- `.install/` directory: owned by `{deploy_user}:{app_user}`, mode `775`
+- `.install/.env`: mode `640` (readable by group, not world)
 
 ### Why These Settings?
 
 - `ProtectHome=true`: Home directories inaccessible (safe since apps are in /opt)
 - `ProtectSystem=strict`: Most of filesystem read-only
 - `ReadWritePaths`: Grant write access to app directory for logs, database, etc.
+- `UMask=0002`: Sockets/files group-writable so Caddy (in app group) can access them
 
 ### Debugging Permission Issues
 
