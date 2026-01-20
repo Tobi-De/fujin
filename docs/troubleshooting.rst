@@ -326,9 +326,26 @@ Web Server Issues
 
 3. **Permissions on socket:**
 
+   Fujin automatically handles socket permissions by:
+   
+   - Adding ``UMask=0002`` to service files (makes sockets group-writable)
+   - Adding the ``caddy`` user to your app's group during deployment
+
+   If you're experiencing permission issues:
+
    .. code-block:: bash
 
-      ssh user@server chmod 666 /run/yourapp/yourapp.sock
+      # Verify caddy is in the app group
+      ssh user@server groups caddy
+      # Should show: caddy : caddy {app_name}
+
+      # If missing, add it manually
+      ssh user@server sudo usermod -aG {app_name} caddy
+      ssh user@server sudo systemctl restart caddy
+
+      # Check socket permissions
+      ssh user@server ls -la /run/{app_name}/
+      # Socket should be: srwxrwxr-x (group-writable)
 
 Static files not loading (404 errors)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

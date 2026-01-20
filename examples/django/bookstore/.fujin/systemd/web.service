@@ -16,6 +16,8 @@ WorkingDirectory={app_dir}
 EnvironmentFile={install_dir}/.env
 RuntimeDirectory={app_name}
 RuntimeDirectoryMode=0755
+# Create sockets/files as group-writable so Caddy can access them
+UMask=0002
 
 # PermissionsStartOnly=true
 ExecStartPre={install_dir}/.venv/bin/bookstore collectstatic --no-input
