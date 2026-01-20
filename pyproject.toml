@@ -46,7 +46,7 @@ urls.Documentation = "https://github.com/Tobi-De/fujin#readme"
 urls.Issues = "https://github.com/Tobi-De/fujin/issues"
 urls.Source = "https://github.com/Tobi-De/fujin"
 
-scripts.fj = "fujin.fj:main"
+scripts.fa = "fujin.fa:main"
 scripts.fujin = "fujin.__main__:main"
 
 [dependency-groups]

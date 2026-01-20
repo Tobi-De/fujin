@@ -9,7 +9,7 @@ from fujin.commands.app import App
 
 
 def main():
-    """Entry point for 'fj' command - shortcut to 'fujin app' subcommands."""
+    """Entry point for 'fa' command - shortcut to 'fujin app' subcommands."""
     cappa.invoke(App, version=fujin.__version__)
 
 
