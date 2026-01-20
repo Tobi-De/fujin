@@ -39,32 +39,29 @@ class Scale(BaseCommand):
             raise cappa.Exit(code=1)
 
         systemd_dir = Path(".fujin/systemd")
-        if not systemd_dir.exists():
-            self.output.error(
-                f"{systemd_dir}/ not found. Use 'fujin new service' to create services first."
-            )
-            raise cappa.Exit(code=1)
+        deployed_unit = None
+        for unit in self.config.deployed_units:
+            if unit.service_name == self.service:
+                deployed_unit = unit
+                break
 
-        # Check for both regular and template service files
-        regular_service = systemd_dir / f"{self.service}.service"
-        template_service = systemd_dir / f"{self.service}@.service"
-        socket_file = systemd_dir / f"{self.service}.socket"
-
-        # Determine current state
-        has_regular = regular_service.exists()
-        has_template = template_service.exists()
-
-        if not has_regular and not has_template:
+        if not deployed_unit:
             self.output.error(
                 f"Service '{self.service}' not found in {systemd_dir}/\n"
                 f"Use 'fujin new service {self.service}' to create it first."
             )
             raise cappa.Exit(code=1)
 
-        elif self.count == 1:
+        old_replica_count = deployed_unit.replica_count
+        old_is_template = deployed_unit.is_template
+        needs_conversion = False
+
+        if self.count == 1:
             # Scale to 1 - convert template to regular or keep regular
-            if has_template:
+            if deployed_unit.is_template:
                 # Convert template to regular
+                template_service = systemd_dir / f"{self.service}@.service"
+                regular_service = systemd_dir / f"{self.service}.service"
                 content = template_service.read_text()
                 # Remove %i, %I template specifiers (basic conversion)
                 content = content.replace("%i", "").replace("%I", "")
@@ -73,18 +70,19 @@ class Scale(BaseCommand):
                 self.output.success(
                     f"Converted {template_service.name} → {regular_service.name}"
                 )
+                needs_conversion = True
             else:
                 self.output.info(
                     f"{self.service} already configured for single instance"
                 )
-
-            # Remove replica config from fujin.toml
             self._update_replicas_config(self.service, None)
 
         else:
             # Scale to 2+ - convert to template or update
-            if has_regular:
+            if not deployed_unit.is_template:
                 # Convert regular to template
+                regular_service = systemd_dir / f"{self.service}.service"
+                template_service = systemd_dir / f"{self.service}@.service"
                 content = regular_service.read_text()
                 # Add %i to Description if it contains the service name
                 if f"{{{{app_name}}}} {self.service}" in content:
@@ -97,13 +95,14 @@ class Scale(BaseCommand):
                 self.output.success(
                     f"Converted {regular_service.name} → {template_service.name}"
                 )
+                needs_conversion = True
             else:
                 self.output.info(f"{self.service} already configured as template")
 
-            if socket_file.exists():
+            if deployed_unit.socket_file:
                 self.output.warning(
                     f"\n[bold]Warning: Scaling a socket-activated service is not recommended.[/bold]\n\n"
-                    f"Socket file {socket_file.name} found. Sockets don't scale well because:\n"
+                    f"Socket file {deployed_unit.socket_file.name} found. Sockets don't scale well because:\n"
                     f"  - Only one socket exists for all replicas\n"
                     f"  - Socket activation happens per-connection, not per-replica\n"
                     f"  - Your web server likely has built-in concurrency/worker settings\n\n"
@@ -112,11 +111,59 @@ class Scale(BaseCommand):
                     f"  - Uvicorn: --workers N\n"
                     f"  - Other servers: check their concurrency/worker documentation\n"
                 )
-
-            # Update replica config in fujin.toml
             self._update_replicas_config(self.service, self.count)
 
-        self.output.info(f"\nNext steps:\n  1. Deploy: fujin deploy")
+        # Only scale on server if:
+        # 1. No conversion needed (service was already a template)
+        # 2. Count changed
+        if needs_conversion:
+            self.output.info(
+                f"\nNext steps:\n  1. Deploy to apply changes: fujin deploy"
+            )
+        elif old_replica_count != self.count and old_is_template:
+            self._scale_on_server(old_replica_count, self.count)
+        elif old_replica_count == self.count:
+            self.output.info(f"\nService already at {self.count} replica(s)")
+
+    def _scale_on_server(self, old_count: int, new_count: int):
+        with self.connection() as conn:
+            app_name = self.config.app_name
+
+            if new_count > old_count:
+                # Scaling up - start new instances
+                self.output.info(
+                    f"Scaling up {self.service} from {old_count} to {new_count} instances..."
+                )
+                new_instances = [
+                    f"{app_name}-{self.service}@{i}.service"
+                    for i in range(old_count + 1, new_count + 1)
+                ]
+                instances_str = " ".join(new_instances)
+                _, success = conn.run(
+                    f"sudo systemctl start {instances_str} && sudo systemctl enable {instances_str}"
+                )
+                if success:
+                    self.output.success(f"Started {len(new_instances)} new instance(s)")
+                else:
+                    self.output.error(f"Failed to start new instances")
+
+            elif new_count < old_count:
+                # Scaling down - stop old instances
+                self.output.info(
+                    f"Scaling down {self.service} from {old_count} to {new_count} instances..."
+                )
+                removed_instances = [
+                    f"{app_name}-{self.service}@{i}.service"
+                    for i in range(new_count + 1, old_count + 1)
+                ]
+                instances_str = " ".join(removed_instances)
+                _, success = conn.run(
+                    f"sudo systemctl stop {instances_str} && sudo systemctl disable {instances_str}"
+                )
+                if success:
+                    self.output.success(f"Stopped {len(removed_instances)} instance(s)")
+                else:
+                    self.output.error(f"Failed to stop instances")
 
     def _update_replicas_config(self, service_name: str, count: int | None):
         fujin_toml = Path("fujin.toml")
