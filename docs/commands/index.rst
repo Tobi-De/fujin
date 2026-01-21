@@ -26,13 +26,9 @@ Quick Reference
    * - :doc:`deploy`
      - Deploy your application to the server
    * - :doc:`app`
-     - Manage your application (start, stop, logs, etc.)
+     - Manage your application (status, logs, exec, scale, start/stop, shell, etc.)
    * - :doc:`server`
-     - Manage server operations (bootstrap, user creation, status)
-   * - :doc:`exec`
-     - Execute arbitrary commands on the server
-   * - :doc:`scale`
-     - Scale services by adjusting replica count
+     - Manage server operations (bootstrap, exec, status, user management)
    * - :doc:`rollback`
      - Roll back application to a previous version
    * - :doc:`down`
@@ -54,8 +50,6 @@ Quick Reference
    deploy
    app
    server
-   exec
-   scale
    rollback
    down
    prune

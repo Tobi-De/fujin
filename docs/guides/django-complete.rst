@@ -495,7 +495,7 @@ Deploy to Staging
    fujin app logs web -H staging
 
    # Check status
-   fujin app info -H staging
+   fujin app status -H staging
 
 Visit ``https://staging.example.com`` - you should see your Django app!
 
@@ -510,7 +510,7 @@ After testing on staging:
    fujin up -H production
 
    # Verify
-   fujin app info -H production
+   fujin app status -H production
 
 Visit ``https://example.com``
 
@@ -523,7 +523,7 @@ Check Services
 .. code-block:: bash
 
    # Check all services
-   fujin app info -H production
+   fujin app status -H production
 
    # Check specific service logs
    fujin app logs web -H production
@@ -720,7 +720,7 @@ Application Won't Start
 .. code-block:: bash
 
    # Check service status
-   fujin app info -H production
+   fujin app status -H production
 
    # View logs
    fujin app logs web -H production

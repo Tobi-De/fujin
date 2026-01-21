@@ -16,17 +16,18 @@ Use ``fujin server`` to manage server-level operations:
 - Bootstrap server with required dependencies
 - Create deployment users
 - Set up SSH keys
+- Execute commands on the server with optional app environment
 
 Subcommands
 -----------
 
-info
-~~~~
+status
+~~~~~~
 
 Display system information about the host.
 
-.. image:: ../_static/images/help/server-info-help.png
-   :alt: fujin server info command help
+.. image:: ../_static/images/help/server-status-help.png
+   :alt: fujin server status command help
    :width: 80%
 
 Shows OS version, CPU, memory, and other system details using fastfetch when available.
@@ -35,7 +36,7 @@ Shows OS version, CPU, memory, and other system details using fastfetch when ava
 
 .. code-block:: bash
 
-   $ fujin server info
+   $ fujin server status
 
 bootstrap
 ~~~~~~~~~
@@ -145,11 +146,101 @@ Common Workflows
 
 .. code-block:: bash
 
-   fujin server info
+   fujin server status
+
+exec
+~~~~
+
+Execute commands on the server, with optional app environment.
+
+**Usage:**
+
+.. code-block:: bash
+
+   fujin server exec [--appenv] COMMAND [ARGS...]
+
+**Options:**
+
+``--appenv``
+   Change to app directory and load environment from ``.appenv`` file. Runs as app user.
+
+``-H, --host HOST``
+   Target a specific host in multi-host setups.
+
+**Plain Server Command (default):**
+
+Run any command on the server as the deploy user:
+
+.. code-block:: bash
+
+   # Check disk space
+   fujin server exec df -h
+
+   # View processes
+   fujin server exec ps aux
+
+   # Any server command
+   fujin server exec ls -la /var/log
+
+**With App Environment (--appenv):**
+
+Run commands in your app directory with environment variables loaded as the app user:
+
+.. code-block:: bash
+
+   # Run Python script with app environment
+   fujin server exec --appenv python script.py
+
+   # Access database with credentials from .env
+   fujin server exec --appenv psql -U \$DB_USER -d \$DB_NAME
+
+   # Start interactive bash in app directory
+   fujin server exec --appenv bash
+
+This is equivalent to:
+
+.. code-block:: bash
+
+   cd /path/to/app && source .appenv && your-command
+
+.. important::
+
+   **User Context:** Commands run with different permissions depending on the flag:
+   
+   - **Without --appenv**: Run as the deploy user
+   - **With --appenv**: Run as the app user (can write to app-owned files)
+
+**Common patterns with aliases:**
+
+Create shortcuts in ``fujin.toml``:
+
+.. code-block:: toml
+
+   [aliases]
+   bash = "server exec --appenv bash"
+   logs = "server exec tail -f /var/log/syslog"
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Database operations with environment
+   fujin server exec --appenv 'psql -U $DB_USER -d $DB_NAME'
+
+   # Export database
+   fujin server exec --appenv 'pg_dump $DB_NAME' > backup.sql
+
+   # Check disk space on production
+   fujin server exec df -h -H production
+
+   # Run maintenance script
+   fujin server exec --appenv python healthcheck.py
 
 See Also
 --------
 
+- :doc:`app` - Application management and ``app exec`` command
 - :doc:`up` - One-command server setup and deployment
+- :doc:`deploy` - Deployment workflow and permission model
 - :doc:`../howtos/index` - Setup guides
 - :doc:`../configuration` - Host configuration reference

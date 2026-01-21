@@ -15,7 +15,7 @@ When something goes wrong, start with these:
 .. code-block:: bash
 
    # Check service status
-   fujin app info
+   fujin app status
 
    # View recent logs
    fujin app logs
@@ -152,7 +152,7 @@ Services fail to start after deployment
 .. code-block:: bash
 
    # Check status
-   fujin app info
+   fujin app status
 
    # View logs
    fujin app logs web
@@ -297,7 +297,7 @@ Web Server Issues
 .. code-block:: bash
 
    # Check if application is running
-   fujin app info
+   fujin app status
 
    # Check Caddy logs
    ssh user@server sudo journalctl -u caddy -n 50
@@ -457,7 +457,7 @@ Celery workers not processing tasks
 .. code-block:: bash
 
    # Check worker status
-   fujin app info | grep worker
+   fujin app status | grep worker
 
    # Check worker logs
    fujin app logs worker
@@ -513,7 +513,7 @@ Beat scheduler not running tasks
 
    .. code-block:: bash
 
-      fujin app info | grep beat
+      fujin app status | grep beat
 
 2. **Check beat schedule:**
 

@@ -61,6 +61,72 @@ download-pocketbase:
 @docs-requirements:
     uv export --no-hashes --group docs --format requirements-txt > docs/requirements.txt
 
+# Generate help screenshots for documentation (requires: cargo install termshot)
+@docs-screenshots:
+    #!/usr/bin/env bash
+    set -e
+    OUTPUT_DIR="docs/_static/images/help"
+    mkdir -p "$OUTPUT_DIR"
+    echo "Generating help screenshots for fujin documentation..."
+    echo ""
+    # Check if termshot is installed
+    if ! command -v termshot &> /dev/null; then
+        echo "❌ Error: termshot is not installed"
+        echo ""
+        echo "Install with: cargo install termshot"
+        exit 1
+    fi
+    # Function to generate screenshot
+    generate_screenshot() {
+        local name="$1"
+        local command="$2"
+        local output="$OUTPUT_DIR/${name}.png"
+        echo "📸 Generating ${name}.png..."
+        termshot --no-decoration --no-shadow --filename "$output" -- "uv run $command"
+        echo "   ✓ Saved to $output"
+    }
+    # Main command
+    generate_screenshot "fujin-help" "fujin --help"
+    # Primary commands
+    generate_screenshot "init-help" "fujin init --help"
+    generate_screenshot "new-help" "fujin new --help"
+    generate_screenshot "up-help" "fujin up --help"
+    generate_screenshot "deploy-help" "fujin deploy --help"
+    generate_screenshot "down-help" "fujin down --help"
+    generate_screenshot "rollback-help" "fujin rollback --help"
+    generate_screenshot "prune-help" "fujin prune --help"
+    generate_screenshot "migrate-help" "fujin migrate --help"
+    generate_screenshot "audit-help" "fujin audit --help"
+    # App command and subcommands
+    generate_screenshot "app-help" "fujin app --help"
+    generate_screenshot "app-status-help" "fujin app status --help"
+    generate_screenshot "app-start-help" "fujin app start --help"
+    generate_screenshot "app-stop-help" "fujin app stop --help"
+    generate_screenshot "app-restart-help" "fujin app restart --help"
+    generate_screenshot "app-logs-help" "fujin app logs --help"
+    generate_screenshot "app-shell-help" "fujin app shell --help"
+    generate_screenshot "app-cat-help" "fujin app cat --help"
+    generate_screenshot "app-exec-help" "fujin app exec --help"
+    generate_screenshot "app-scale-help" "fujin app scale --help"
+    # Server command and subcommands
+    generate_screenshot "server-help" "fujin server --help"
+    generate_screenshot "server-status-help" "fujin server status --help"
+    generate_screenshot "server-bootstrap-help" "fujin server bootstrap --help"
+    generate_screenshot "server-create-user-help" "fujin server create-user --help"
+    generate_screenshot "server-setup-ssh-help" "fujin server setup-ssh --help"
+    generate_screenshot "server-exec-help" "fujin server exec --help"
+    # Shortcut command
+    generate_screenshot "fa-help" "fa --help"
+    echo ""
+    echo "✅ All help screenshots generated successfully!"
+    echo ""
+    echo "Screenshots saved in: $OUTPUT_DIR"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Review generated images"
+    echo "  2. Verify .rst files reference correct images"
+    echo "  3. Add to git: git add $OUTPUT_DIR"
+
 @test *ARGS:
     uv run pytest --ignore=tests/integration -sv {{ ARGS }}
 
