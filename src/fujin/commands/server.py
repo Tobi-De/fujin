@@ -2,7 +2,7 @@ import shlex
 import shutil
 import secrets
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -234,7 +234,7 @@ class Server(BaseCommand):
                 long="--appenv",
                 help="Change to app directory and enable app environment",
             ),
-        ] = field(default=False, kw_only=True),
+        ] = False,
     ):
         with self.connection() as conn:
             if not appenv:
