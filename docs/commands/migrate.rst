@@ -3,6 +3,10 @@ migrate
 
 The ``fujin migrate`` command converts older Fujin configuration formats to the current file-based structure.
 
+.. image:: ../_static/images/help/migrate-help.png
+   :alt: fujin migrate command overview
+   :width: 100%
+
 Overview
 --------
 

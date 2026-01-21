@@ -3,6 +3,10 @@ new
 
 The ``fujin new`` command creates new systemd service, timer, or dropin files in your ``.fujin/systemd/`` directory.
 
+.. image:: ../_static/images/help/new-help.png
+   :alt: fujin new command overview
+   :width: 100%
+
 Overview
 --------
 

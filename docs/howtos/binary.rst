@@ -111,7 +111,7 @@ Common Operations
     fujin app logs -f
 
     # Check service status
-    fujin app info
+    fujin app status
 
 **Manage the service**
 
