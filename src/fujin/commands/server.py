@@ -102,7 +102,10 @@ class Server(BaseCommand):
 
                 def _caddy_version():
                     version, _ = conn.run("caddy version", hide=True, warn=True)
-                    return version.strip().split()[0] if version else "unknown"
+                    if not version:
+                        return "unknown"
+                    parts = version.strip().split()
+                    return parts[0] if parts else "unknown"
 
                 self.output.info("Upgrading Caddy web server...")
                 current_version = _caddy_version()
@@ -129,7 +132,12 @@ class Server(BaseCommand):
 
                 def _uv_version():
                     version, _ = conn.run("uv --version", hide=True, warn=True)
-                    return version.strip().split()[1] if version else "unknown"
+                    if not version:
+                        return "unknown"
+                    parts = version.strip().split()
+                    return (
+                        parts[1] if len(parts) > 1 else parts[0] if parts else "unknown"
+                    )
 
                 self.output.info("Upgrading uv package manager...")
                 current_version = _uv_version()
@@ -152,7 +160,9 @@ class Server(BaseCommand):
 
             if uv_installed:
                 self.output.info("Upgrading Python installations...")
-                _, success = conn.run("uv python upgrade", warn=True)
+                _, success = conn.run(
+                    "uv python upgrade --preview-features python-upgrade", warn=True
+                )
                 if success:
                     self.output.success("Python installations upgraded successfully!")
                 else:

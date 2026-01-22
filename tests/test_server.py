@@ -286,8 +286,27 @@ def test_setup_ssh_error_handling(tmp_path, monkeypatch, error_type, mock_setup)
 def test_upgrade_command_all_success(minimal_config, mock_connection):
     """Test upgrade command when all components upgrade successfully."""
     mock_conn = MagicMock()
-    # All commands succeed
-    mock_conn.run.return_value = ("v2.8.0", True)
+
+    # Mock different command outputs
+    def run_side_effect(cmd, warn=False, hide=False):
+        if "command -v caddy" in cmd:
+            return ("", True)  # Caddy installed
+        elif "command -v uv" in cmd:
+            return ("", True)  # uv installed
+        elif "caddy version" in cmd:
+            return ("v2.8.0 h1:hash", True)  # Caddy version format
+        elif "uv --version" in cmd:
+            return ("uv 0.5.0", True)  # uv version format
+        elif (
+            "apt update" in cmd
+            or "caddy upgrade" in cmd
+            or "uv self update" in cmd
+            or "uv python upgrade" in cmd
+        ):
+            return ("", True)
+        return ("", True)
+
+    mock_conn.run.side_effect = run_side_effect
 
     with (
         patch("fujin.config.Config.read", return_value=minimal_config),
@@ -316,6 +335,10 @@ def test_upgrade_command_partial_failure(minimal_config, mock_connection):
             return ("", True)  # Caddy installed
         elif "command -v uv" in cmd:
             return ("", True)  # uv installed
+        elif "caddy version" in cmd:
+            return ("v2.8.0 h1:hash", True)  # Caddy version format
+        elif "uv --version" in cmd:
+            return ("uv 0.5.0", True)  # uv version format
         elif "apt update" in cmd:
             return ("", True)  # apt succeeds
         elif "caddy upgrade" in cmd:
@@ -324,8 +347,6 @@ def test_upgrade_command_partial_failure(minimal_config, mock_connection):
             return ("", True)  # uv succeeds
         elif "uv python upgrade" in cmd:
             return ("", False)  # Python upgrade fails
-        elif "version" in cmd:
-            return ("v2.8.0", True)
         return ("", True)
 
     mock_conn.run.side_effect = run_side_effect
