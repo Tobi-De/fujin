@@ -18,6 +18,13 @@ envfile = ".env.prod"
 user = "tobi"
 
 [[hosts]]
+name = "aws"
+address = "3.111.198.242"
+envfile = ".env.prod"
+user = "ubuntu"
+key_filename = "/home/tobi/bluefin.pem"
+
+[[hosts]]
 name = "vagrant"
 address = "localhost"
 envfile = ".env.prod"

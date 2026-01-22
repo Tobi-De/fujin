@@ -41,22 +41,25 @@ class Server(BaseCommand):
     def bootstrap(self):
         with self.connection() as conn:
             self.output.info("Bootstrapping server...")
+            # Use -qq for minimal output and don't use PTY to avoid terminal control sequences
+            apt_opts = "-o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'"
             _, server_update_ok = conn.run(
-                "sudo apt update && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y && sudo apt install -y sqlite3 curl rsync",
-                pty=True,
+                f"sudo apt update -qq && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y -qq {apt_opts} && sudo apt install -y -qq {apt_opts} sqlite3 curl rsync",
                 warn=True,
             )
             if not server_update_ok:
                 self.output.warning(
                     "Warning: Failed to update and upgrade the server packages."
                 )
+            else:
+                self.output.success("Server packages updated successfully!")
             _, result_ok = conn.run("command -v uv", warn=True)
             if not result_ok:
                 self.output.info("Installing uv tool...")
                 conn.run(
                     "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool update-shell"
                 )
-            conn.run("uv tool install fastfetch-bin")
+            conn.run("uv tool install fastfetch-bin --force")
 
             self.output.info("Setting up fujin group...")
             conn.run("sudo groupadd -f fujin", pty=True)
@@ -90,9 +93,7 @@ class Server(BaseCommand):
                     conn.run(" && ".join(commands), pty=True)
 
             self.output.success("Server bootstrap completed successfully!")
-            self.output.warning(
-                "⚠️  Log out and back in for group changes to take effect"
-            )
+            self.output.warning("Log out and back in for group changes to take effect")
 
     @cappa.command(
         name="create-user", help="Create a new user with sudo and ssh access"
