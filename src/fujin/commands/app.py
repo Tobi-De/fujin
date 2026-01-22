@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -16,6 +17,7 @@ from fujin.config import tomllib
 @cappa.command(
     help="Manage your application",
 )
+@dataclass
 class App(BaseCommand):
     @cappa.command(help="Display application information and process status")
     def status(

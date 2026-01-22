@@ -1,5 +1,6 @@
 from __future__ import annotations
 from contextlib import suppress
+import re
 
 from fujin.discovery import discover_deployed_units, DeployedUnit
 import os
@@ -34,8 +35,6 @@ class SecretConfig(msgspec.Struct):
     password_env: str | None = None
 
     def __post_init__(self):
-        import re
-
         if not re.match(r"^[a-z0-9_-]+$", self.adapter):
             raise ImproperlyConfiguredError(
                 f"Invalid adapter name '{self.adapter}'. "

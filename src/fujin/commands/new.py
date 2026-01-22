@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -13,6 +14,7 @@ from fujin.templates import NEW_TIMER_TEMPLATE
 
 
 @cappa.command(help="Create new systemd service, timer, or dropin files")
+@dataclass
 class New(BaseCommand):
     """
     Examples:

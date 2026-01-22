@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Annotated
+from dataclasses import dataclass
 from datetime import datetime
 from collections import defaultdict
 
@@ -15,6 +16,7 @@ from fujin.commands import BaseCommand
 @cappa.command(
     help="View audit logs for deployment operations",
 )
+@dataclass
 class Audit(BaseCommand):
     limit: Annotated[
         int,
