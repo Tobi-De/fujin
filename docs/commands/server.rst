@@ -14,6 +14,7 @@ Use ``fujin server`` to manage server-level operations:
 
 - View server information
 - Bootstrap server with required dependencies
+- Upgrade server components (Caddy, uv, Python, system packages)
 - Create deployment users
 - Set up SSH keys
 - Execute commands on the server with optional app environment
@@ -71,6 +72,45 @@ The bootstrap process creates a shared Python directory at ``/opt/fujin/.python`
 .. note::
 
    This is automatically run as part of ``fujin up``, so you typically don't need to run it manually.
+
+upgrade
+~~~~~~~
+
+Upgrade server components to their latest versions.
+
+This command upgrades:
+
+- **System packages** - Updates all installed packages via apt (non-critical, won't stop other upgrades if it fails)
+- **Caddy web server** - Upgrades to the latest version using ``caddy upgrade``
+- **uv package manager** - Updates uv to the latest version using ``uv self update``
+- **Python installations** - Upgrades all Python versions managed by uv using ``uv python upgrade``
+
+The upgrade command shows version changes (e.g., "Caddy upgraded from v2.7.0 to v2.8.0") and gracefully skips components that aren't installed.
+
+**Example:**
+
+.. code-block:: bash
+
+   $ fujin server upgrade
+
+**Output example:**
+
+.. code-block:: console
+
+   Upgrading server components...
+   Upgrading system packages...
+   ✓ System packages upgraded successfully!
+   Upgrading Caddy web server...
+   ✓ Caddy upgraded from v2.7.0 to v2.8.0!
+   Upgrading uv package manager...
+   ✓ uv is already at the latest version (uv 0.5.0)
+   Upgrading Python installations...
+   ✓ Python installations upgraded successfully!
+   ✓ All server components upgraded successfully!
+
+.. note::
+
+   System package upgrades (apt) are non-critical - if they fail, the command will continue upgrading other components. This ensures Caddy, uv, and Python upgrades can still proceed even if system packages have issues.
 
 create-user
 ~~~~~~~~~~~
@@ -141,6 +181,16 @@ Common Workflows
 .. code-block:: bash
 
    fujin up  # Does bootstrap + deploy in one step
+
+**Keep server up to date**
+
+.. code-block:: bash
+
+   # Upgrade all server components
+   fujin server upgrade
+
+   # Target specific host
+   fujin server upgrade -H production
 
 **Check server status**
 
