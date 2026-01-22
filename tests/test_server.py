@@ -276,3 +276,104 @@ def test_setup_ssh_error_handling(tmp_path, monkeypatch, error_type, mock_setup)
             server = Server()
             with pytest.raises(SSHKeyError):
                 server.setup_ssh()
+
+
+# ============================================================================
+# Upgrade Command
+# ============================================================================
+
+
+def test_upgrade_command_all_success(minimal_config, mock_connection):
+    """Test upgrade command when all components upgrade successfully."""
+    mock_conn = MagicMock()
+    # All commands succeed
+    mock_conn.run.return_value = ("v2.8.0", True)
+
+    with (
+        patch("fujin.config.Config.read", return_value=minimal_config),
+        patch.object(
+            Server, "connection", return_value=MagicMock(__enter__=lambda x: mock_conn)
+        ),
+        patch.object(Server, "output", MagicMock()) as mock_output,
+    ):
+        server = Server()
+        server.upgrade()
+
+        # Verify success message
+        assert any(
+            "All server components upgraded successfully" in str(call)
+            for call in mock_output.success.call_args_list
+        )
+
+
+def test_upgrade_command_partial_failure(minimal_config, mock_connection):
+    """Test upgrade command when some components fail."""
+    mock_conn = MagicMock()
+
+    # Caddy and Python upgrades fail, others succeed
+    def run_side_effect(cmd, warn=False, hide=False):
+        if "command -v caddy" in cmd:
+            return ("", True)  # Caddy installed
+        elif "command -v uv" in cmd:
+            return ("", True)  # uv installed
+        elif "apt update" in cmd:
+            return ("", True)  # apt succeeds
+        elif "caddy upgrade" in cmd:
+            return ("", False)  # Caddy upgrade fails
+        elif "uv self update" in cmd:
+            return ("", True)  # uv succeeds
+        elif "uv python upgrade" in cmd:
+            return ("", False)  # Python upgrade fails
+        elif "version" in cmd:
+            return ("v2.8.0", True)
+        return ("", True)
+
+    mock_conn.run.side_effect = run_side_effect
+
+    with (
+        patch("fujin.config.Config.read", return_value=minimal_config),
+        patch.object(
+            Server, "connection", return_value=MagicMock(__enter__=lambda x: mock_conn)
+        ),
+        patch.object(Server, "output", MagicMock()) as mock_output,
+    ):
+        server = Server()
+        server.upgrade()
+
+        # Verify warning message
+        assert any(
+            "completed with some warnings" in str(call)
+            for call in mock_output.warning.call_args_list
+        )
+
+
+def test_upgrade_command_components_not_installed(minimal_config, mock_connection):
+    """Test upgrade command when components are not installed."""
+    mock_conn = MagicMock()
+
+    # Nothing installed
+    def run_side_effect(cmd, warn=False, hide=False):
+        if "command -v" in cmd:
+            return ("", False)  # Nothing installed
+        elif "apt update" in cmd:
+            return ("", True)  # apt succeeds
+        return ("", True)
+
+    mock_conn.run.side_effect = run_side_effect
+
+    with (
+        patch("fujin.config.Config.read", return_value=minimal_config),
+        patch.object(
+            Server, "connection", return_value=MagicMock(__enter__=lambda x: mock_conn)
+        ),
+        patch.object(Server, "output", MagicMock()) as mock_output,
+    ):
+        server = Server()
+        server.upgrade()
+
+        # Verify informational messages about skipping
+        assert any(
+            "not installed" in str(call) for call in mock_output.info.call_args_list
+        ) or any(
+            "not installed" in str(call) for call in mock_output.warning.call_args_list
+        )
