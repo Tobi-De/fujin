@@ -41,18 +41,8 @@ class Server(BaseCommand):
     def bootstrap(self):
         with self.connection() as conn:
             self.output.info("Bootstrapping server...")
-            # Use -qq for minimal output and don't use PTY to avoid terminal control sequences
-            apt_opts = "-o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'"
-            _, server_update_ok = conn.run(
-                f"sudo apt update -qq && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y -qq {apt_opts} && sudo apt install -y -qq {apt_opts} sqlite3 curl rsync",
-                warn=True,
-            )
-            if not server_update_ok:
-                self.output.warning(
-                    "Warning: Failed to update and upgrade the server packages."
-                )
-            else:
-                self.output.success("Server packages updated successfully!")
+
+            self._upgrade_system(conn, packages="sqlite3 curl rsync")
             _, result_ok = conn.run("command -v uv", warn=True)
             if not result_ok:
                 self.output.info("Installing uv tool...")
@@ -94,6 +84,105 @@ class Server(BaseCommand):
 
             self.output.success("Server bootstrap completed successfully!")
             self.output.warning("Log out and back in for group changes to take effect")
+
+    @cappa.command(
+        help="Upgrade server components (Caddy, uv, Python, system packages)"
+    )
+    def upgrade(self):
+        with self.connection() as conn:
+            self.output.info("Upgrading server components...")
+
+            all_success = True
+
+            self._upgrade_system(conn)
+
+            _, caddy_installed = conn.run("command -v caddy", warn=True, hide=True)
+
+            if caddy_installed:
+
+                def _caddy_version():
+                    version, _ = conn.run("caddy version", hide=True, warn=True)
+                    return version.strip().split()[0] if version else "unknown"
+
+                self.output.info("Upgrading Caddy web server...")
+                current_version = _caddy_version()
+                _, success = conn.run("sudo caddy upgrade", warn=True)
+
+                if success:
+                    new_version = _caddy_version()
+                    if current_version != new_version:
+                        self.output.success(
+                            f"Caddy upgraded from {current_version} to {new_version}!"
+                        )
+                    else:
+                        self.output.success(
+                            f"Caddy is already at the latest version ({current_version})"
+                        )
+                else:
+                    self.output.warning("Warning: Failed to upgrade Caddy.")
+                    all_success = False
+            else:
+                self.output.info("Caddy is not installed, skipping upgrade.")
+
+            _, uv_installed = conn.run("command -v uv", warn=True, hide=True)
+            if uv_installed:
+
+                def _uv_version():
+                    version, _ = conn.run("uv --version", hide=True, warn=True)
+                    return version.strip().split()[1] if version else "unknown"
+
+                self.output.info("Upgrading uv package manager...")
+                current_version = _uv_version()
+                _, success = conn.run("uv self update", warn=True)
+                if success:
+                    new_version = _uv_version()
+                    if current_version != new_version:
+                        self.output.success(
+                            f"uv upgraded from {current_version} to {new_version}!"
+                        )
+                    else:
+                        self.output.success(
+                            f"uv is already at the latest version ({current_version})"
+                        )
+                else:
+                    self.output.warning("Warning: Failed to upgrade uv.")
+                    all_success = False
+            else:
+                self.output.warning("uv is not installed, skipping upgrade.")
+
+            if uv_installed:
+                self.output.info("Upgrading Python installations...")
+                _, success = conn.run("uv python upgrade", warn=True)
+                if success:
+                    self.output.success("Python installations upgraded successfully!")
+                else:
+                    self.output.warning(
+                        "Warning: Failed to upgrade Python installations."
+                    )
+                    all_success = False
+            else:
+                self.output.warning("uv is not installed, skipping Python upgrade.")
+
+            if all_success:
+                self.output.success("All server components upgraded successfully!")
+            else:
+                self.output.warning(
+                    "Server upgrade completed with some warnings. Check messages above."
+                )
+
+    def _upgrade_system(self, conn, packages: str | None = None):
+        self.output.info("Upgrading system packages...")
+        apt_opts = (
+            "-o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'"
+        )
+        command = f"sudo apt update -qq && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y -qq {apt_opts}"
+        if packages:
+            command += f"&& sudo apt install -y -qq {apt_opts} {packages}"
+        _, success = conn.run(command, warn=True)
+        if success:
+            self.output.success("System packages upgraded successfully!")
+        else:
+            self.output.warning("Warning: Failed to upgrade system packages.")
 
     @cappa.command(
         name="create-user", help="Create a new user with sudo and ssh access"
