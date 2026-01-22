@@ -80,12 +80,6 @@ class Init(BaseCommand):
             "distfile": f"dist/{app_name}-{{version}}-py3-none-any.whl",
             "requirements": "requirements.txt",
             "installation_mode": InstallationMode.PY_PACKAGE,
-            "aliases": {
-                "shell": "server exec --appenv bash",
-                "status": "app info",
-                "logs": "app logs",
-                "restart": "app restart",
-            },
             "hosts": [
                 {
                     "user": "deploy",
@@ -195,39 +189,70 @@ class Init(BaseCommand):
     def _generate_falco(self, app_name: str, fujin_dir: Path):
         """Generate Falco profile: web + worker services."""
         systemd_dir = fujin_dir / "systemd"
-        systemd_dir.mkdir(parents=True, exist_ok=True)
+        dropin_dir = systemd_dir / "common.d"
+        dropin_dir.mkdir(parents=True, exist_ok=True)
 
-        # Web service
+        dropin = dropin_dir / "base.conf"
+        dropin.write_text(
+            f"""
+[Service]
+Type=simple
+User={{app_user}}
+WorkingDirectory={{app_dir}}
+EnvironmentFile={{install_dir}}/.env
+RuntimeDirectory={app_name}
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=5s
+
+# Security Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{app_dir}}
+        """
+        )
+
         web_service = systemd_dir / "web.service"
-        service_content = NEW_SERVICE_TEMPLATE.format(name="web")
+        web_service.write_text(
+            f"""
+[Unit]
+Description={app_name} web
+After=network.target
 
-        # Add ExecStartPre for setup
-        service_content = service_content.replace(
-            "# Main command - adjust to match your application\n",
-            f"# Run setup before starting\nExecStartPre={{install_dir}}/.venv/bin/{app_name} setup\n\n",
-        )
+[Service]
+UMask=0002
+ExecStartPre={{install_dir}}/.venv/bin/{app_name} setup
+ExecStart={{install_dir}}/.venv/bin/{app_name} prodserver --uds /run/{app_name}/web.sock
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=5
 
-        # Customize ExecStart for Falco
-        service_content = service_content.replace(
-            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{install_dir}}/.venv/bin/{app_name} prodserver",
+[Install]
+WantedBy=multi-user.target
+"""
         )
-        web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
         # Worker service
         worker_service = systemd_dir / "worker.service"
-        worker_content = NEW_SERVICE_TEMPLATE.format(name="worker")
+        worker_service.write_text(
+            f"""
+[Unit]
+Description={app_name} worker
+After=network.target
 
-        # Customize ExecStart for worker
-        worker_content = worker_content.replace(
-            "ExecStart={install_dir}/.venv/bin/python -m myapp.worker",
-            f"ExecStart={{install_dir}}/.venv/bin/{app_name} db_worker",
+[Service]
+ExecStart={{install_dir}}/.venv/bin/{app_name} db_worker
+
+[Install]
+WantedBy=multi-user.target
+"""
         )
-        worker_service.write_text(worker_content)
         self.output.success(f"  Created {worker_service}")
 
-        self._create_caddyfile(fujin_dir, app_name, "localhost:8000")
+        self._create_caddyfile(fujin_dir, app_name, f"unix//run/{app_name}/web.sock")
 
     def _generate_binary(self, app_name: str, fujin_dir: Path):
         """Generate binary profile: single binary deployment."""
