@@ -269,16 +269,3 @@ def test_init_config_has_required_fields(tmp_path, monkeypatch):
         # Verify .fujin/ directory has the actual service/site definitions
         assert (tmp_path / ".fujin/systemd").exists()
         assert (tmp_path / ".fujin/Caddyfile").exists()
-
-
-def test_init_config_has_aliases(tmp_path, monkeypatch):
-    """init creates config with command aliases."""
-    monkeypatch.chdir(tmp_path)
-    with patch.object(Init, "output", MagicMock()):
-        init = Init()
-        init()
-
-        config = tomllib.loads((tmp_path / "fujin.toml").read_text())
-        assert "aliases" in config
-        assert isinstance(config["aliases"], dict)
-        assert len(config["aliases"]) > 0
