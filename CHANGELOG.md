@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.2] - 2026-01-22
+
+### 🐛 Bug Fixes
+
+- Pass host correctly to all commands
+
 ## [0.19.1] - 2026-01-21
 
 ### 🐛 Bug Fixes
