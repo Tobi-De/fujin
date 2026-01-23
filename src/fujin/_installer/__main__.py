@@ -50,6 +50,16 @@ class InstallConfig:
     app_bin: str
     deployed_units: list[DeployedUnitDict]
 
+    @property
+    def uv_path(self) -> str:
+        """Return full path to uv binary based on deploy user's home directory.
+
+        Using the full path ensures reliability even if PATH is not properly set
+        during the installation process. The uv installer places the binary at
+        ~/.local/bin/uv by default.
+        """
+        return f"/home/{self.deploy_user}/.local/bin/uv"
+
 
 # Constants
 SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
@@ -113,15 +123,18 @@ export PATH="{install_dir}/.venv/bin:$PATH"
 export -f {config.app_name}
 """)
 
+        # Use full path to uv for reliability (doesn't depend on PATH)
         distfile_path = bundle_dir / config.distfile_name
         run(
-            f"test -d .venv || {uv_python_install_dir} uv venv -p {config.python_version} --managed-python"
+            f"test -d .venv || {uv_python_install_dir} {config.uv_path} venv -p {config.python_version} --managed-python"
         )
 
-        dist_install = f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} uv pip install {distfile_path}"
+        dist_install = f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} {config.uv_path} pip install {distfile_path}"
         if config.requirements:
             requirements_path = bundle_dir / "requirements.txt"
-            run(f"{dist_install} --no-deps && uv pip install -r {requirements_path} ")
+            run(
+                f"{dist_install} --no-deps && {config.uv_path} pip install -r {requirements_path} "
+            )
         else:
             run(dist_install)
     else:
