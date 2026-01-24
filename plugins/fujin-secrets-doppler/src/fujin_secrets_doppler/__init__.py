@@ -11,8 +11,6 @@ from dotenv import dotenv_values
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
 
-__version__ = "0.1.0"
-
 
 def doppler(env_content: str, secret_config: SecretConfig) -> str:
     """Doppler secret adapter.

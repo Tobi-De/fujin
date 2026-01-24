@@ -6,6 +6,10 @@ build_command = "uv build && uv pip compile pyproject.toml -o requirements.txt"
 distfile = "./../../../dist/bookstore-{version}-py3-none-any.whl"
 installation_mode = "python-package"
 
+[secrets]
+adapter = "bitwarden"
+password_env = "BW_PASSWORD"
+
 [aliases]
 console = "app exec shell"
 dbconsole = "app exec dbshell"

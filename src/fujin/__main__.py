@@ -18,6 +18,7 @@ from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
 from fujin.commands.server import Server
 from fujin.commands.up import Up
+from fujin.commands.showenv import Showenv
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -42,16 +43,17 @@ def _setup_logging(verbose):
 class Fujin:
     subcommands: cappa.Subcommands[
         Init
+        | New
         | Up
         | Deploy
         | App
         | Server
-        | Migrate
         | Audit
-        | Down
         | Rollback
         | Prune
-        | New
+        | Down
+        | Migrate
+        | Showenv
     ]
     verbose: Annotated[
         int,

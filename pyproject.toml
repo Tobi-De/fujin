@@ -51,6 +51,7 @@ scripts.fujin = "fujin.__main__:main"
 
 [dependency-groups]
 dev = [
+  "fujin-secrets-bitwarden",
   "pytest>=9.0.1",
 ]
 docs = [
@@ -74,6 +75,9 @@ members = [
   "plugins/fujin-secrets-1password",
   "plugins/fujin-secrets-doppler",
 ]
+
+[tool.uv.sources]
+fujin-secrets-bitwarden = { workspace = true }
 
 [tool.ruff]
 # Assume Python {{ python_version }}
