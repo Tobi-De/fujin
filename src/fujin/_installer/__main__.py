@@ -105,6 +105,7 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
     log("Installing application...")
     os.chdir(install_dir)
 
+    service_helpers = _format_service_helpers(config)
     if config.installation_mode == "python-package":
         log("Installing Python package...")
 
@@ -121,6 +122,7 @@ export PATH="{install_dir}/.venv/bin:$PATH"
     sudo -u {config.app_user} {install_dir}/.venv/bin/{config.app_name} "$@"
 }}
 export -f {config.app_name}
+{service_helpers}
 """)
 
         # Use full path to uv for reliability (doesn't depend on PATH)
@@ -149,6 +151,7 @@ export PATH="{install_dir}:$PATH"
     sudo -u {config.app_user} {install_dir}/{config.app_name} "$@"
 }}
 export -f {config.app_name}
+{service_helpers}
 """)
         full_path_app_bin = install_dir / config.app_bin
         full_path_app_bin.unlink(missing_ok=True)
@@ -515,6 +518,77 @@ def main() -> None:
             traceback.print_exc()
             sys.exit(1)
 
+
+def _format_service_helpers(config: InstallConfig) -> str:
+    """Format service management helpers with config values."""
+    valid_services = " ".join(u["service_name"] for u in config.deployed_units)
+    return service_management_helpers.format(
+        app_name=config.app_name,
+        app_user=config.app_user,
+        valid_services=valid_services,
+    )
+
+
+service_management_helpers = """
+export VALID_SERVICES="{valid_services}"
+
+_validate_svc() {{
+    local svc="$1"
+    [[ "$svc" == "*" ]] && return 0
+    for s in $VALID_SERVICES; do
+        [[ "$svc" == "$s" ]] && return 0
+    done
+    echo "Error: Service '$svc' not found. Available: $VALID_SERVICES" >&2
+    return 1
+}}
+export -f _validate_svc
+
+_svc() {{
+    local cmd="$1"
+    local svc="${{2:-*}}"
+    _validate_svc "$svc" || return 1
+    local unit="{app_name}-${{svc}}.service"
+    case "$cmd" in
+        status) sudo systemctl status "$unit" --no-pager ;;
+        *) sudo systemctl "$cmd" "$unit" ;;
+    esac
+}}
+export -f _svc
+
+status() {{ _svc status "$1"; }}
+export -f status
+start() {{ _svc start "$1"; }}
+export -f start
+stop() {{ _svc stop "$1"; }}
+export -f stop
+restart() {{ _svc restart "$1"; }}
+export -f restart
+
+logs() {{
+    local svc="${{1:-*}}"
+    _validate_svc "$svc" || return 1
+    sudo journalctl -u "{app_name}-${{svc}}.service" -f
+}}
+export -f logs
+
+logtail() {{
+    local lines="${{1:-100}}"
+    local svc="${{2:-*}}"
+    _validate_svc "$svc" || return 1
+    sudo journalctl -u "{app_name}-${{svc}}.service" -n "$lines" --no-pager
+}}
+export -f logtail
+
+procs() {{
+    ps aux | grep -E "({app_name}|{app_user})" | grep -v grep
+}}
+export -f procs
+
+mem() {{
+    ps -u {app_user} -o pid,rss,vsz,comm --sort=-rss 2>/dev/null || echo "No processes found"
+}}
+export -f mem
+"""
 
 if __name__ == "__main__":
     main()
