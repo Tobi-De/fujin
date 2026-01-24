@@ -11,8 +11,6 @@ from dotenv import dotenv_values
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
 
-__version__ = "0.1.0"
-
 
 def onepassword(env_content: str, secret_config: SecretConfig) -> str:
     """1Password secret adapter.

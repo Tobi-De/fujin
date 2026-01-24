@@ -12,8 +12,6 @@ from dotenv import dotenv_values
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
 
-__version__ = "0.1.0"
-
 
 def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
     """Bitwarden secret adapter.
@@ -136,14 +134,6 @@ def _signin(password_env: str) -> str:
     Raises:
         SecretResolutionError: If authentication fails
     """
-    # Sync vault first
-    sync_result = subprocess.run(["bw", "sync"], capture_output=True, text=True)
-    if sync_result.returncode != 0:
-        raise SecretResolutionError(
-            f"Bitwarden sync failed: {sync_result.stdout}", adapter="bitwarden"
-        )
-
-    # Unlock vault
     unlock_result = subprocess.run(
         [
             "bw",

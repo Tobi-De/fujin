@@ -2,12 +2,7 @@ app = "pocketbase"
 version = "0.34.2"
 build_command = "echo Building pocketbase..."
 distfile = "pocketbase"
-release_command = "pocketbase migrate"
 installation_mode = "binary"
-
-[processes.web]
-command = "pocketbase serve --http 0.0.0.0:8090"
-listen = "localhost:8090"
 
 [aliases]
 shell = "server exec --appenv bash"
@@ -17,11 +12,3 @@ envfile = ".env.prod"
 user = "ubuntu"
 key_filename = "/var/home/tobi/bluefin.pem"
 address = "pocket.13.204.64.39.nip.io"
-
-[[sites]]
-domains = [
-    "pocket.13.204.64.39.nip.io",
-]
-
-[sites.routes]
-"/" = "web"
