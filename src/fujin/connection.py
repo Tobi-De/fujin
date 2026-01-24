@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import socket
+import subprocess
 import sys
 import re
 import os
@@ -255,6 +257,79 @@ class SSH2Connection:
                     channel.write(data)
         finally:
             channel.close()
+
+    def has_rsync(self) -> bool:
+        """Check if rsync is available on the remote host."""
+        _, success = self.run("command -v rsync", warn=True, hide=True)
+        return success
+
+    def rsync_upload(self, local: str, remote: str) -> bool:
+        """Upload a file using rsync with delta transfer.
+
+        Uses a staging file approach for efficient delta transfers:
+        1. rsync to .staging.pyz (delta against previous upload)
+        2. Hardlink staging to versioned filename
+
+        Args:
+            local: Path to local file
+            remote: Destination path (versioned, e.g., /path/.versions/app-1.0.0.pyz)
+
+        Returns:
+            True if rsync was used, False if rsync is not available
+        """
+        import shlex
+
+        # Check rsync availability
+        if not shutil.which("rsync"):
+            logger.debug("rsync not available locally")
+            return False
+
+        if not self.has_rsync():
+            logger.debug("rsync not available on remote")
+            return False
+
+        local_path = Path(local)
+        remote_path = Path(remote)
+        staging_path = remote_path.parent / ".staging.pyz"
+
+        # Build rsync command with SSH options
+        ssh_opts = ["-p", str(self.host.port)]
+        if self.host.key_filename:
+            key_path = Path(self.host.key_filename).expanduser()
+            ssh_opts.extend(["-i", str(key_path)])
+
+        rsync_cmd = [
+            "rsync",
+            "-az",  # archive mode, compress
+            "--progress",
+            "-e",
+            "ssh " + " ".join(ssh_opts),
+            str(local_path),
+            f"{self.host.user}@{self.host.address}:{staging_path}",
+        ]
+
+        logger.info(f"Using rsync for delta upload to {staging_path}")
+        result = subprocess.run(rsync_cmd)
+
+        if result.returncode != 0:
+            logger.warning(
+                f"rsync failed with code {result.returncode}, will fall back to SCP"
+            )
+            return False
+
+        # Create hardlink from staging to versioned path
+        # rm first to handle re-deploys of same version
+        staging_q = shlex.quote(str(staging_path))
+        remote_q = shlex.quote(str(remote_path))
+        self.run(f"rm -f {remote_q} && ln {staging_q} {remote_q}", hide=True)
+
+        logger.info(f"Created hardlink: {staging_path} -> {remote_path}")
+        return True
+
+
+def has_local_rsync() -> bool:
+    """Check if rsync is available locally."""
+    return shutil.which("rsync") is not None
 
 
 @contextmanager

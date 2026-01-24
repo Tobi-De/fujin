@@ -266,7 +266,9 @@ class Deploy(BaseCommand):
                 conn.run(f"mkdir -p {remote_bundle_dir_q}")
 
                 self.output.info("Uploading deployment bundle...")
-                conn.put(str(zipapp_path), remote_bundle_path_q)
+                # Try rsync first for delta transfers, fall back to SCP
+                if not conn.rsync_upload(str(zipapp_path), str(remote_bundle_path)):
+                    conn.put(str(zipapp_path), remote_bundle_path_q)
 
                 logger.info("Verifying uploaded bundle checksum")
                 remote_checksum_out, _ = conn.run(
