@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.5] - 2026-01-25
+
+### 🚀 Features
+
+- Installer helpers act on all instances of replicas
+
 ## [0.19.4] - 2026-01-24
 
 ### 🚀 Features
