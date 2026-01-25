@@ -509,7 +509,7 @@ class App(BaseCommand):
         du = self._find_unit(name)
         return [du.template_service_name]
 
-    def _find_dropins(self, deployed_unit) -> list[str]:
+    def _find_dropins(self, deployed_unit: DeployedUnit) -> list[str]:
         """Find all dropin files for a deployed unit."""
         drop_ins = []
 

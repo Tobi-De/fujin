@@ -52,10 +52,12 @@ class Down(BaseCommand):
             self.output.info("Tearing down project...")
 
             app_dir = shlex.quote(self.config.app_dir)
-            fujin_dir = shlex.quote(self.config.install_dir)
-            res, ok = conn.run(f"cat {fujin_dir}/.version", warn=True, hide=True)
+            install_dir = shlex.quote(self.config.install_dir)
+            res, ok = conn.run(f"cat {install_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
-            bundle_path = f"{fujin_dir}/.versions/{self.config.app_name}-{version}.pyz"
+            bundle_path = (
+                f"{install_dir}/.versions/{self.config.app_name}-{version}.pyz"
+            )
 
             _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
 

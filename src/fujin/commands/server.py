@@ -91,11 +91,8 @@ class Server(BaseCommand):
     def upgrade(self):
         with self.connection() as conn:
             self.output.info("Upgrading server components...")
-
             all_success = True
-
             self._upgrade_system(conn)
-
             _, caddy_installed = conn.run("command -v caddy", warn=True, hide=True)
 
             if caddy_installed:
@@ -128,6 +125,7 @@ class Server(BaseCommand):
                 self.output.info("Caddy is not installed, skipping upgrade.")
 
             _, uv_installed = conn.run("command -v uv", warn=True, hide=True)
+
             if uv_installed:
 
                 def _uv_version():

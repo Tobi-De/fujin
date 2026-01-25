@@ -9,11 +9,6 @@ from fujin.errors import ServiceDiscoveryError
 
 
 class DeployedUnit(msgspec.Struct, kw_only=True):
-    """
-    Minimal representation of a deployed systemd unit.
-    All naming is derived from base fields, not stored.
-    """
-
     name: str  # Base name, e.g., "web"
     app_name: str  # e.g., "myapp"
     service_file: Path
@@ -56,16 +51,12 @@ class DeployedUnit(msgspec.Struct, kw_only=True):
     @property
     def template_socket_name(self) -> str | None:
         """For systemctl cat/show on socket definition."""
-        if not self.socket_file:
-            return None
-        return f"{self.app_name}-{self.name}.socket"
+        return f"{self.app_name}-{self.name}.socket" if self.socket_file else None
 
     @property
     def template_timer_name(self) -> str | None:
         """For systemctl cat/show on timer definition."""
-        if not self.timer_file:
-            return None
-        return f"{self.app_name}-{self.name}.timer"
+        return f"{self.app_name}-{self.name}.timer" if self.timer_file else None
 
 
 def discover_deployed_units(
@@ -115,7 +106,6 @@ def discover_deployed_units(
             _validate_unit_file(timer_path)
             timer_file = timer_path
 
-        # Get replica count (default 1)
         replica_count = replicas.get(name, 1)
 
         result.append(
