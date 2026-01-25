@@ -93,99 +93,104 @@ WantedBy=timers.target
 # Name Resolution Tests
 
 
-def test_resolve_single_replica_service(app_test_env):
-    """Single replica service resolution works for both templates and instances."""
+def test_get_runtime_units_single_replica(app_test_env):
+    """Single replica service returns service instance."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-
-        # Template mode and instance mode return same result for single replica
-        template_result = app._resolve_units("web", use_templates=True)
-        instance_result = app._resolve_units("web", use_templates=False)
-
-        assert template_result == ["testapp-web.service"]
-        assert instance_result == ["testapp-web.service"]
+        result = app._get_runtime_units("web")
+        assert result == ["testapp-web.service"]
 
 
-def test_resolve_multi_replica_service(app_test_env):
-    """Multi-replica service resolves to template or instances based on use_templates flag."""
+def test_get_runtime_units_multi_replica(app_test_env):
+    """Multi-replica service returns all numbered instances."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-
-        # Template mode returns template name with @
-        template_result = app._resolve_units("worker", use_templates=True)
-        assert template_result == ["testapp-worker@.service"]
-
-        # Instance mode returns all numbered instances
-        instance_result = app._resolve_units("worker", use_templates=False)
-        assert instance_result == [
+        result = app._get_runtime_units("worker")
+        assert result == [
             "testapp-worker@1.service",
             "testapp-worker@2.service",
             "testapp-worker@3.service",
         ]
 
 
-def test_resolve_with_service_suffix(app_test_env):
-    """Service name with .service suffix works correctly."""
+def test_get_template_units_single_replica(app_test_env):
+    """Single replica service returns template name (no @)."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        result = app._resolve_units("web.service", use_templates=True)
+        result = app._get_template_units("web")
         assert result == ["testapp-web.service"]
 
 
-def test_resolve_socket_suffix(app_test_env):
+def test_get_template_units_multi_replica(app_test_env):
+    """Multi-replica service returns template name with @."""
+    with patch("fujin.config.Config.read", return_value=app_test_env):
+        app = App()
+        result = app._get_template_units("worker")
+        assert result == ["testapp-worker@.service"]
+
+
+def test_get_template_units_with_service_suffix(app_test_env):
+    """Service name with .service suffix works correctly."""
+    with patch("fujin.config.Config.read", return_value=app_test_env):
+        app = App()
+        result = app._get_template_units("web.service")
+        assert result == ["testapp-web.service"]
+
+
+def test_get_template_units_socket_suffix(app_test_env):
     """Socket suffix resolves to socket unit name."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        result = app._resolve_units("api.socket", use_templates=True)
+        result = app._get_template_units("api.socket")
         assert result == ["testapp-api.socket"]
 
 
-def test_resolve_timer_suffix(app_test_env):
+def test_get_template_units_timer_suffix(app_test_env):
     """Timer suffix resolves to timer unit name."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        result = app._resolve_units("api.timer", use_templates=True)
+        result = app._get_template_units("api.timer")
         assert result == ["testapp-api.timer"]
 
 
-def test_resolve_socket_on_service_without_socket_fails(app_test_env):
+def test_get_template_units_socket_on_service_without_socket_fails(app_test_env):
     """Requesting socket for service without socket fails with clear error."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
         with pytest.raises(cappa.Exit) as exc_info:
-            app._resolve_units("web.socket", use_templates=True)
+            app._get_template_units("web.socket")
 
         assert exc_info.value.code == 1
         assert "does not have a socket" in str(exc_info.value.message)
 
 
-def test_resolve_timer_on_service_without_timer_fails(app_test_env):
+def test_get_template_units_timer_on_service_without_timer_fails(app_test_env):
     """Requesting timer for service without timer fails with clear error."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
         with pytest.raises(cappa.Exit) as exc_info:
-            app._resolve_units("web.timer", use_templates=True)
+            app._get_template_units("web.timer")
 
         assert exc_info.value.code == 1
         assert "does not have a timer" in str(exc_info.value.message)
 
 
-def test_resolve_nonexistent_service_fails(app_test_env):
+def test_find_unit_nonexistent_service_fails(app_test_env):
     """Requesting nonexistent service fails with clear error."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
         with pytest.raises(cappa.Exit) as exc_info:
-            app._resolve_units("nonexistent", use_templates=True)
+            app._find_unit("nonexistent")
 
         assert exc_info.value.code == 1
         assert "unknown" in str(exc_info.value.message).lower()
 
 
-def test_resolve_none_returns_all_units(app_test_env):
+def test_get_runtime_units_none_returns_all_units(app_test_env):
     """Passing None returns all systemd unit names."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        result = app._resolve_units(None, use_templates=True)
+        result = app._get_runtime_units(None)
 
         # Should have web, worker instances (not template), api
         assert "testapp-web.service" in result
@@ -247,7 +252,7 @@ def test_find_dropins_discovers_all_types(app_test_env, tmp_path):
         assert any("common.d/limits.conf" in r for r in result)
 
         # Test service-specific dropin is found for web service
-        web_unit = [u for u in app.config.deployed_units if u.service_name == "web"][0]
+        web_unit = [u for u in app.config.deployed_units if u.name == "web"][0]
         result = app._find_dropins(web_unit)
         assert len(result) >= 1
         assert any("web.service.d/override.conf" in r for r in result)

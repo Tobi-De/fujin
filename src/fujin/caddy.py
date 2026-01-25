@@ -4,9 +4,6 @@ import json
 import logging
 import urllib.request
 
-from fujin.config import Config
-from fujin.connection import SSH2Connection as Connection
-
 logger = logging.getLogger(__name__)
 
 DEFAULT_VERSION = "2.10.2"

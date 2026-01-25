@@ -50,18 +50,18 @@ WantedBy=multi-user.target
     units = discover_deployed_units(install_dir, "myapp", {})
 
     assert len(units) == 1
-    assert units[0].service_name == "web"
+    assert units[0].name == "web"
     assert units[0].is_template is False
     assert units[0].service_file == service_file
     assert units[0].socket_file is None
     assert units[0].timer_file is None
     assert units[0].template_service_name == "myapp-web.service"
-    assert units[0].replica_count == 1
-    assert units[0].instance_service_names == ["myapp-web.service"]
+    assert units[0].replicas == 1
+    assert units[0].service_instances() == ["myapp-web.service"]
 
 
 def test_discover_template_service(tmp_path):
-    """Should discover a template service (with @)."""
+    """Should discover a template service (with @) when replicas > 1."""
     install_dir = tmp_path / ".fujin"
     systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
@@ -80,25 +80,24 @@ WantedBy=multi-user.target
     units = discover_deployed_units(install_dir, "myapp", {"web": 3})
 
     assert len(units) == 1
-    assert units[0].service_name == "web"
+    assert units[0].name == "web"
     assert units[0].is_template is True
     assert units[0].service_file == service_file
     assert units[0].template_service_name == "myapp-web@.service"
-    assert units[0].replica_count == 3
-    assert units[0].instance_service_names == [
+    assert units[0].replicas == 3
+    assert units[0].service_instances() == [
         "myapp-web@1.service",
         "myapp-web@2.service",
         "myapp-web@3.service",
     ]
 
 
-def test_discover_service_with_socket_and_replicas(tmp_path):
-    """Should discover service with socket for both single and multi-replica configs."""
+def test_discover_service_with_socket(tmp_path):
+    """Should discover service with socket (sockets are always singletons)."""
     install_dir = tmp_path / ".fujin"
     systemd_dir = install_dir / "systemd"
     systemd_dir.mkdir(parents=True)
 
-    # Test single replica (web.service + web.socket)
     service_file = systemd_dir / "web.service"
     service_file.write_text("""[Unit]
 Description=Web
@@ -125,38 +124,6 @@ WantedBy=sockets.target
     assert len(units) == 1
     assert units[0].socket_file == socket_file
     assert units[0].template_socket_name == "myapp-web.socket"
-
-    # Clean up for template test
-    service_file.unlink()
-    socket_file.unlink()
-
-    # Test multi-replica (web@.service + web@.socket)
-    template_service = systemd_dir / "web@.service"
-    template_service.write_text("""[Unit]
-Description=Web %i
-
-[Service]
-ExecStart=/bin/true
-
-[Install]
-WantedBy=multi-user.target
-""")
-
-    template_socket = systemd_dir / "web@.socket"
-    template_socket.write_text("""[Unit]
-Description=Web socket %i
-
-[Socket]
-ListenStream=/run/web-%i.sock
-
-[Install]
-WantedBy=sockets.target
-""")
-
-    units = discover_deployed_units(install_dir, "myapp", {})
-    assert len(units) == 1
-    assert units[0].socket_file == template_socket
-    assert units[0].template_socket_name == "myapp-web@.socket"
 
 
 def test_discover_service_with_timer(tmp_path):
@@ -212,7 +179,7 @@ WantedBy=multi-user.target
     units = discover_deployed_units(install_dir, "myapp", {})
 
     assert len(units) == 3
-    names = [u.service_name for u in units]
+    names = [u.name for u in units]
     assert sorted(names) == ["cleanup", "web", "worker"]
 
 
@@ -230,3 +197,65 @@ def test_discover_services_fails_on_malformed_file(tmp_path):
         discover_deployed_units(install_dir, "myapp", {})
 
     assert "Failed to parse web.service" in exc_info.value.message
+
+
+def test_is_template_derived_from_replicas(tmp_path):
+    """is_template should be derived from replicas count, not file naming."""
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    # Create a template service file
+    service_file = systemd_dir / "worker@.service"
+    service_file.write_text("""[Unit]
+Description=Worker %i
+
+[Service]
+ExecStart=/bin/true
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    # Without replicas config, defaults to 1
+    units = discover_deployed_units(install_dir, "myapp", {})
+    assert len(units) == 1
+    assert units[0].replicas == 1
+    # is_template is derived from replicas > 1
+    assert units[0].is_template is False
+
+    # With replicas > 1
+    units = discover_deployed_units(install_dir, "myapp", {"worker": 2})
+    assert len(units) == 1
+    assert units[0].replicas == 2
+    assert units[0].is_template is True
+
+
+def test_all_runtime_units(tmp_path):
+    """all_runtime_units should include service instances and auxiliary units."""
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Web
+
+[Service]
+ExecStart=/bin/true
+""")
+
+    socket_file = systemd_dir / "web.socket"
+    socket_file.write_text("""[Unit]
+Description=Socket
+
+[Socket]
+ListenStream=/run/web.sock
+""")
+
+    units = discover_deployed_units(install_dir, "myapp", {})
+    assert len(units) == 1
+    assert units[0].all_runtime_units() == [
+        "myapp-web.service",
+        "myapp-web.socket",
+    ]

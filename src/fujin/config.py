@@ -57,14 +57,17 @@ class Config(msgspec.Struct, kw_only=True):
         default_factory=dict
     )  # Service name -> replica count (for template units)
     requirements: str | None = None
+
     local_config_dir: Path = Path(".fujin")
+    apps_dir: str = "/opt/fujin"
+    caddy_config_dir: str = "/etc/caddy/conf.d"
+
     secret_config: SecretConfig | None = msgspec.field(
         name="secrets",
         default_factory=lambda: SecretConfig(adapter="system"),
     )
 
     def __post_init__(self):
-        # Default app_user to app_name if not specified
         if not self.app_user:
             self.app_user = self.app_name
 
@@ -117,13 +120,7 @@ class Config(msgspec.Struct, kw_only=True):
         return f".install/{self.app_name}"
 
     @property
-    def apps_dir(self) -> str:
-        """Apps are always deployed to /opt/fujin."""
-        return "/opt/fujin"
-
-    @property
     def app_dir(self) -> str:
-        """Get app directory."""
         return f"{self.apps_dir}/{self.app_name}"
 
     @property
@@ -179,11 +176,6 @@ class Config(msgspec.Struct, kw_only=True):
                         return domain
 
     @property
-    def caddy_config_dir(self) -> str:
-        """Get Caddy config directory. Defaults to /etc/caddy/conf.d"""
-        return "/etc/caddy/conf.d"
-
-    @property
     def caddy_config_path(self) -> str:
         return f"{self.caddy_config_dir}/{self.app_name}.caddy"
 
@@ -198,7 +190,7 @@ class Config(msgspec.Struct, kw_only=True):
         """All systemd unit names that should be enabled/started."""
         units = []
         for du in self.deployed_units:
-            units.extend(du.all_unit_names())
+            units.extend(du.all_runtime_units())
         return units
 
 

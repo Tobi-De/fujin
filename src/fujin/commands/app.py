@@ -12,6 +12,7 @@ from rich.table import Table
 
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
+from fujin.discovery import DeployedUnit
 
 
 @cappa.command(
@@ -43,11 +44,13 @@ class App(BaseCommand):
 
         names = []
         for du in self.config.deployed_units:
-            names.extend(du.instance_service_names)
-            if du.template_socket_name:
-                names.append(du.template_socket_name)
-            if du.template_timer_name:
-                names.append(du.template_timer_name)
+            names.extend(du.service_instances())
+            socket_name = du.template_socket_name
+            timer_name = du.template_timer_name
+            if socket_name:
+                names.append(socket_name)
+            if timer_name:
+                names.append(timer_name)
 
         with self.connection() as conn:
             shlex.quote(self.config.app_dir)
@@ -92,24 +95,22 @@ class App(BaseCommand):
         """Build a dict of service name -> status string."""
         services = {}
         for du in self.config.deployed_units:
+            instances = du.service_instances()
             running_count = sum(
-                1
-                for name in du.instance_service_names
-                if services_status.get(name) == "active"
+                1 for name in instances if services_status.get(name) == "active"
             )
-            total_count = len(du.instance_service_names)
+            total_count = len(instances)
 
             if total_count == 1:
-                services[du.service_name] = services_status.get(
-                    du.instance_service_names[0], "unknown"
-                )
+                services[du.name] = services_status.get(instances[0], "unknown")
             else:
-                services[du.service_name] = f"{running_count}/{total_count}"
+                services[du.name] = f"{running_count}/{total_count}"
 
-            if du.template_socket_name:
-                socket_status = services_status.get(du.template_socket_name)
+            socket_name = du.template_socket_name
+            if socket_name:
+                socket_status = services_status.get(socket_name)
                 if socket_status:
-                    services[f"{du.service_name}.socket"] = socket_status
+                    services[f"{du.name}.socket"] = socket_status
 
         return services
 
@@ -152,14 +153,14 @@ class App(BaseCommand):
         # Find the deployed unit
         deployed_unit = None
         for du in self.config.deployed_units:
-            if du.service_name == service_name:
+            if du.name == service_name:
                 deployed_unit = du
                 break
 
         if not deployed_unit:
             self.output.error(
                 f"Service '{service_name}' not found.\n"
-                f"Available services: {', '.join(du.service_name for du in self.config.deployed_units)}"
+                f"Available services: {', '.join(du.name for du in self.config.deployed_units)}"
             )
             return
 
@@ -167,17 +168,17 @@ class App(BaseCommand):
         source_file = deployed_unit.service_file.name
         deployed_file = deployed_unit.template_service_name
 
-        self.output.output(f"[bold]Service:[/bold] {deployed_unit.service_name}")
+        self.output.output(f"[bold]Service:[/bold] {deployed_unit.name}")
         self.output.output(f"[bold]Source:[/bold] {source_file}")
         self.output.output(f"[bold]Deployed as:[/bold] {deployed_file}")
         if deployed_unit.is_template:
-            self.output.output(f"[bold]Replicas:[/bold] {deployed_unit.replica_count}")
+            self.output.output(f"[bold]Replicas:[/bold] {deployed_unit.replicas}")
 
         # Get status from server
         with self.connection() as conn:
             # Get detailed status for each instance
             self.output.output("\n[bold]Status:[/bold]")
-            for unit_name in deployed_unit.instance_service_names:
+            for unit_name in deployed_unit.service_instances():
                 # Get status with uptime info
                 status_cmd = f"sudo systemctl show {unit_name} --property=ActiveState,SubState,LoadState,ActiveEnterTimestamp --no-pager"
                 status_output, success = conn.run(status_cmd, warn=True, hide=True)
@@ -297,7 +298,7 @@ class App(BaseCommand):
     def _run_service_command(self, command: str, name: str | None):
         with self.connection() as conn:
             # Use instances for start/stop/restart (operates on running services)
-            names = self._resolve_units(name, use_templates=False)
+            names = self._get_runtime_units(name)
             if not names:
                 self.output.warning("No services found")
                 return
@@ -305,11 +306,12 @@ class App(BaseCommand):
             # When stopping, also stop associated sockets
             if command == "stop" and name:
                 du = next(
-                    (u for u in self.deployed_units if u.service_name == name),
+                    (u for u in self.deployed_units if u.name == name),
                     None,
                 )
-                if du and du.template_socket_name:
-                    names.append(du.template_socket_name)
+                socket_name = du.template_socket_name if du else None
+                if socket_name:
+                    names.append(socket_name)
 
             self.output.output(
                 f"Running [cyan]{command}[/cyan] on: [cyan]{', '.join(names)}[/cyan]"
@@ -373,7 +375,7 @@ class App(BaseCommand):
         """
         with self.connection() as conn:
             # Use instances for logs (shows logs from running services)
-            names = self._resolve_units(name, use_templates=False)
+            names = self._get_runtime_units(name)
 
             if names:
                 units = " ".join(f"-u {n}" for n in names)
@@ -431,7 +433,7 @@ class App(BaseCommand):
             if name == "units":
                 names = self.config.systemd_units
             else:
-                names = self._resolve_units(name, use_templates=True)
+                names = self._get_template_units(name)
 
             if not names:
                 self.output.warning("No services found")
@@ -448,72 +450,64 @@ class App(BaseCommand):
 
         # Service names and variations
         for du in self.deployed_units:
-            options.append(du.service_name)
+            options.append(du.name)
             if du.socket_file:
-                options.append(f"{du.service_name}.socket")
+                options.append(f"{du.name}.socket")
             if du.timer_file:
-                options.append(f"{du.service_name}.timer")
+                options.append(f"{du.name}.timer")
 
         # Apply uniform color to all options
         colored_options = [f"[cyan]{opt}[/cyan]" for opt in options]
         return " ".join(colored_options)
 
-    def _resolve_units(
-        self, name: str | None, use_templates: bool = False
-    ) -> list[str]:
-        """
-        Resolve a service name to systemd unit names.
-
-        Args:
-            name: Service name (e.g., "web", "worker")
-                  Can include suffix: "web.service", "worker.timer", "web.socket"
-                  If None, returns all units
-            use_templates: If True, return template names (for cat/show)
-                          If False, return instance names (for start/stop/restart/logs)
-
-        Returns:
-            List of systemd unit names
-        """
-        if not name:
-            return self.config.systemd_units
-
-        suffixes = {".service": "service", ".timer": "timer", ".socket": "socket"}
-        suffix_type = None
+    def _find_unit(self, name: str) -> DeployedUnit:
+        """Find a deployed unit by name, raising an error if not found."""
+        # Strip suffix if present
         service_name = name
-        for suffix, stype in suffixes.items():
+        for suffix in (".service", ".timer", ".socket"):
             if name.endswith(suffix):
                 service_name = name.removesuffix(suffix)
-                suffix_type = stype
                 break
 
         du = next(
-            (u for u in self.deployed_units if u.service_name == service_name),
+            (u for u in self.deployed_units if u.name == service_name),
             None,
         )
         if not du:
-            available = ", ".join(u.service_name for u in self.deployed_units)
+            available = ", ".join(u.name for u in self.deployed_units)
             raise cappa.Exit(
                 f"Unknown service '{service_name}'. Available: {available}",
                 code=1,
             )
+        return du
 
-        if suffix_type == "socket":
-            if not du.socket_file:
-                raise cappa.Exit(
-                    f"Service '{service_name}' does not have a socket.", code=1
-                )
-            return [du.template_socket_name]
+    def _get_runtime_units(self, name: str | None) -> list[str]:
+        """Get runtime units for start/stop/restart/logs."""
+        if not name:
+            return self.config.systemd_units
 
-        if suffix_type == "timer":
-            if not du.timer_file:
-                raise cappa.Exit(
-                    f"Service '{service_name}' does not have a timer.", code=1
-                )
-            return [du.template_timer_name]
+        du = self._find_unit(name)
+        return du.service_instances()
 
-        if use_templates:
-            return [du.template_service_name]
-        return du.instance_service_names
+    def _get_template_units(self, name: str) -> list[str]:
+        """Get template units for cat/show commands."""
+        # Handle suffix-specific requests
+        if name.endswith(".socket"):
+            du = self._find_unit(name)
+            socket_name = du.template_socket_name
+            if not socket_name:
+                raise cappa.Exit(f"Service '{du.name}' does not have a socket.", code=1)
+            return [socket_name]
+
+        if name.endswith(".timer"):
+            du = self._find_unit(name)
+            timer_name = du.template_timer_name
+            if not timer_name:
+                raise cappa.Exit(f"Service '{du.name}' does not have a timer.", code=1)
+            return [timer_name]
+
+        du = self._find_unit(name)
+        return [du.template_service_name]
 
     def _find_dropins(self, deployed_unit) -> list[str]:
         """Find all dropin files for a deployed unit."""
@@ -565,7 +559,7 @@ class App(BaseCommand):
         systemd_dir = Path(".fujin/systemd")
         deployed_unit = None
         for unit in self.config.deployed_units:
-            if unit.service_name == service:
+            if unit.name == service:
                 deployed_unit = unit
                 break
 
@@ -576,7 +570,7 @@ class App(BaseCommand):
             )
             raise cappa.Exit(code=1)
 
-        old_replica_count = deployed_unit.replica_count
+        old_replica_count = deployed_unit.replicas
         old_is_template = deployed_unit.is_template
         needs_conversion = False
 

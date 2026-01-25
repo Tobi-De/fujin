@@ -144,7 +144,7 @@ class Deploy(BaseCommand):
             deployed_units_data = []
             for du in self.config.deployed_units:
                 unit_dict = {
-                    "service_name": du.service_name,
+                    "service_name": du.name,
                     "is_template": du.is_template,
                     "service_file": du.service_file.name,
                     "socket_file": du.socket_file.name if du.socket_file else None,
@@ -152,8 +152,8 @@ class Deploy(BaseCommand):
                     "template_service_name": du.template_service_name,
                     "template_socket_name": du.template_socket_name,
                     "template_timer_name": du.template_timer_name,
-                    "replica_count": du.replica_count,
-                    "instance_service_names": du.instance_service_names,
+                    "replica_count": du.replicas,
+                    "instance_service_names": du.service_instances(),
                 }
                 deployed_units_data.append(unit_dict)
 
@@ -349,10 +349,10 @@ class Deploy(BaseCommand):
         # Build services summary from deployed units
         services_summary = []
         for du in self.config.deployed_units:
-            if du.replica_count > 1:
-                services_summary.append(f"{du.service_name} ({du.replica_count})")
+            if du.replicas > 1:
+                services_summary.append(f"{du.name} ({du.replicas})")
             else:
-                services_summary.append(du.service_name)
+                services_summary.append(du.name)
         if services_summary:
             table.add_row("Services", ", ".join(services_summary))
         table.add_row("Bundle", size_str)

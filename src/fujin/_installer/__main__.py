@@ -125,7 +125,6 @@ export -f {config.app_name}
 {service_helpers}
 """)
 
-        # Use full path to uv for reliability (doesn't depend on PATH)
         distfile_path = bundle_dir / config.distfile_name
         run(
             f"test -d .venv || {uv_python_install_dir} {config.uv_path} venv -p {config.python_version} --managed-python"
@@ -161,7 +160,6 @@ export -f {config.app_name}
     (install_dir / ".version").write_text(config.version)
 
     log("Setting file ownership and permissions...")
-    # Only chown the .install directory - leave app runtime data untouched
     run(f"sudo chown -R {config.deploy_user}:{config.app_user} {install_dir}")
     # Make .install directory group-writable (deploy user can update, app user can read)
     run(f"sudo chmod 775 {install_dir}")
