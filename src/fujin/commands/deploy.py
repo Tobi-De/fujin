@@ -144,16 +144,16 @@ class Deploy(BaseCommand):
             deployed_units_data = []
             for du in self.config.deployed_units:
                 unit_dict = {
-                    "service_name": du.name,
-                    "is_template": du.is_template,
+                    "name": du.name,
                     "service_file": du.service_file.name,
                     "socket_file": du.socket_file.name if du.socket_file else None,
                     "timer_file": du.timer_file.name if du.timer_file else None,
+                    "replicas": du.replicas,
+                    "is_template": du.is_template,
+                    "service_instances": du.service_instances(),
                     "template_service_name": du.template_service_name,
                     "template_socket_name": du.template_socket_name,
                     "template_timer_name": du.template_timer_name,
-                    "replica_count": du.replicas,
-                    "instance_service_names": du.service_instances(),
                 }
                 deployed_units_data.append(unit_dict)
 
@@ -189,7 +189,6 @@ class Deploy(BaseCommand):
                 all_unresolved.update(unresolved)
                 (bundle_dir / "Caddyfile").write_text(resolved_caddyfile)
 
-            # Warn about unresolved variables
             if all_unresolved:
                 self.output.warning(
                     f"Found unresolved variables in configuration files: {', '.join(sorted(all_unresolved))}\n"
@@ -213,7 +212,6 @@ class Deploy(BaseCommand):
                 "deployed_units": deployed_units_data,
             }
 
-            # Create zipapp
             logger.info("Creating Python zipapp installer")
             zipapp_dir = Path(tmpdir) / "zipapp_source"
             zipapp_dir.mkdir()
@@ -232,12 +230,10 @@ class Deploy(BaseCommand):
                 else:
                     shutil.copy(item, dest)
 
-            # Write config.json
             (zipapp_dir / "config.json").write_text(
                 json.dumps(installer_config, indent=2)
             )
 
-            # Create the zipapp
             zipapp_path = Path(tmpdir) / "installer.pyz"
             zipapp.create_archive(
                 zipapp_dir,
@@ -245,7 +241,6 @@ class Deploy(BaseCommand):
                 interpreter="/usr/bin/env python3",
             )
 
-            # Calculate local checksum
             logger.info("Calculating local bundle checksum")
             with open(zipapp_path, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()

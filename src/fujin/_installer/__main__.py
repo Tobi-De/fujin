@@ -16,20 +16,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
 
+SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+SYSTEMD_WANTS_DIR = SYSTEMD_SYSTEM_DIR / "multi-user.target.wants"
 
-class DeployedUnitDict(TypedDict):
-    """Type hint for deployed unit serialized as dict."""
 
-    service_name: str
-    is_template: bool
+class DeployedUnit(TypedDict):
+    """Type hint for deployed unit serialized as dict with all derived properties."""
+
+    name: str  # Base name, e.g., "web"
     service_file: str  # filename only
     socket_file: str | None
     timer_file: str | None
+    replicas: int
+    is_template: bool
+    service_instances: list[str]
     template_service_name: str
     template_socket_name: str | None
     template_timer_name: str | None
-    replica_count: int
-    instance_service_names: list[str]
 
 
 @dataclass
@@ -48,7 +51,7 @@ class InstallConfig:
     webserver_enabled: bool
     caddy_config_path: str
     app_bin: str
-    deployed_units: list[DeployedUnitDict]
+    deployed_units: list[DeployedUnit]
 
     @property
     def uv_path(self) -> str:
@@ -59,11 +62,6 @@ class InstallConfig:
         ~/.local/bin/uv by default.
         """
         return f"/home/{self.deploy_user}/.local/bin/uv"
-
-
-# Constants
-SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
-SYSTEMD_WANTS_DIR = SYSTEMD_SYSTEM_DIR / "multi-user.target.wants"
 
 
 def log(msg: str) -> None:
@@ -228,18 +226,18 @@ export -f {config.app_name}
     if common_dir.exists():
         common_dropin_names = {f.name for f in common_dir.glob("*.conf")}
         for unit in config.deployed_units:
-            deployed_service = unit["template_service_name"]
             for dropin_name in common_dropin_names:
-                expected_dropins.add(f"{deployed_service}.d/{dropin_name}")
+                expected_dropins.add(f"{unit['template_service_name']}.d/{dropin_name}")
 
     # Service-specific dropins
     for service_dropin_dir_path in systemd_dir.glob("*.service.d"):
         service_file_name = service_dropin_dir_path.name.removesuffix(".d")
         for unit in config.deployed_units:
             if unit["service_file"] == service_file_name:
-                deployed_service = unit["template_service_name"]
                 for dropin_path in service_dropin_dir_path.glob("*.conf"):
-                    expected_dropins.add(f"{deployed_service}.d/{dropin_path.name}")
+                    expected_dropins.add(
+                        f"{unit['template_service_name']}.d/{dropin_path.name}"
+                    )
                 break
 
     # Remove stale dropin files and empty directories
@@ -297,8 +295,7 @@ export -f {config.app_name}
             dropin_content = dropin_path.read_text()
 
             for unit in config.deployed_units:
-                deployed_service = unit["template_service_name"]
-                dropin_dir = SYSTEMD_SYSTEM_DIR / f"{deployed_service}.d"
+                dropin_dir = SYSTEMD_SYSTEM_DIR / f"{unit['template_service_name']}.d"
                 run(f"sudo mkdir -p {dropin_dir}")
                 dropin_dest = dropin_dir / dropin_path.name
                 run(
@@ -337,7 +334,7 @@ export -f {config.app_name}
     log("Restarting services...")
     active_units = []
     for unit in config.deployed_units:
-        active_units.extend(unit["instance_service_names"])
+        active_units.extend(unit["service_instances"])
         if unit["template_socket_name"]:
             active_units.append(unit["template_socket_name"])
         if unit["template_timer_name"]:
@@ -519,7 +516,7 @@ def main() -> None:
 
 def _format_service_helpers(config: InstallConfig) -> str:
     """Format service management helpers with config values."""
-    valid_services = " ".join(u["service_name"] for u in config.deployed_units)
+    valid_services = " ".join(u["name"] for u in config.deployed_units)
     return service_management_helpers.format(
         app_name=config.app_name,
         app_user=config.app_user,
@@ -545,10 +542,13 @@ _svc() {{
     local cmd="$1"
     local svc="${{2:-*}}"
     _validate_svc "$svc" || return 1
-    local unit="{app_name}-${{svc}}.service"
+    # Use glob to match both regular and template instances
+    local pattern="{app_name}-${{svc}}*.service"
+    local units=$(systemctl list-units --type=service --no-legend "$pattern" 2>/dev/null | awk '{{print $1}}')
+    [[ -z "$units" ]] && units="{app_name}-${{svc}}.service"
     case "$cmd" in
-        status) sudo systemctl status "$unit" --no-pager ;;
-        *) sudo systemctl "$cmd" "$unit" ;;
+        status) sudo systemctl status $units --no-pager ;;
+        *) sudo systemctl "$cmd" $units ;;
     esac
 }}
 export -f _svc
@@ -565,7 +565,12 @@ export -f restart
 logs() {{
     local svc="${{1:-*}}"
     _validate_svc "$svc" || return 1
-    sudo journalctl -u "{app_name}-${{svc}}.service" -f
+    # Use glob to match both regular and template instances
+    local pattern="{app_name}-${{svc}}*.service"
+    local units=$(systemctl list-units --type=service --no-legend "$pattern" 2>/dev/null | awk '{{print $1}}')
+    [[ -z "$units" ]] && units="{app_name}-${{svc}}.service"
+    local unit_args=$(echo $units | sed 's/[^ ]* */-u &/g')
+    sudo journalctl $unit_args -f
 }}
 export -f logs
 
@@ -573,7 +578,11 @@ logtail() {{
     local lines="${{1:-100}}"
     local svc="${{2:-*}}"
     _validate_svc "$svc" || return 1
-    sudo journalctl -u "{app_name}-${{svc}}.service" -n "$lines" --no-pager
+    local pattern="{app_name}-${{svc}}*.service"
+    local units=$(systemctl list-units --type=service --no-legend "$pattern" 2>/dev/null | awk '{{print $1}}')
+    [[ -z "$units" ]] && units="{app_name}-${{svc}}.service"
+    local unit_args=$(echo $units | sed 's/[^ ]* */-u &/g')
+    sudo journalctl $unit_args -n "$lines" --no-pager
 }}
 export -f logtail
 

@@ -22,7 +22,6 @@ class Prune(BaseCommand):
     ] = None
 
     def __call__(self):
-        # Use config value if --keep not specified
         keep = (
             self.keep if self.keep is not None else (self.config.versions_to_keep or 5)
         )
