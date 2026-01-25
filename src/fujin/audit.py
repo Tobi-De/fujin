@@ -33,7 +33,6 @@ def log_operation(
         from_version: Previous version (for rollback)
         to_version: Target version (for rollback)
     """
-    # Build record with only non-None values
     record: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "operation": operation,
@@ -42,21 +41,18 @@ def log_operation(
         "app_name": app_name,
     }
 
-    # Add optional fields if provided
-    if version is not None:
+    if version:
         record["version"] = version
-    if git_commit is not None:
+    if git_commit:
         record["git_commit"] = git_commit
-    if from_version is not None:
+    if from_version:
         record["from_version"] = from_version
-    if to_version is not None:
+    if to_version:
         record["to_version"] = to_version
 
-    # Append to centralized audit log outside app directory
     log_file = f"/opt/fujin/.audit/{app_name}.log"
     json_line = json.dumps(record)
 
-    # Ensure audit directory exists
     connection.run("sudo mkdir -p /opt/fujin/.audit")
     connection.run(f"echo {json.dumps(json_line)} | sudo tee -a {log_file} >/dev/null")
 

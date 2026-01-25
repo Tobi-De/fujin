@@ -1,54 +1,84 @@
 from __future__ import annotations
-from fujin.errors import ServiceDiscoveryError
 
 import configparser
 from pathlib import Path
+
 import msgspec
+
+from fujin.errors import ServiceDiscoveryError
 
 
 class DeployedUnit(msgspec.Struct, kw_only=True):
     """
-    Complete information about a deployed systemd unit.
-    Single source of truth combining discovery metadata with deployment context.
+    Minimal representation of a deployed systemd unit.
+    All naming is derived from base fields, not stored.
     """
 
-    # From discovery
-    service_name: str  # e.g., "web"
-    is_template: bool
+    name: str  # Base name, e.g., "web"
+    app_name: str  # e.g., "myapp"
     service_file: Path
-    socket_file: Path | None
-    timer_file: Path | None
+    socket_file: Path | None = None
+    timer_file: Path | None = None
+    replicas: int = 1
 
-    # Template names (for systemctl cat/show, installer metadata)
-    template_service_name: str  # e.g., "myapp-web@.service" or "myapp-web.service"
-    template_socket_name: str | None  # e.g., "myapp-web@.socket" or "myapp-web.socket"
-    template_timer_name: str | None  # e.g., "myapp-web@.timer" or "myapp-web.timer"
+    @property
+    def is_template(self) -> bool:
+        return self.replicas > 1
 
-    # Instance information (for operations: start/stop/restart/logs)
-    replica_count: int  # From config.replicas, default 1
-    instance_service_names: list[str]  # ["myapp-web@1.service", "myapp-web@2.service"]
+    def service_instances(self) -> list[str]:
+        """Runtime service units for start/stop/restart/logs."""
+        if self.is_template:
+            return [
+                f"{self.app_name}-{self.name}@{i}.service"
+                for i in range(1, self.replicas + 1)
+            ]
+        return [f"{self.app_name}-{self.name}.service"]
 
-    def all_unit_names(self) -> list[str]:
-        """All unit names that should be enabled/started (instances + socket/timer)."""
-        units = self.instance_service_names.copy()
-        # For templates, socket/timer don't have instances
-        if not self.is_template:
-            if self.template_socket_name:
-                units.append(self.template_socket_name)
-            if self.template_timer_name:
-                units.append(self.template_timer_name)
-        else:
-            # Template sockets/timers use @ without instance number
-            if self.template_socket_name:
-                units.append(self.template_socket_name)
-            if self.template_timer_name:
-                units.append(self.template_timer_name)
+    def auxiliary_units(self) -> list[str]:
+        """Socket and timer units (always singletons)."""
+        units = []
+        if self.socket_file:
+            units.append(f"{self.app_name}-{self.name}.socket")
+        if self.timer_file:
+            units.append(f"{self.app_name}-{self.name}.timer")
         return units
+
+    def all_runtime_units(self) -> list[str]:
+        """All units for systemctl operations."""
+        return self.service_instances() + self.auxiliary_units()
+
+    @property
+    def template_service_name(self) -> str:
+        """For systemctl cat/show on template definition."""
+        suffix = "@" if self.is_template else ""
+        return f"{self.app_name}-{self.name}{suffix}.service"
+
+    @property
+    def template_socket_name(self) -> str | None:
+        """For systemctl cat/show on socket definition."""
+        if not self.socket_file:
+            return None
+        return f"{self.app_name}-{self.name}.socket"
+
+    @property
+    def template_timer_name(self) -> str | None:
+        """For systemctl cat/show on timer definition."""
+        if not self.timer_file:
+            return None
+        return f"{self.app_name}-{self.name}.timer"
 
 
 def discover_deployed_units(
     fujin_dir: Path, app_name: str, replicas: dict[str, int]
 ) -> list[DeployedUnit]:
+    """
+    Discover systemd units from .fujin/systemd/ directory.
+
+    Args:
+        fujin_dir: Path to .fujin directory
+        app_name: Application name for unit naming
+        replicas: Dict mapping service name to replica count
+    """
     systemd_dir = fujin_dir / "systemd"
 
     if not systemd_dir.exists():
@@ -64,75 +94,47 @@ def discover_deployed_units(
 
         _validate_unit_file(service_file)
 
-        # Parse filename to extract service name and template status
+        # Parse filename to extract service name
+        # Handles both "web.service" and "web@.service"
         filename = service_file.name
-        name = filename.removesuffix(".service")
-        is_template = name.endswith("@")
-        if is_template:
-            name = name.removesuffix("@")
+        name = filename.removesuffix(".service").removesuffix("@")
 
-        # Look for associated socket and timer files
-        socket_file = (
-            systemd_dir / f"{name}@.socket"
-            if is_template
-            else systemd_dir / f"{name}.socket"
-        )
-        timer_file = (
-            systemd_dir / f"{name}@.timer"
-            if is_template
-            else systemd_dir / f"{name}.timer"
-        )
+        # Look for associated socket and timer files (always singletons)
+        socket_path = systemd_dir / f"{name}.socket"
+        timer_path = systemd_dir / f"{name}.timer"
 
         # Validate associated files if they exist
-        if socket_file.exists():
-            _validate_unit_file(socket_file)
-        else:
-            socket_file = None
+        socket_file: Path | None = None
+        timer_file: Path | None = None
 
-        if timer_file.exists():
-            _validate_unit_file(timer_file)
-        else:
-            timer_file = None
+        if socket_path.exists():
+            _validate_unit_file(socket_path)
+            socket_file = socket_path
 
-        # Get replica count for this service
+        if timer_path.exists():
+            _validate_unit_file(timer_path)
+            timer_file = timer_path
+
+        # Get replica count (default 1)
         replica_count = replicas.get(name, 1)
-
-        # Build template names (for cat/show commands and installer)
-        suffix = "@" if is_template else ""
-        template_service = f"{app_name}-{name}{suffix}.service"
-        template_socket = f"{app_name}-{name}{suffix}.socket" if socket_file else None
-        template_timer = f"{app_name}-{name}{suffix}.timer" if timer_file else None
-
-        # Build instance names (for start/stop/restart/logs)
-        if is_template:
-            instance_services = [
-                f"{app_name}-{name}@{i}.service" for i in range(1, replica_count + 1)
-            ]
-        else:
-            instance_services = [template_service]
 
         result.append(
             DeployedUnit(
-                service_name=name,
-                is_template=is_template,
+                name=name,
+                app_name=app_name,
                 service_file=service_file,
                 socket_file=socket_file,
                 timer_file=timer_file,
-                template_service_name=template_service,
-                template_socket_name=template_socket,
-                template_timer_name=template_timer,
-                replica_count=replica_count,
-                instance_service_names=instance_services,
+                replicas=replica_count,
             )
         )
 
-    return sorted(result, key=lambda u: u.service_name)
+    return sorted(result, key=lambda u: u.name)
 
 
 def _validate_unit_file(file_path: Path) -> None:
     try:
         parser = configparser.ConfigParser(strict=False, allow_no_value=True)
-        # Read as string to avoid encoding issues
         content = file_path.read_text(encoding="utf-8")
         parser.read_string(content, source=str(file_path))
     except Exception as e:
