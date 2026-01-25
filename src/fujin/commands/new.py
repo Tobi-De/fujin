@@ -7,10 +7,12 @@ from typing import Annotated
 import cappa
 
 from fujin.commands import BaseCommand
-from fujin.templates import NEW_DROPIN_TEMPLATE
-from fujin.templates import NEW_SERVICE_TEMPLATE
-from fujin.templates import NEW_TIMER_SERVICE_TEMPLATE
-from fujin.templates import NEW_TIMER_TEMPLATE
+from fujin.templates import (
+    NEW_DROPIN_TEMPLATE,
+    NEW_SERVICE_TEMPLATE,
+    NEW_TIMER_SERVICE_TEMPLATE,
+    NEW_TIMER_TEMPLATE,
+)
 
 
 @cappa.command(help="Create new systemd service, timer, or dropin files")

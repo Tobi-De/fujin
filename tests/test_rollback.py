@@ -14,7 +14,6 @@ import pytest
 from fujin.commands.rollback import Rollback
 from fujin.config import Config
 
-
 # ============================================================================
 # User Interaction
 # ============================================================================

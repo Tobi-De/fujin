@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-
 import pytest
 
-from fujin.discovery import (
-    discover_deployed_units,
-    ServiceDiscoveryError,
-)
+from fujin.discovery import ServiceDiscoveryError, discover_deployed_units
 
 
 @pytest.mark.parametrize(

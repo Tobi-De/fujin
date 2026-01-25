@@ -1,26 +1,27 @@
 from __future__ import annotations
 
-from pathlib import Path
+import codecs
+import logging
+import os
+import re
 import socket
 import sys
-import re
-import os
-import logging
-from contextlib import contextmanager
-from typing import Generator
-from fujin.config import HostConfig
-from fujin.errors import ConnectionError, SSHAuthenticationError
 import termios
 import tty
-import codecs
+from contextlib import contextmanager
+from pathlib import Path
+from select import select
+from typing import Generator
 
+from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
 from ssh2.session import (
-    Session,
     LIBSSH2_SESSION_BLOCK_INBOUND,
     LIBSSH2_SESSION_BLOCK_OUTBOUND,
+    Session,
 )
-from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
-from select import select
+
+from fujin.config import HostConfig
+from fujin.errors import ConnectionError, SSHAuthenticationError
 
 logger = logging.getLogger(__name__)
 

@@ -9,6 +9,7 @@ from contextlib import closing
 from io import StringIO
 
 from dotenv import dotenv_values
+
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
 

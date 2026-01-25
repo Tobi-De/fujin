@@ -13,7 +13,6 @@ import pytest
 from fujin.commands.down import Down
 from fujin.config import Config
 
-
 # ============================================================================
 # Confirmation Flow
 # ============================================================================

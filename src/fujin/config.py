@@ -1,13 +1,14 @@
 from __future__ import annotations
-from contextlib import suppress
-import re
 
-from fujin.discovery import discover_deployed_units, DeployedUnit
 import os
+import re
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 import msgspec
+
+from fujin.discovery import DeployedUnit, discover_deployed_units
 
 from .errors import ImproperlyConfiguredError
 

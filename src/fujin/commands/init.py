@@ -8,10 +8,8 @@ import cappa
 import tomli_w
 
 from fujin.commands import BaseCommand
-from fujin.config import InstallationMode
-from fujin.config import tomllib
-from fujin.templates import CADDYFILE_TEMPLATE
-from fujin.templates import NEW_SERVICE_TEMPLATE
+from fujin.config import InstallationMode, tomllib
+from fujin.templates import CADDYFILE_TEMPLATE, NEW_SERVICE_TEMPLATE
 
 
 @cappa.command(help="Initialize a new fujin.toml configuration file")

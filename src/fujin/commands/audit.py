@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Annotated
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from collections import defaultdict
+from typing import Annotated
 
 import cappa
 from rich.console import Console

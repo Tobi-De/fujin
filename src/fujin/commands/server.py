@@ -1,14 +1,14 @@
+import secrets
 import shlex
 import shutil
-import secrets
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
 import cappa
-from rich.prompt import Prompt
 import tomli_w
+from rich.prompt import Prompt
 
 from fujin import caddy
 from fujin.commands import BaseCommand

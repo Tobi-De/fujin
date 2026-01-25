@@ -8,8 +8,8 @@ import cappa
 from rich.prompt import Confirm
 
 from fujin import caddy
-from fujin.commands import BaseCommand
 from fujin.audit import log_operation
+from fujin.commands import BaseCommand
 
 
 @cappa.command(

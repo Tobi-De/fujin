@@ -1,12 +1,11 @@
-from dataclasses import dataclass
 import shlex
+from dataclasses import dataclass
 
 import cappa
-from rich.prompt import Confirm
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 
-from fujin.commands import BaseCommand
 from fujin.audit import log_operation
+from fujin.commands import BaseCommand
 
 
 @cappa.command(
