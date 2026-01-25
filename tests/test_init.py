@@ -9,7 +9,6 @@ import pytest
 from fujin.commands.init import Init
 from fujin.config import tomllib
 
-
 # clean_dir fixture is now handled via tmp_path and monkeypatch from conftest
 
 

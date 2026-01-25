@@ -1,12 +1,12 @@
+import logging
 import shlex
 import sys
-import logging
 from pathlib import Path
 from typing import Annotated
 
 import cappa
-import fujin
 
+import fujin
 from fujin.commands.app import App
 from fujin.commands.audit import Audit
 from fujin.commands.deploy import Deploy
@@ -17,8 +17,8 @@ from fujin.commands.new import New
 from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
 from fujin.commands.server import Server
-from fujin.commands.up import Up
 from fujin.commands.showenv import Showenv
+from fujin.commands.up import Up
 
 if sys.version_info >= (3, 11):
     import tomllib

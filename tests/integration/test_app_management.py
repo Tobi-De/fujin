@@ -15,11 +15,7 @@ from fujin.commands.app import App
 from fujin.commands.deploy import Deploy
 from fujin.config import Config
 
-from .helpers import (
-    assert_service_running,
-    exec_in_container,
-    wait_for_service,
-)
+from .helpers import assert_service_running, exec_in_container, wait_for_service
 
 
 @pytest.fixture(scope="function")

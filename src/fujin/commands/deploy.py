@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import hashlib
 import importlib.util
 import json
@@ -20,10 +21,9 @@ from rich.table import Table
 
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
-from fujin.errors import BuildError, DeploymentError
-from fujin.errors import UploadError
-from fujin.secrets import resolve_secrets
+from fujin.errors import BuildError, DeploymentError, UploadError
 from fujin.formatting import safe_format
+from fujin.secrets import resolve_secrets
 
 logger = logging.getLogger(__name__)
 

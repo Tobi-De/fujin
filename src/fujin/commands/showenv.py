@@ -1,11 +1,9 @@
+from dataclasses import dataclass
+
 import cappa
 
-
 from fujin.commands import BaseCommand
-
-
 from fujin.secrets import resolve_secrets
-from dataclasses import dataclass
 
 
 @cappa.command(

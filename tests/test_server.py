@@ -15,7 +15,6 @@ from fujin.commands.server import Server
 from fujin.config import tomllib
 from fujin.errors import SSHKeyError
 
-
 # ============================================================================
 # Setup SSH Command
 # ============================================================================

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 
-
 from fujin.config import SecretConfig
 from fujin.secrets import system
 

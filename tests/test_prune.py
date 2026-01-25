@@ -10,7 +10,6 @@ import pytest
 from fujin.commands.prune import Prune
 from fujin.config import Config
 
-
 # base_config fixture from conftest.py
 
 

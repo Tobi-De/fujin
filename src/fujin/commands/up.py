@@ -2,9 +2,10 @@ from dataclasses import dataclass
 
 import cappa
 
+from fujin.commands import BaseCommand
+
 from .deploy import Deploy
 from .server import Server
-from fujin.commands import BaseCommand
 
 
 @cappa.command(
