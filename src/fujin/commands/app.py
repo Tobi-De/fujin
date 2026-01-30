@@ -74,8 +74,7 @@ class App(BaseCommand):
 
             infos = {
                 "app_name": self.config.app_name,
-                "local_version": self.config.version,
-                "remote_version": remote_version,
+                "deployed_version": remote_version,
             }
             if self.config.caddyfile_exists:
                 domain = self.config.get_domain_name()
