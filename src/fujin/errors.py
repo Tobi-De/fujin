@@ -12,10 +12,6 @@ class FujinError(cappa.Exit):
         super().__init__(message, code=code, **kwargs)
 
 
-class ConnectionError(FujinError):
-    """SSH connection and communication errors."""
-
-
 class DeploymentError(FujinError):
     """Base class for deployment-related errors."""
 
@@ -74,3 +70,11 @@ class ImproperlyConfiguredError(FujinError):
 
 class ServiceDiscoveryError(FujinError):
     """Raised when service discovery fails."""
+
+
+class ConnectionError(FujinError):
+    """SSH connection and communication errors."""
+
+
+class CommandError(FujinError):
+    """SSH command execution errors."""

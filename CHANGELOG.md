@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### 🚀 Features
+
+- Auto rollback on app restart failure
+- Added git based versionning as the default
+
 ## [0.19.5] - 2026-01-25
 
 ### 🚀 Features

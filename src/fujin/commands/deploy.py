@@ -21,9 +21,16 @@ from rich.table import Table
 
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
-from fujin.errors import BuildError, DeploymentError, UploadError
+from fujin.commands.rollback import Rollback
+from fujin.errors import (
+    BuildError,
+    DeploymentError,
+    UploadError,
+    CommandError,
+)
 from fujin.formatting import safe_format
 from fujin.secrets import resolve_secrets
+from fujin._installer.__main__ import EXIT_SERVICE_START_FAILED
 
 logger = logging.getLogger(__name__)
 
@@ -281,14 +288,39 @@ class Deploy(BaseCommand):
                 self.output.success("Bundle uploaded and verified successfully.")
 
                 self.output.info("Executing remote installation...")
-                deploy_script = f"python3 {remote_bundle_path_q} install || (echo 'install failed' >&2; exit 1)"
-                if self.config.versions_to_keep:
-                    deploy_script += (
-                        "&& echo '==> Pruning old versions...' && "
-                        f"cd {remote_bundle_dir_q} && "
-                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm"
+
+                try:
+                    conn.run(f"python3 {remote_bundle_path_q} install", pty=True)
+                except CommandError as e:
+                    if e.code != EXIT_SERVICE_START_FAILED:
+                        raise DeploymentError(
+                            f"Installation failed with exit code {e.code}"
+                        ) from e
+
+                    rollback = Rollback(host=self.host, previous=True)
+                    self.output.info(
+                        "Services failed to start. Rolling back to previous version."
                     )
-                conn.run(deploy_script, pty=True)
+                    try:
+                        if self.no_input or Confirm.ask(
+                            "\n[bold yellow]Proceed with rollback?[/bold yellow]",
+                            default=True,
+                        ):
+                            rollback()
+                        else:
+                            raise DeploymentError(
+                                f"Installation failed with exit code {e.code}"
+                            ) from e
+                    except KeyboardInterrupt:
+                        self.output.info("\nRollback cancelled.")
+
+                if self.config.versions_to_keep:
+                    self.output.info("Pruning old versions...")
+                    conn.run(
+                        f"cd {remote_bundle_dir_q} && "
+                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
+                        warn=True,
+                    )
 
                 # Get git commit hash if available
                 git_commit = None
@@ -371,3 +403,6 @@ class Deploy(BaseCommand):
                     raise cappa.Exit("Deployment cancelled", code=0)
             except KeyboardInterrupt:
                 raise cappa.Exit("\nDeployment cancelled", code=0)
+
+    def _handle_service_failure(self):
+        """Handle service startup failure by offering rollback to previous version."""
