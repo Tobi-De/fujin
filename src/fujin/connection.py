@@ -21,7 +21,7 @@ from ssh2.session import (
 )
 
 from fujin.config import HostConfig
-from fujin.errors import ConnectionError, SSHAuthenticationError
+from fujin.errors import ConnectionError, SSHAuthenticationError, CommandError
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +207,7 @@ class SSH2Connection:
 
         exit_status = channel.get_exit_status()
         if exit_status != 0 and not warn:
-            raise ConnectionError(
+            raise CommandError(
                 f"Command failed with exit code {exit_status}", code=exit_status
             )
 

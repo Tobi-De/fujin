@@ -11,11 +11,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import msgspec
+import pytest
 
 from fujin.commands.deploy import Deploy
 from fujin.commands.down import Down
 from fujin.commands.rollback import Rollback
 from fujin.config import Config
+from fujin.errors import DeploymentError
 
 from .helpers import exec_in_container, wait_for_service
 
@@ -817,3 +819,180 @@ WantedBy=multi-user.target
         vps_container["name"], "cat /opt/fujin/dataapp/.install/.version"
     )
     assert success and stdout.strip() == "1.1.0"
+
+
+def test_deploy_with_failing_service_offers_rollback(
+    vps_container, ssh_key, tmp_path, monkeypatch
+):
+    """When a service fails to start, deploy offers rollback to previous version."""
+    monkeypatch.chdir(tmp_path)
+
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+
+    def create_config(version: str, binary_content: str):
+        """Create config with specified binary content."""
+        distfile = dist_dir / f"failapp-{version}"
+        distfile.write_text(binary_content)
+        distfile.chmod(0o755)
+        return msgspec.convert(
+            {
+                "app": "failapp",
+                "version": version,
+                "build_command": "echo 'building'",
+                "distfile": str(distfile),
+                "installation_mode": "binary",
+                "hosts": [
+                    {
+                        "address": vps_container["ip"],
+                        "user": vps_container["user"],
+                        "port": vps_container["port"],
+                        "key_filename": ssh_key,
+                    }
+                ],
+            },
+            type=Config,
+        )
+
+    # Deploy v1.0.0 - a working version
+    # Note: Restart=no so that failing service stays dead for the test
+    service_file.write_text("""[Unit]
+Description=Fail app test
+
+[Service]
+Type=simple
+ExecStart={install_dir}/failapp
+WorkingDirectory={app_dir}
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    config_v1 = create_config(
+        "1.0.0", "#!/bin/bash\necho 'v1 running' && sleep infinity\n"
+    )
+    with patch("fujin.config.Config.read", return_value=config_v1):
+        deploy = Deploy(no_input=True)
+        deploy()
+
+    # Verify v1.0.0 is running
+    wait_for_service(vps_container["name"], "failapp-web.service")
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/failapp/.install/.version"
+    )
+    assert success and stdout == "1.0.0"
+
+    # Deploy v2.0.0 - a broken version that exits immediately
+    config_v2 = create_config("2.0.0", "#!/bin/bash\nexit 1\n")
+    with patch("fujin.config.Config.read", return_value=config_v2):
+        deploy = Deploy(no_input=True)
+
+        # Deployment should fail because service won't start
+        with pytest.raises(DeploymentError):
+            deploy()
+
+    # The failed version's bundle should still exist (for manual rollback)
+    stdout, success = exec_in_container(
+        vps_container["name"],
+        "ls /opt/fujin/failapp/.install/.versions/",
+    )
+    assert success
+    assert "failapp-1.0.0.pyz" in stdout, "v1.0.0 bundle should exist for rollback"
+    assert "failapp-2.0.0.pyz" in stdout, "v2.0.0 bundle should exist"
+
+
+def test_deploy_with_failing_service_rollback_restores_previous(
+    vps_container, ssh_key, tmp_path, monkeypatch
+):
+    """When user accepts rollback after service failure, previous version is restored."""
+    monkeypatch.chdir(tmp_path)
+
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    # Note: Restart=no so that failing service stays dead for the test
+    service_file.write_text("""[Unit]
+Description=Rollback test app
+
+[Service]
+Type=simple
+ExecStart={install_dir}/rollbackapp
+WorkingDirectory={app_dir}
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    def create_config(version: str, binary_content: str):
+        distfile = dist_dir / f"rollbackapp-{version}"
+        distfile.write_text(binary_content)
+        distfile.chmod(0o755)
+        return msgspec.convert(
+            {
+                "app": "rollbackapp",
+                "version": version,
+                "build_command": "echo 'building'",
+                "distfile": str(distfile),
+                "installation_mode": "binary",
+                "hosts": [
+                    {
+                        "address": vps_container["ip"],
+                        "user": vps_container["user"],
+                        "port": vps_container["port"],
+                        "key_filename": ssh_key,
+                    }
+                ],
+            },
+            type=Config,
+        )
+
+    # Deploy v1.0.0 - working version
+    config_v1 = create_config(
+        "1.0.0", "#!/bin/bash\necho 'v1 running' && sleep infinity\n"
+    )
+    with patch("fujin.config.Config.read", return_value=config_v1):
+        deploy = Deploy(no_input=True)
+        deploy()
+
+    wait_for_service(vps_container["name"], "rollbackapp-web.service")
+
+    # Deploy v2.0.0 - broken version, but accept rollback prompt
+    config_v2 = create_config("2.0.0", "#!/bin/bash\nexit 1\n")
+    with (
+        patch("fujin.config.Config.read", return_value=config_v2),
+        # Mock the rollback confirmation to accept
+        patch("fujin.commands.deploy.Confirm.ask", return_value=True),
+        # Mock the rollback command's prompts
+        patch("fujin.commands.rollback.Prompt.ask", return_value="1.0.0"),
+        patch("fujin.commands.rollback.Confirm.ask", return_value=True),
+    ):
+        deploy = Deploy(no_input=False)  # Allow prompts so rollback can be offered
+
+        # This will fail, offer rollback, user accepts, rollback happens
+        # Then the DeploymentError is still raised
+        with pytest.raises(DeploymentError):
+            deploy()
+
+    # After rollback, v1.0.0 should be running again
+    time.sleep(2)  # Give services time to settle
+    wait_for_service(vps_container["name"], "rollbackapp-web.service")
+
+    stdout, success = exec_in_container(
+        vps_container["name"], "cat /opt/fujin/rollbackapp/.install/.version"
+    )
+    assert success and stdout == "1.0.0", (
+        f"Expected v1.0.0 after rollback, got: {stdout}"
+    )

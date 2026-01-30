@@ -94,30 +94,69 @@ def test_rollback_shows_info_when_no_targets_available(minimal_config_dict):
         mock_output.info.assert_called_with("No rollback targets available")
 
 
-def test_rollback_warns_when_selecting_current_version(minimal_config_dict):
-    """Rollback warns when selecting the already-current version."""
+def test_rollback_shows_info_when_only_current_version_exists(minimal_config_dict):
+    """Rollback shows info when only the current version exists (no previous versions)."""
     config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
+    # Only one version exists and it's the current one
     mock_conn.run.side_effect = [
-        ("testapp-1.0.0.pyz\ntestapp-0.9.0.pyz", True),  # ls -1t
+        ("testapp-1.0.0.pyz", True),  # ls -1t (only current version)
         ("1.0.0", True),  # cat .version
     ]
 
     with (
         patch("fujin.config.Config.read", return_value=config),
         patch.object(Rollback, "connection") as mock_connection,
-        patch("fujin.commands.rollback.Prompt") as mock_prompt,
         patch.object(Rollback, "output", MagicMock()) as mock_output,
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
         mock_connection.return_value.__exit__.return_value = None
-        mock_prompt.ask.return_value = "1.0.0"  # User selects current version
 
         rollback = Rollback()
         rollback()
 
-        # Should show warning
-        mock_output.warning.assert_called_with(
-            "Version 1.0.0 is already the current version."
+        # Should show info message about no previous versions
+        mock_output.info.assert_called_with(
+            "No previous versions available for rollback"
+        )
+
+
+def test_rollback_previous_flag_auto_selects_most_recent(minimal_config_dict):
+    """Rollback with --previous flag auto-selects the most recent previous version."""
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    mock_conn = MagicMock()
+
+    mock_conn.run.side_effect = [
+        ("testapp-1.1.0.pyz\ntestapp-1.0.0.pyz\ntestapp-0.9.0.pyz", True),  # ls -1t
+        ("1.1.0", True),  # cat .version (current)
+        (None, True),  # test -f (bundle exists)
+        ("", True),  # uninstall
+        ("", True),  # install + cleanup
+    ]
+
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch.object(Rollback, "connection") as mock_connection,
+        patch("fujin.commands.rollback.Prompt") as mock_prompt,
+        patch("fujin.commands.rollback.Confirm") as mock_confirm,
+        patch("fujin.commands.rollback.log_operation"),
+        patch.object(Rollback, "output", MagicMock()) as mock_output,
+    ):
+        mock_connection.return_value.__enter__.return_value = mock_conn
+        mock_connection.return_value.__exit__.return_value = None
+
+        rollback = Rollback(previous=True)
+        rollback()
+
+        # Should NOT have prompted for version selection
+        mock_prompt.ask.assert_not_called()
+        mock_confirm.ask.assert_not_called()
+
+        # Should have shown info about rolling back to the most recent previous (1.0.0)
+        mock_output.info.assert_any_call("Rolling back from 1.1.0 to 1.0.0...")
+
+        # Should show success message
+        mock_output.success.assert_called_with(
+            "Rollback to version 1.0.0 completed successfully!"
         )

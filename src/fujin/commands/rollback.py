@@ -1,5 +1,6 @@
 import shlex
 from dataclasses import dataclass
+from typing import Annotated
 
 import cappa
 from rich.prompt import Confirm, Prompt
@@ -13,6 +14,15 @@ from fujin.commands import BaseCommand
 )
 @dataclass
 class Rollback(BaseCommand):
+    previous: Annotated[
+        bool,
+        cappa.Arg(
+            long="--previous",
+            short="-p",
+            help="Automatically roll back to the most recent previous version without prompting",
+        ),
+    ] = False
+
     def __call__(self):
         with self.connection() as conn:
             shlex.quote(self.config.app_dir)
@@ -34,31 +44,36 @@ class Rollback(BaseCommand):
                 self.output.info("No rollback targets available")
                 return
 
-            try:
-                version = Prompt.ask(
-                    "Enter the version you want to rollback to:",
-                    choices=versions,
-                    default=versions[0] if versions else None,
-                )
-            except KeyboardInterrupt as e:
-                raise cappa.Exit("Rollback aborted by user.", code=0) from e
-
             current_version, _ = conn.run(
                 f"cat {fujin_dir}/.version", warn=True, hide=True
             )
             current_version = current_version.strip()
 
-            if current_version == version:
-                self.output.warning(
-                    f"Version {version} is already the current version."
-                )
+            # Filter out current version from choices
+            available_versions = [v for v in versions if v != current_version]
+
+            if not available_versions:
+                self.output.info("No previous versions available for rollback")
                 return
 
-            confirm = Confirm.ask(
-                f"[blue]Rolling back from v{current_version} to v{version}. Are you sure you want to proceed?[/blue]"
-            )
-            if not confirm:
-                return
+            if self.previous:
+                version = available_versions[0]
+                self.output.info(f"Rolling back from {current_version} to {version}...")
+            else:
+                try:
+                    version = Prompt.ask(
+                        "Enter the version you want to rollback to:",
+                        choices=available_versions,
+                        default=available_versions[0] if available_versions else None,
+                    )
+                except KeyboardInterrupt as e:
+                    raise cappa.Exit("Rollback aborted by user.", code=0) from e
+
+                confirm = Confirm.ask(
+                    f"[blue]Rolling back from v{current_version} to v{version}. Are you sure you want to proceed?[/blue]"
+                )
+                if not confirm:
+                    return
 
             # Uninstall current
             if current_version:
