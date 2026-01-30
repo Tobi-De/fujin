@@ -5,7 +5,12 @@ from __future__ import annotations
 import msgspec
 import pytest
 
-from fujin.config import Config, InstallationMode, read_version_from_pyproject
+from fujin.config import (
+    Config,
+    InstallationMode,
+    get_git_version,
+    read_version_from_pyproject,
+)
 from fujin.errors import ImproperlyConfiguredError
 
 # Fixtures are imported from conftest.py
@@ -24,13 +29,90 @@ def test_config_loads_with_explicit_version(minimal_config_dict):
     assert config.installation_mode == InstallationMode.PY_PACKAGE
 
 
-def test_config_reads_version_from_pyproject_when_not_specified(
+def test_config_version_defaults_to_none_for_git_based(
     minimal_config_dict, temp_project_dir
 ):
+    """When version is not specified, it defaults to None (git-based versioning)."""
     del minimal_config_dict["version"]
 
     config = msgspec.convert(minimal_config_dict, type=Config)
-    assert config.version == "2.5.0"
+    # Version field is None, meaning git-based versioning will be used at deploy time
+    assert config.version is None
+
+
+def test_get_deploy_version_uses_explicit_version(minimal_config_dict):
+    """get_deploy_version returns explicit version when set."""
+    minimal_config_dict["version"] = "1.0.0"
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    assert config.get_deploy_version() == "1.0.0"
+
+
+def test_get_deploy_version_uses_git_when_version_not_set(
+    minimal_config_dict, temp_project_dir
+):
+    """get_deploy_version returns git-based version when version is not set."""
+    import subprocess
+
+    # Set up a git repo in the temp directory
+    subprocess.run(
+        ["git", "init"], cwd=temp_project_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=temp_project_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=temp_project_dir,
+        check=True,
+        capture_output=True,
+    )
+    # Create an initial commit
+    (temp_project_dir / "dummy.txt").write_text("test")
+    subprocess.run(
+        ["git", "add", "."], cwd=temp_project_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=temp_project_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    del minimal_config_dict["version"]
+    config = msgspec.convert(minimal_config_dict, type=Config)
+
+    version = config.get_deploy_version()
+    # Git version format: YYYYMMDD-HHMMSS-<hash>[-dirty]
+    assert "-" in version
+    parts = version.split("-")
+    assert len(parts) >= 3  # timestamp date, timestamp time, hash
+    assert len(parts[0]) == 8  # YYYYMMDD
+    assert len(parts[1]) == 6  # HHMMSS
+
+
+def test_get_git_version_format():
+    """get_git_version returns correctly formatted version string."""
+    version = get_git_version()
+    # Format: YYYYMMDD-HHMMSS-<hash>[-dirty]
+    parts = version.split("-")
+    assert len(parts) >= 3
+
+    # Check date part (YYYYMMDD)
+    date_part = parts[0]
+    assert len(date_part) == 8
+    assert date_part.isdigit()
+
+    # Check time part (HHMMSS)
+    time_part = parts[1]
+    assert len(time_part) == 6
+    assert time_part.isdigit()
+
+    # Check hash part (7 chars by default)
+    hash_part = parts[2]
+    assert len(hash_part) >= 7
 
 
 @pytest.mark.parametrize(

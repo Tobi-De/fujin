@@ -5,6 +5,8 @@ import re
 import sys
 from contextlib import suppress
 from pathlib import Path
+import subprocess
+from datetime import datetime, timezone
 
 import msgspec
 
@@ -46,7 +48,7 @@ class SecretConfig(msgspec.Struct):
 class Config(msgspec.Struct, kw_only=True):
     app_name: str = msgspec.field(name="app")
     app_user: str | None = None  # User to run the app as (defaults to app_name)
-    version: str = msgspec.field(default_factory=lambda: read_version_from_pyproject())
+    version: str | None = None  # Explicit version override, defaults to git-based
     versions_to_keep: int | None = 5
     python_version: str | None = None
     build_command: str
@@ -120,6 +122,20 @@ class Config(msgspec.Struct, kw_only=True):
             return f".install/.venv/bin/{self.app_name}"
         return f".install/{self.app_name}"
 
+    def get_deploy_version(self) -> str:
+        """Get the version for deployment.
+
+        Priority:
+        1. Explicit version set in fujin.toml
+        2. Git-based version (timestamp + commit hash)
+
+        Returns:
+            Version string for deployment bundle naming
+        """
+        if self.version:
+            return self.version
+        return get_git_version()
+
     @property
     def app_dir(self) -> str:
         return f"{self.apps_dir}/{self.app_name}"
@@ -129,9 +145,17 @@ class Config(msgspec.Struct, kw_only=True):
         """Get .install subdirectory path (deployment infrastructure)."""
         return f"{self.app_dir}/.install"
 
-    def get_distfile_path(self, version: str | None = None) -> Path:
-        version = version or self.version
-        return Path(self.distfile.format(version=version))
+    def get_distfile_path(self) -> Path:
+        """Get path to the distribution file (wheel, binary, etc.).
+
+        For Python packages, uses the version from pyproject.toml for the
+        {version} placeholder since that's what the build tool creates.
+        """
+        if "{version}" in self.distfile:
+            # Get package version from pyproject.toml for distfile naming
+            pkg_version = read_version_from_pyproject()
+            return Path(self.distfile.format(version=pkg_version))
+        return Path(self.distfile)
 
     @classmethod
     def read(cls) -> Config:
@@ -252,6 +276,48 @@ def read_version_from_pyproject():
         raise msgspec.ValidationError(
             "Project version was not found in the pyproject.toml file, define it manually"
         ) from e
+
+
+def get_git_version() -> str:
+    """Generate a version string from git: YYYYMMDD-HHMMSS-<git_describe>.
+
+    Uses `git describe --always --dirty` which provides:
+    - Tag-based version if available (e.g., v1.2.0-3-g1234567)
+    - Falls back to commit hash if no tags
+    - Appends -dirty if there are uncommitted changes
+
+    The timestamp prefix ensures versions are naturally sortable by filename.
+
+    Returns:
+        Version string like "20240115-143022-a1b2c3d" or "20240115-143022-v1.0.0-3-g1234567-dirty"
+
+    Raises:
+        ImproperlyConfiguredError: If not in a git repository or git is unavailable
+    """
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--always", "--dirty"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        git_describe = result.stdout.strip()
+
+        # Prefix with timestamp for sortability
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+        return f"{timestamp}-{git_describe}"
+
+    except FileNotFoundError:
+        raise ImproperlyConfiguredError(
+            "Git is not installed or not available in PATH. "
+            "Install git or set 'version' explicitly in fujin.toml"
+        )
+    except subprocess.CalledProcessError:
+        raise ImproperlyConfiguredError(
+            "Not a git repository. Initialize git with 'git init' "
+            "or set 'version' explicitly in fujin.toml"
+        )
 
 
 def find_python_version():
