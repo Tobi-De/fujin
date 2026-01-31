@@ -96,46 +96,16 @@ def test_down_successful_teardown_with_bundle(minimal_config_dict):
         assert any("rm -rf" in cmd for cmd in calls)
 
 
-def test_down_skips_uninstall_when_version_file_missing(minimal_config_dict):
-    """Down skips bundle uninstall when .version file doesn't exist (no known version)."""
+def test_down_uses_config_version_when_version_file_missing(minimal_config_dict):
+    """Down uses config version when .version file doesn't exist."""
     config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
-    # Version file read fails -> uninstall skipped -> falls through to error (no force)
-    mock_conn.run.side_effect = [
-        ("", False),  # cat .version fails -> version is None
-        # No bundle check since version is None
-        # Uninstall_ok is False, bundle_exists is False -> if not force, exit
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
-        patch("fujin.commands.down.Confirm") as mock_confirm,
-        patch.object(Down, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
-
-        down = Down(force=False)
-
-        # Without --force and without a known version, down should fail
-        with pytest.raises(SystemExit) as exc_info:
-            down()
-
-        assert exc_info.value.code == 1
-
-
-def test_down_force_cleans_up_when_version_file_missing(minimal_config_dict):
-    """Down with --force cleans up even when .version file doesn't exist."""
-    config = msgspec.convert(minimal_config_dict, type=Config)
-    mock_conn = MagicMock()
-
-    # Version file read fails -> skip bundle uninstall -> force rm -rf
+    # Version file read fails, bundle check, uninstall
     mock_conn.run.side_effect = [
         ("", False),  # cat .version fails
-        ("", True),  # rm -rf (force cleanup)
+        ("", True),  # test -f bundle (exists)
+        ("", True),  # uninstall command
     ]
 
     with (
@@ -149,12 +119,12 @@ def test_down_force_cleans_up_when_version_file_missing(minimal_config_dict):
         mock_connection.return_value.__exit__.return_value = None
         mock_confirm.ask.return_value = True
 
-        down = Down(force=True)
-        down()  # Should not raise
+        down = Down()
+        down()
 
-        # Verify force cleanup was called
+        # Should have tried to run uninstall with config version
         calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        assert any("rm -rf" in cmd for cmd in calls)
+        assert any("testapp-1.0.0.pyz" in cmd for cmd in calls)
 
 
 # ============================================================================

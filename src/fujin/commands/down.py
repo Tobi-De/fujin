@@ -54,18 +54,14 @@ class Down(BaseCommand):
             app_dir = shlex.quote(self.config.app_dir)
             install_dir = shlex.quote(self.config.install_dir)
             res, ok = conn.run(f"cat {install_dir}/.version", warn=True, hide=True)
-            version = res.strip() if ok else None
+            version = res.strip() if ok else self.config.version
+            bundle_path = (
+                f"{install_dir}/.versions/{self.config.app_name}-{version}.pyz"
+            )
+
+            _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
 
             uninstall_ok = False
-            bundle_exists = False
-            if version:
-                bundle_path = (
-                    f"{install_dir}/.versions/{self.config.app_name}-{version}.pyz"
-                )
-                _, bundle_exists = conn.run(
-                    f"test -f {bundle_path}", warn=True, hide=True
-                )
-
             if bundle_exists:
                 uninstall_cmd = (
                     f"python3 {bundle_path} uninstall && sudo rm -rf {app_dir}"

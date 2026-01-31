@@ -87,8 +87,8 @@ class Deploy(BaseCommand):
             )
             raise BuildError(f"Requirements file not found: {self.config.requirements}")
 
-        version = self.config.get_deploy_version()
-        distfile_path = self.config.get_distfile_path()
+        version = self.config.version
+        distfile_path = self.config.get_distfile_path(version)
 
         if not self.config.deployed_units:
             raise DeploymentError("No systemd units found, nothing to deploy")
@@ -247,7 +247,7 @@ class Deploy(BaseCommand):
             with open(zipapp_path, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
-            self._show_deployment_summary(zipapp_path, version)
+            self._show_deployment_summary(zipapp_path)
 
             remote_bundle_dir = Path(self.config.install_dir) / ".versions"
             remote_bundle_path = (
@@ -347,7 +347,7 @@ class Deploy(BaseCommand):
                 url = f"https://{domain}"
                 self.output.info(f"Application is available at: {url}")
 
-    def _show_deployment_summary(self, bundle_path: Path, version: str):
+    def _show_deployment_summary(self, bundle_path: Path):
         console = Console()
 
         bundle_size = bundle_path.stat().st_size
@@ -364,7 +364,7 @@ class Deploy(BaseCommand):
         table.add_column("Value")
 
         table.add_row("App", self.config.app_name)
-        table.add_row("Version", version)
+        table.add_row("Version", self.config.version)
         host_display = self.selected_host.name if self.selected_host.name else "default"
         table.add_row("Host", f"{host_display} ({self.selected_host.address})")
 
