@@ -88,6 +88,8 @@ class Deploy(BaseCommand):
             raise BuildError(f"Requirements file not found: {self.config.requirements}")
 
         version = self.config.version
+        git_commit = get_git_short_hash()
+        bundle_version = f"{version}-{git_commit}" if git_commit else version
         distfile_path = self.config.get_distfile_path(version)
 
         if not self.config.deployed_units:
@@ -207,7 +209,7 @@ class Deploy(BaseCommand):
                 "app_user": self.config.app_user,
                 "deploy_user": self.selected_host.user,
                 "app_dir": self.config.app_dir,
-                "version": version,
+                "version": bundle_version,
                 "installation_mode": self.config.installation_mode.value,
                 "python_version": self.config.python_version,
                 "requirements": bool(self.config.requirements),
@@ -251,7 +253,7 @@ class Deploy(BaseCommand):
 
             remote_bundle_dir = Path(self.config.install_dir) / ".versions"
             remote_bundle_path = (
-                f"{remote_bundle_dir}/{self.config.app_name}-{version}.pyz"
+                f"{remote_bundle_dir}/{self.config.app_name}-{bundle_version}.pyz"
             )
 
             # Quote remote paths for shell usage (safe insertion into remote commands)
@@ -318,24 +320,12 @@ class Deploy(BaseCommand):
                     )
 
                 # Get git commit hash if available
-                git_commit = None
-                try:
-                    result = subprocess.run(
-                        ["git", "rev-parse", "HEAD"],
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    )
-                    git_commit = result.stdout.strip()
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    pass  # Not a git repo or git not available
-
                 log_operation(
                     connection=conn,
                     app_name=self.config.app_name,
                     operation="deploy",
                     host=self.selected_host.name or self.selected_host.address,
-                    version=version,
+                    version=bundle_version,
                     git_commit=git_commit,
                 )
 
@@ -398,3 +388,16 @@ class Deploy(BaseCommand):
                     raise cappa.Exit("Deployment cancelled", code=0)
             except KeyboardInterrupt:
                 raise cappa.Exit("\nDeployment cancelled", code=0)
+
+
+def get_git_short_hash() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""
