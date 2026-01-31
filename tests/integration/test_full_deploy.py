@@ -821,10 +821,10 @@ WantedBy=multi-user.target
     assert success and stdout.strip() == "1.1.0"
 
 
-def test_deploy_with_failing_service_offers_rollback(
+def test_deploy_with_failing_service_auto_rollback(
     vps_container, ssh_key, tmp_path, monkeypatch
 ):
-    """When a service fails to start, deploy offers rollback to previous version."""
+    """When a service fails to start with --no-input, deploy automatically rolls back."""
     monkeypatch.chdir(tmp_path)
 
     dist_dir = tmp_path / "dist"
@@ -890,28 +890,28 @@ WantedBy=multi-user.target
     assert success and stdout == "1.0.0"
 
     # Deploy v2.0.0 - a broken version that exits immediately
+    # With no_input=True, rollback happens automatically
     config_v2 = create_config("2.0.0", "#!/bin/bash\nexit 1\n")
     with patch("fujin.config.Config.read", return_value=config_v2):
         deploy = Deploy(no_input=True)
+        deploy()  # Should complete successfully after auto-rollback
 
-        # Deployment should fail because service won't start
-        with pytest.raises(DeploymentError):
-            deploy()
+    # After auto-rollback, v1.0.0 should be running again
+    time.sleep(2)  # Give services time to settle
+    wait_for_service(vps_container["name"], "failapp-web.service")
 
-    # The failed version's bundle should still exist (for manual rollback)
     stdout, success = exec_in_container(
-        vps_container["name"],
-        "ls /opt/fujin/failapp/.install/.versions/",
+        vps_container["name"], "cat /opt/fujin/failapp/.install/.version"
     )
-    assert success
-    assert "failapp-1.0.0.pyz" in stdout, "v1.0.0 bundle should exist for rollback"
-    assert "failapp-2.0.0.pyz" in stdout, "v2.0.0 bundle should exist"
+    assert success and stdout == "1.0.0", (
+        f"Expected v1.0.0 after auto-rollback, got: {stdout}"
+    )
 
 
-def test_deploy_with_failing_service_rollback_restores_previous(
+def test_deploy_with_failing_service_user_declines_rollback(
     vps_container, ssh_key, tmp_path, monkeypatch
 ):
-    """When user accepts rollback after service failure, previous version is restored."""
+    """When user declines rollback after service failure, DeploymentError is raised."""
     monkeypatch.chdir(tmp_path)
 
     dist_dir = tmp_path / "dist"
@@ -969,30 +969,23 @@ WantedBy=multi-user.target
 
     wait_for_service(vps_container["name"], "rollbackapp-web.service")
 
-    # Deploy v2.0.0 - broken version, but accept rollback prompt
+    # Deploy v2.0.0 - broken version, user DECLINES rollback
     config_v2 = create_config("2.0.0", "#!/bin/bash\nexit 1\n")
     with (
         patch("fujin.config.Config.read", return_value=config_v2),
-        # Mock the rollback confirmation to accept
-        patch("fujin.commands.deploy.Confirm.ask", return_value=True),
-        # Mock the rollback command's prompts
-        patch("fujin.commands.rollback.Prompt.ask", return_value="1.0.0"),
-        patch("fujin.commands.rollback.Confirm.ask", return_value=True),
+        # First call: deployment confirmation (accept), second call: rollback (decline)
+        patch("fujin.commands.deploy.Confirm.ask", side_effect=[True, False]),
     ):
         deploy = Deploy(no_input=False)  # Allow prompts so rollback can be offered
 
-        # This will fail, offer rollback, user accepts, rollback happens
-        # Then the DeploymentError is still raised
+        # User declines rollback, so DeploymentError is raised
         with pytest.raises(DeploymentError):
             deploy()
 
-    # After rollback, v1.0.0 should be running again
-    time.sleep(2)  # Give services time to settle
-    wait_for_service(vps_container["name"], "rollbackapp-web.service")
-
+    # Version should still show 2.0.0 (failed deploy, no rollback)
     stdout, success = exec_in_container(
         vps_container["name"], "cat /opt/fujin/rollbackapp/.install/.version"
     )
-    assert success and stdout == "1.0.0", (
-        f"Expected v1.0.0 after rollback, got: {stdout}"
+    assert success and stdout == "2.0.0", (
+        f"Expected v2.0.0 (no rollback), got: {stdout}"
     )

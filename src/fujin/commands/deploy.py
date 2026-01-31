@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import logging
 import shlex
@@ -30,7 +29,7 @@ from fujin.errors import (
 )
 from fujin.formatting import safe_format
 from fujin.secrets import resolve_secrets
-from fujin._installer.__main__ import EXIT_SERVICE_START_FAILED
+import fujin._installer as installer
 
 logger = logging.getLogger(__name__)
 
@@ -223,11 +222,7 @@ class Deploy(BaseCommand):
             zipapp_dir = Path(tmpdir) / "zipapp_source"
             zipapp_dir.mkdir()
 
-            installer_dir = (
-                Path(importlib.util.find_spec("fujin").origin).parent / "_installer"
-            )
-            installer_src = installer_dir / "__main__.py"
-            shutil.copy(installer_src, zipapp_dir / "__main__.py")
+            shutil.copy(installer.__file__, zipapp_dir / "__main__.py")
 
             # Copy bundle artifacts into zipapp
             for item in bundle_dir.iterdir():
@@ -292,7 +287,7 @@ class Deploy(BaseCommand):
                 try:
                     conn.run(f"python3 {remote_bundle_path_q} install", pty=True)
                 except CommandError as e:
-                    if e.code != EXIT_SERVICE_START_FAILED:
+                    if e.code != installer.EXIT_SERVICE_START_FAILED:
                         raise DeploymentError(
                             f"Installation failed with exit code {e.code}"
                         ) from e
@@ -403,6 +398,3 @@ class Deploy(BaseCommand):
                     raise cappa.Exit("Deployment cancelled", code=0)
             except KeyboardInterrupt:
                 raise cappa.Exit("\nDeployment cancelled", code=0)
-
-    def _handle_service_failure(self):
-        """Handle service startup failure by offering rollback to previous version."""

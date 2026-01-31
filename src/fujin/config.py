@@ -6,8 +6,7 @@ import sys
 from contextlib import suppress
 from pathlib import Path
 import subprocess
-from datetime import datetime, timezone
-
+import datetime
 import msgspec
 
 from fujin.discovery import DeployedUnit, discover_deployed_units
@@ -302,10 +301,7 @@ def get_git_version() -> str:
             check=True,
         )
         git_describe = result.stdout.strip()
-
-        # Prefix with timestamp for sortability
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-
+        timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
         return f"{timestamp}-{git_describe}"
 
     except FileNotFoundError:

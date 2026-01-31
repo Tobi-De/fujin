@@ -240,7 +240,7 @@ export -f {config.app_name}
         if unit not in valid_units:
             cmd = f"sudo systemctl disable {unit} --quiet"
             if not unit.endswith("@.service"):
-                cmd += "--now"
+                cmd += " --now"
             print(f"→ Stopping + disabling stale unit: {unit}")
             run(cmd, check=False)
             run(f"sudo systemctl reset-failed {unit}", check=False, capture_output=True)
