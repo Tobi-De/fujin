@@ -5,7 +5,11 @@ from __future__ import annotations
 import msgspec
 import pytest
 
-from fujin.config import Config, InstallationMode, read_version_from_pyproject
+from fujin.config import (
+    Config,
+    InstallationMode,
+    read_version_from_pyproject,
+)
 from fujin.errors import ImproperlyConfiguredError
 
 # Fixtures are imported from conftest.py
