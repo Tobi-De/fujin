@@ -29,7 +29,8 @@ def test_rollback_aborts_on_keyboard_interrupt(minimal_config_dict):
     with (
         patch("fujin.config.Config.read", return_value=config),
         patch.object(Rollback, "connection") as mock_connection,
-        patch("fujin.commands.rollback.Prompt") as mock_prompt,
+        patch("fujin.commands.rollback.IntPrompt") as mock_prompt,
+        patch("fujin.commands.rollback.Console"),
         patch.object(Rollback, "output", MagicMock()),
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
@@ -57,13 +58,14 @@ def test_rollback_aborts_when_user_declines_confirmation(minimal_config_dict):
     with (
         patch("fujin.config.Config.read", return_value=config),
         patch.object(Rollback, "connection") as mock_connection,
-        patch("fujin.commands.rollback.Prompt") as mock_prompt,
+        patch("fujin.commands.rollback.IntPrompt") as mock_prompt,
+        patch("fujin.commands.rollback.Console"),
         patch("fujin.commands.rollback.Confirm") as mock_confirm,
         patch.object(Rollback, "output", MagicMock()),
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
         mock_connection.return_value.__exit__.return_value = None
-        mock_prompt.ask.return_value = "1.0.0"
+        mock_prompt.ask.return_value = 1  # Select first option
         mock_confirm.ask.return_value = False  # User declines
 
         rollback = Rollback()
@@ -138,7 +140,7 @@ def test_rollback_previous_flag_auto_selects_most_recent(minimal_config_dict):
     with (
         patch("fujin.config.Config.read", return_value=config),
         patch.object(Rollback, "connection") as mock_connection,
-        patch("fujin.commands.rollback.Prompt") as mock_prompt,
+        patch("fujin.commands.rollback.IntPrompt") as mock_prompt,
         patch("fujin.commands.rollback.Confirm") as mock_confirm,
         patch("fujin.commands.rollback.log_operation"),
         patch.object(Rollback, "output", MagicMock()) as mock_output,
