@@ -6,7 +6,7 @@ Description={app_name} worker %i
 After=network.target
 # Add dependencies if needed:
 # Requires=postgresql.service
-# After=postgresql.service
+After=bookstore-web.service
 
 [Service]
 Type=simple

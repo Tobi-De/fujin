@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Improve installer debug output
 - Improve rollback prompt
 - Append git hash to deployed version
 - Auto rollback on app restart failure
@@ -15,6 +16,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚜 Refactor
 
+- Rely more on python tools in _installer
 - Rename installer script
 
 ## [0.19.5] - 2026-01-25

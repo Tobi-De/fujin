@@ -410,7 +410,8 @@ WantedBy=multi-user.target
     # Rollback to v1.0.0
     with (
         patch("fujin.config.Config.read", return_value=config_v2),
-        patch("fujin.commands.rollback.Prompt.ask", return_value="1.0.0"),
+        patch("fujin.commands.rollback.IntPrompt.ask", return_value=1),
+        patch("fujin.commands.rollback.Console"),
         patch("fujin.commands.rollback.Confirm.ask", return_value=True),
     ):
         rollback = Rollback()

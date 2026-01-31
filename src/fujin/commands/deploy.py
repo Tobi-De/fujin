@@ -287,6 +287,7 @@ class Deploy(BaseCommand):
                 self.output.info("Executing remote installation...")
 
                 rollback_ran = False
+                rollback_succeeded = False
                 try:
                     conn.run(f"sudo python3 {remote_bundle_path_q} install", pty=True)
                 except CommandError as e:
@@ -304,8 +305,9 @@ class Deploy(BaseCommand):
                             "\n[bold yellow]Proceed with rollback?[/bold yellow]",
                             default=True,
                         ):
-                            rollback()
+                            rollback_result = rollback()
                             rollback_ran = True
+                            rollback_succeeded = rollback_result == 1
                         else:
                             raise DeploymentError(
                                 f"Installation failed with exit code {e.code}"
@@ -334,7 +336,7 @@ class Deploy(BaseCommand):
         if not rollback_ran:
             self.output.success("Deployment completed successfully!")
 
-        if self.config.caddyfile_exists:
+        if self.config.caddyfile_exists and (not rollback_ran or rollback_succeeded):
             domain = self.config.get_domain_name()
             if domain:
                 url = f"https://{domain}"

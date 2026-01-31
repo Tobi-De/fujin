@@ -134,3 +134,4 @@ class Rollback(BaseCommand):
             )
 
         self.output.success(f"Rollback to version {version} completed successfully!")
+        return 1
