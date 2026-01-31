@@ -1,9 +1,6 @@
 from __future__ import annotations
+import subprocess
 
-"""
-Zipapp installer - single file with all installation logic.
-Run with: python3 installer.pyz [install|uninstall]
-"""
 import pwd
 import grp
 from itertools import chain
@@ -14,13 +11,22 @@ import sys
 import tempfile
 import time
 import zipfile
-from subprocess import run
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
 
 SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
 SYSTEMD_WANTS_DIR = SYSTEMD_SYSTEM_DIR / "multi-user.target.wants"
+
+# Exit codes for the installer
+EXIT_SUCCESS = 0
+EXIT_GENERAL_ERROR = 1
+EXIT_VALIDATION_ERROR = 2
+EXIT_SERVICE_START_FAILED = 3
+EXIT_CADDY_CONFIG_FAILED = 4
+
+run = partial(subprocess.run, shell=True)
 
 
 class DeployedUnit(TypedDict):
@@ -71,14 +77,6 @@ def log(msg: str) -> None:
     print(f"==> {msg}", flush=True)
 
 
-# Exit codes for the installer
-EXIT_SUCCESS = 0
-EXIT_GENERAL_ERROR = 1
-EXIT_VALIDATION_ERROR = 2
-EXIT_SERVICE_START_FAILED = 3
-EXIT_CADDY_CONFIG_FAILED = 4
-
-
 def install(config: InstallConfig, bundle_dir: Path) -> None:
     """Install the application.
 
@@ -95,8 +93,6 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
     # ==========================================================================
     # PHASE 1: VALIDATION (syntax only, no side effects)
     # ==========================================================================
-    log("Validating Caddyfile syntax...")
-
     # Use 'caddy adapt' for syntax-only validation (doesn't resolve external files)
     if config.webserver_enabled:
         caddyfile_path = bundle_dir / "Caddyfile"
@@ -106,12 +102,11 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
                 f"caddy adapt --config {caddyfile_path}",
                 capture_output=True,
                 text=True,
-                shell=True,
             )
             if result.returncode != 0:
                 print("Caddyfile syntax validation failed", file=sys.stderr)
                 print(result.stderr, file=sys.stderr)
-                # sys.exit(EXIT_VALIDATION_ERROR)
+                sys.exit(EXIT_VALIDATION_ERROR)
             print("→ Caddyfile syntax is valid")
 
     # ==========================================================================
@@ -123,31 +118,20 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
     except KeyError:
         log(f"Creating system user: {config.app_user}")
         run(
-            f"useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}"
+            f"useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}",
         )
 
     log("Setting up directories...")
     app_dir = Path(config.app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
-    app_dir.chmod(0o775)
-    # Ensure app_dir itself is group-writable so app can create files
-    run(f"chown {config.deploy_user}:{config.app_user} {app_dir}", shell=True)
 
     install_dir = app_dir / ".install"
     install_dir.mkdir(exist_ok=True)
-    install_dir.chmod(0o775)
 
     # Move .env file to .install/
     env_file = bundle_dir / ".env"
     if env_file.exists():
         env_file = env_file.rename(install_dir / ".env")
-        env_file.chmod(0o640)
-
-    if config.webserver_enabled:
-        Path(config.caddy_config_path).parent.mkdir(parents=True, exist_ok=True)
-
-    log("Setting file ownership and permissions...")
-    run(f"chown -R {config.deploy_user}:{config.app_user} {install_dir}", shell=True)
 
     # ==========================================================================
     # PHASE 3: INSTALLATION
@@ -182,7 +166,7 @@ export -f {config.app_name}
         venv_path = install_dir / ".venv"
         if not venv_path.exists():
             run(
-                f"{uv_python_install_dir} {config.uv_path} venv -p {config.python_version} --managed-python"
+                f"{uv_python_install_dir} {config.uv_path} venv -p {config.python_version} --managed-python",
             )
 
         dist_install = f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} {config.uv_path} pip install {distfile_path}"
@@ -190,15 +174,10 @@ export -f {config.app_name}
             requirements_path = bundle_dir / "requirements.txt"
             run(
                 f"{dist_install} --no-deps && {config.uv_path} pip install -r {requirements_path} ",
-                shell=True,
             )
         else:
-            run(dist_install, shell=True)
+            run(dist_install)
 
-        # .venv permissions: readable/executable by group, writable by owner
-        # Dirs: 755 (rwxr-xr-x), Files: 644 (rw-r--r--)
-        run(f"chmod -R u=rwX,go=rX {install_dir}/.venv", shell=True)
-        run(f"find {install_dir}/.venv/bin -type f -exec chmod +x {{}} +", shell=True)
     else:
         log("Installing binary...")
         (install_dir / ".appenv").write_text(f"""set -a
@@ -217,6 +196,26 @@ export -f {config.app_name}
         full_path_app_bin.unlink(missing_ok=True)
         full_path_app_bin.write_bytes((bundle_dir / config.distfile_name).read_bytes())
         full_path_app_bin.chmod(0o755)
+
+    log("Setting file ownership and permissions...")
+    # Only chown the .install directory - leave app runtime data untouched
+    run(f"chown -R {config.deploy_user}:{config.app_user} {install_dir}")
+    # Make .install directory group-writable (deploy user can update, app user can read)
+    install_dir.chmod(0o775)
+    env_file.chmod(0o640)
+
+    # .venv permissions: readable/executable by group, writable by owner
+    if (install_dir / ".venv").exists():
+        run(f"find {install_dir}/.venv -type d -exec chmod 755 {{}} +")
+        run(f"find {install_dir}/.venv -type f -exec chmod 644 {{}} +")
+        run(f"find {install_dir}/.venv/bin -type f -exec chmod 755 {{}} +")
+    # Ensure app_dir itself is group-writable so app can create files
+    run(f"chown {config.deploy_user}:{config.app_user} {app_dir}")
+    app_dir.chmod(0o775)
+
+    # ==========================================================================
+    # PHASE 4: CONFIGURING SYSTEMD SERVICES
+    # ==========================================================================
 
     log("Configuring systemd services...")
     systemd_dir = bundle_dir / "systemd"
@@ -241,8 +240,8 @@ export -f {config.app_name}
             if not unit.endswith("@.service"):
                 cmd += " --now"
             print(f"→ Stopping + disabling stale unit: {unit}")
-            run(cmd, shell=True)
-            run(f"systemctl reset-failed {unit}", shell=True, capture_output=True)
+            run(cmd)
+            run(f"systemctl reset-failed {unit}", capture_output=True)
 
     log("Removing stale service files")
     for search_dir in [SYSTEMD_SYSTEM_DIR, SYSTEMD_WANTS_DIR]:
@@ -320,12 +319,10 @@ export -f {config.app_name}
     run(
         f"systemctl daemon-reload && systemctl enable {units_str}",
         check=True,
-        shell=True,
     )
 
     restart_result = run(
         f"systemctl restart {units_str}",
-        shell=True,
     )
 
     # Wait briefly for services to stabilize - services that crash immediately
@@ -346,7 +343,6 @@ export -f {config.app_name}
             f"systemctl is-active {unit}",
             capture_output=True,
             text=True,
-            shell=True,
         )
         if status_result.stdout.strip() != "active":
             failed_units.append(unit)
@@ -365,7 +361,6 @@ export -f {config.app_name}
                 print("→ Checking systemd unit configuration...")
                 run(
                     f"systemd-analyze verify {shlex.quote(str(unit_path))}",
-                    shell=True,
                 )
             else:
                 print(f"⚠️ Unit file not found at {unit_path}")
@@ -373,7 +368,6 @@ export -f {config.app_name}
             # Show last 30 lines of logs for this unit
             run(
                 f"journalctl -u {unit} -n 30 --no-pager",
-                shell=True,
             )
         sys.exit(EXIT_SERVICE_START_FAILED)
 
@@ -385,7 +379,7 @@ export -f {config.app_name}
         caddyfile_path = bundle_dir / "Caddyfile"
         if caddyfile_path.exists():
             log("Configuring Caddy...")
-            run(f"usermod -aG {config.app_user} caddy", shell=True)
+            run(f"usermod -aG {config.app_user} caddy")
 
             caddy_config_path = Path(config.caddy_config_path)
 
@@ -401,12 +395,12 @@ export -f {config.app_name}
             os.chown(caddy_config_path, uid, gid)
 
             log("Reloading caddy")
-            reload_result = run("systemctl reload caddy", shell=True)
+            reload_result = run("systemctl reload caddy")
             if reload_result.returncode != 0:
                 print("Warning: Caddy reload failed", file=sys.stderr)
-                # Show last 30 lines of logs
+                # Show last 15 lines of logs
                 print("→ Recent Caddy logs:")
-                run("journalctl -u caddy.service -n 15 --no-pager", shell=True)
+                run("journalctl -u caddy.service -n 15 --no-pager")
 
                 if old_config_content:
                     log("Restoring previous Caddy configuration...")
@@ -449,10 +443,9 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     if regular_units:
         run(
             f"systemctl disable --now {' '.join(regular_units)} --quiet",
-            shell=True,
         )
     if template_units:
-        run(f"systemctl disable {' '.join(template_units)} --quiet", shell=True)
+        run(f"systemctl disable {' '.join(template_units)} --quiet")
 
     log("Removing systemd unit files...")
     for unit in valid_units:
@@ -461,12 +454,13 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
             continue
         (SYSTEMD_SYSTEM_DIR / unit).unlink(missing_ok=True)
 
-    run("systemctl daemon-reload && systemctl reset-failed", shell=True)
+    run("systemctl daemon-reload && systemctl reset-failed")
 
     if config.webserver_enabled:
         log("Removing Caddy configuration...")
         Path(config.caddy_config_path).unlink(missing_ok=True)
-        run("systemctl reload caddy", shell=True)
+        run("systemctl reload caddy")
+        run(f"gpasswd -d caddy {config.app_user}", stdout=subprocess.DEVNULL)
 
     log("Deleting app user...")
     try:
@@ -476,14 +470,13 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     else:
         # Kill any remaining processed owned by the app user before deletion
         log(f"Terminating processes owned by {config.app_user}...")
-        run(f"pkill -u {config.app_user}", shell=True)
+        run(f"pkill -u {config.app_user}")
         # briefly for processes to terminate gracefully
         time.sleep(1)
 
         # Force kill any stubborn processes
-        run(f"pkill -9 -u {config.app_user}", shell=True)
-        run(f"userdel {config.app_user}", shell=True)
-        run(f"groupdel {config.app_user}", shell=True)
+        run(f"pkill -9 -u {config.app_user}")
+        run(f"userdel {config.app_user}", stdout=subprocess.DEVNULL)
 
     log("Uninstall completed.")
 
