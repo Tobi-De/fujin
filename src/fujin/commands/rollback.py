@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from typing import Annotated
 
 import cappa
-from rich.prompt import Confirm, Prompt
+from rich.console import Console
+from rich.prompt import Confirm, IntPrompt
 
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
@@ -60,17 +61,29 @@ class Rollback(BaseCommand):
                 version = available_versions[0]
                 self.output.info(f"Rolling back from {current_version} to {version}...")
             else:
+                console = Console()
+                console.print(f"\n[bold]Current version:[/bold] {current_version}\n")
+                console.print("[bold]Available versions:[/bold]")
+                for i, v in enumerate(available_versions, 1):
+                    console.print(f"  [cyan]{i}[/cyan]. {v}")
+                console.print()
+
                 try:
-                    version = Prompt.ask(
-                        "Enter the version you want to rollback to:",
-                        choices=available_versions,
-                        default=available_versions[0] if available_versions else None,
+                    choice = IntPrompt.ask(
+                        "Select version number",
+                        default=1,
                     )
+                    if choice < 1 or choice > len(available_versions):
+                        self.output.error(
+                            f"Invalid choice. Please enter a number between 1 and {len(available_versions)}"
+                        )
+                        return
+                    version = available_versions[choice - 1]
                 except KeyboardInterrupt as e:
-                    raise cappa.Exit("Rollback aborted by user.", code=0) from e
+                    raise cappa.Exit("\nRollback aborted by user.", code=0) from e
 
                 confirm = Confirm.ask(
-                    f"[blue]Rolling back from v{current_version} to v{version}. Are you sure you want to proceed?[/blue]"
+                    f"\n[bold yellow]Roll back to {version}?[/bold yellow]"
                 )
                 if not confirm:
                     return

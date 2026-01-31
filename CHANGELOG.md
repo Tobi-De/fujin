@@ -8,8 +8,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Append git hash to deployed version
 - Auto rollback on app restart failure
 - Added git based versionning as the default
+
+### 🚜 Refactor
+
+- Rename installer script
 
 ## [0.19.5] - 2026-01-25
 
