@@ -286,8 +286,9 @@ class Deploy(BaseCommand):
 
                 self.output.info("Executing remote installation...")
 
+                rollback_ran = False
                 try:
-                    conn.run(f"python3 {remote_bundle_path_q} install", pty=True)
+                    conn.run(f"sudo python3 {remote_bundle_path_q} install", pty=True)
                 except CommandError as e:
                     if e.code != installer.EXIT_SERVICE_START_FAILED:
                         raise DeploymentError(
@@ -304,6 +305,7 @@ class Deploy(BaseCommand):
                             default=True,
                         ):
                             rollback()
+                            rollback_ran = True
                         else:
                             raise DeploymentError(
                                 f"Installation failed with exit code {e.code}"
@@ -311,7 +313,7 @@ class Deploy(BaseCommand):
                     except KeyboardInterrupt:
                         self.output.info("\nRollback cancelled.")
 
-                if self.config.versions_to_keep:
+                if self.config.versions_to_keep and not rollback_ran:
                     self.output.info("Pruning old versions...")
                     conn.run(
                         f"cd {remote_bundle_dir_q} && "
@@ -329,7 +331,8 @@ class Deploy(BaseCommand):
                     git_commit=git_commit,
                 )
 
-        self.output.success("Deployment completed successfully!")
+        if not rollback_ran:
+            self.output.success("Deployment completed successfully!")
 
         if self.config.caddyfile_exists:
             domain = self.config.get_domain_name()

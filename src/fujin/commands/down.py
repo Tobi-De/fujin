@@ -64,7 +64,7 @@ class Down(BaseCommand):
             uninstall_ok = False
             if bundle_exists:
                 uninstall_cmd = (
-                    f"python3 {bundle_path} uninstall && sudo rm -rf {app_dir}"
+                    f"sudo python3 {bundle_path} uninstall && sudo rm -rf {app_dir}"
                 )
                 _, uninstall_ok = conn.run(uninstall_cmd, warn=True, pty=True)
 

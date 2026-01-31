@@ -4,14 +4,17 @@ from __future__ import annotations
 Zipapp installer - single file with all installation logic.
 Run with: python3 installer.pyz [install|uninstall]
 """
-
+import pwd
+import grp
+from itertools import chain
+import shutil
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
 import zipfile
+from subprocess import run
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -68,10 +71,6 @@ def log(msg: str) -> None:
     print(f"==> {msg}", flush=True)
 
 
-def run(cmd: str, check: bool = True, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, shell=True, **kwargs)
-
-
 # Exit codes for the installer
 EXIT_SUCCESS = 0
 EXIT_GENERAL_ERROR = 1
@@ -104,65 +103,60 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
         if caddyfile_path.exists():
             log("Validating Caddyfile syntax...")
             result = run(
-                f"caddy adapt --config {caddyfile_path} > /dev/null",
-                check=False,
+                f"caddy adapt --config {caddyfile_path}",
                 capture_output=True,
                 text=True,
+                shell=True,
             )
             if result.returncode != 0:
                 print("Caddyfile syntax validation failed", file=sys.stderr)
                 print(result.stderr, file=sys.stderr)
-                sys.exit(EXIT_VALIDATION_ERROR)
+                # sys.exit(EXIT_VALIDATION_ERROR)
             print("→ Caddyfile syntax is valid")
 
     # ==========================================================================
     # PHASE 2: DIRECTORY SETUP
     # ==========================================================================
     log("Creating app user if needed...")
-    user_exists = (
-        run(f"id -u {config.app_user}", check=False, capture_output=True).returncode
-        == 0
-    )
-    if not user_exists:
+    try:
+        pwd.getpwnam(config.app_user)
+    except KeyError:
         log(f"Creating system user: {config.app_user}")
         run(
-            f"sudo useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}"
+            f"useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}"
         )
 
     log("Setting up directories...")
     app_dir = Path(config.app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
+    app_dir.chmod(0o775)
+    # Ensure app_dir itself is group-writable so app can create files
+    run(f"chown {config.deploy_user}:{config.app_user} {app_dir}", shell=True)
 
     install_dir = app_dir / ".install"
     install_dir.mkdir(exist_ok=True)
+    install_dir.chmod(0o775)
 
     # Move .env file to .install/
     env_file = bundle_dir / ".env"
     if env_file.exists():
-        env_file.rename(install_dir / ".env")
+        env_file = env_file.rename(install_dir / ".env")
+        env_file.chmod(0o640)
 
     if config.webserver_enabled:
-        caddy_config_dir = Path(config.caddy_config_path).parent
-        run(f"sudo mkdir -p {caddy_config_dir}")
-
-    # record app version
-    (install_dir / ".version").write_text(config.version)
+        Path(config.caddy_config_path).parent.mkdir(parents=True, exist_ok=True)
 
     log("Setting file ownership and permissions...")
-    run(f"sudo chown -R {config.deploy_user}:{config.app_user} {install_dir}")
-    # Make .install directory group-writable (deploy user can update, app user can read)
-    run(f"sudo chmod 775 {install_dir}")
-    run(f"sudo chmod 640 {install_dir}/.env")
-
-    # Ensure app_dir itself is group-writable so app can create files
-    run(f"sudo chown {config.deploy_user}:{config.app_user} {app_dir}")
-    run(f"sudo chmod 775 {app_dir}")
+    run(f"chown -R {config.deploy_user}:{config.app_user} {install_dir}", shell=True)
 
     # ==========================================================================
     # PHASE 3: INSTALLATION
     # ==========================================================================
     log("Installing application...")
     os.chdir(install_dir)
+
+    # record app version
+    (install_dir / ".version").write_text(config.version)
 
     service_helpers = _format_service_helpers(config)
     if config.installation_mode == "python-package":
@@ -185,23 +179,26 @@ export -f {config.app_name}
 """)
 
         distfile_path = bundle_dir / config.distfile_name
-        run(
-            f"test -d .venv || {uv_python_install_dir} {config.uv_path} venv -p {config.python_version} --managed-python"
-        )
+        venv_path = install_dir / ".venv"
+        if not venv_path.exists():
+            run(
+                f"{uv_python_install_dir} {config.uv_path} venv -p {config.python_version} --managed-python"
+            )
 
         dist_install = f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} {config.uv_path} pip install {distfile_path}"
         if config.requirements:
             requirements_path = bundle_dir / "requirements.txt"
             run(
-                f"{dist_install} --no-deps && {config.uv_path} pip install -r {requirements_path} "
+                f"{dist_install} --no-deps && {config.uv_path} pip install -r {requirements_path} ",
+                shell=True,
             )
         else:
-            run(dist_install)
+            run(dist_install, shell=True)
 
         # .venv permissions: readable/executable by group, writable by owner
         # Dirs: 755 (rwxr-xr-x), Files: 644 (rw-r--r--)
-        run(f"sudo chmod -R u=rwX,go=rX {install_dir}/.venv")
-        run(f"sudo find {install_dir}/.venv/bin -type f -exec chmod +x {{}} +")
+        run(f"chmod -R u=rwX,go=rX {install_dir}/.venv", shell=True)
+        run(f"find {install_dir}/.venv/bin -type f -exec chmod +x {{}} +", shell=True)
     else:
         log("Installing binary...")
         (install_dir / ".appenv").write_text(f"""set -a
@@ -233,17 +230,19 @@ export -f {config.app_name}
             valid_units.append(unit["template_timer_name"])
 
     log("Discovering installed unit files")
-    installed_units = [f.name for f in SYSTEMD_SYSTEM_DIR.glob(f"{config.app_name}*")]
+    installed_units = [
+        f.name for f in SYSTEMD_SYSTEM_DIR.glob(f"{config.app_name}*") if f.is_file()
+    ]
 
     log("Disabling + stopping stale units")
     for unit in installed_units:
         if unit not in valid_units:
-            cmd = f"sudo systemctl disable {unit} --quiet"
+            cmd = f"systemctl disable {unit} --quiet"
             if not unit.endswith("@.service"):
                 cmd += " --now"
             print(f"→ Stopping + disabling stale unit: {unit}")
-            run(cmd, check=False)
-            run(f"sudo systemctl reset-failed {unit}", check=False, capture_output=True)
+            run(cmd, shell=True)
+            run(f"systemctl reset-failed {unit}", shell=True, capture_output=True)
 
     log("Removing stale service files")
     for search_dir in [SYSTEMD_SYSTEM_DIR, SYSTEMD_WANTS_DIR]:
@@ -252,62 +251,41 @@ export -f {config.app_name}
         for file_path in search_dir.glob(f"{config.app_name}*"):
             if file_path.is_file() and file_path.name not in valid_units:
                 print(f"→ Removing stale file: {file_path}")
-                run(f"sudo rm -f {file_path}")
+                file_path.unlink(missing_ok=True)
 
     log("Cleaning up stale dropin directories...")
     for dropin_dir in SYSTEMD_SYSTEM_DIR.glob(f"{config.app_name}*.d"):
-        run(f"sudo rm -rf {dropin_dir}")
+        shutil.rmtree(dropin_dir)
 
     log("Installing new service files...")
     for unit in config.deployed_units:
         service_file = systemd_dir / unit["service_file"]
         content = service_file.read_text()
         deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
-        run(
-            f"sudo tee {deployed_path} > /dev/null",
-            input=content,
-            text=True,
-            check=True,
-        )
+        deployed_path.write_text(content)
 
         if unit["socket_file"]:
             socket_file = systemd_dir / unit["socket_file"]
             socket_content = socket_file.read_text()
             socket_deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_socket_name"]
-            run(
-                f"sudo tee {socket_deployed_path} > /dev/null",
-                input=socket_content,
-                text=True,
-                check=True,
-            )
+            socket_deployed_path.write_text(socket_content)
 
         if unit["timer_file"]:
             timer_file = systemd_dir / unit["timer_file"]
             timer_content = timer_file.read_text()
             timer_deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_timer_name"]
-            run(
-                f"sudo tee {timer_deployed_path} > /dev/null",
-                input=timer_content,
-                text=True,
-                check=True,
-            )
+            timer_deployed_path.write_text(timer_content)
 
     # Deploy common dropins (apply to all services)
     common_dir = systemd_dir / "common.d"
     if common_dir.exists():
         for dropin_path in common_dir.glob("*.conf"):
             dropin_content = dropin_path.read_text()
-
             for unit in config.deployed_units:
                 dropin_dir = SYSTEMD_SYSTEM_DIR / f"{unit['template_service_name']}.d"
-                run(f"sudo mkdir -p {dropin_dir}")
+                dropin_dir.mkdir(parents=True, exist_ok=True)
                 dropin_dest = dropin_dir / dropin_path.name
-                run(
-                    f"sudo tee {dropin_dest} > /dev/null",
-                    input=dropin_content,
-                    text=True,
-                    check=True,
-                )
+                dropin_dest.write_text(dropin_content)
 
     # Deploy service-specific dropins
     for service_dropin_dir_path in systemd_dir.glob("*.service.d"):
@@ -323,17 +301,11 @@ export -f {config.app_name}
             deployed_dropin_dir = (
                 SYSTEMD_SYSTEM_DIR / f"{matching_unit['template_service_name']}.d"
             )
-            run(f"sudo mkdir -p {deployed_dropin_dir}")
-
+            deployed_dropin_dir.mkdir(exist_ok=True, parents=True)
             for dropin_path in service_dropin_dir_path.glob("*.conf"):
                 dropin_content = dropin_path.read_text()
                 dropin_dest = deployed_dropin_dir / dropin_path.name
-                run(
-                    f"sudo tee {dropin_dest} > /dev/null",
-                    input=dropin_content,
-                    text=True,
-                    check=True,
-                )
+                dropin_dest.write_text(dropin_content)
 
     log("Restarting services...")
     active_units = []
@@ -346,13 +318,14 @@ export -f {config.app_name}
 
     units_str = " ".join(active_units)
     run(
-        f"sudo systemctl daemon-reload && sudo systemctl enable {units_str}",
+        f"systemctl daemon-reload && systemctl enable {units_str}",
         check=True,
+        shell=True,
     )
 
     restart_result = run(
-        f"sudo systemctl restart {units_str}",
-        check=False,
+        f"systemctl restart {units_str}",
+        shell=True,
     )
 
     # Wait briefly for services to stabilize - services that crash immediately
@@ -360,13 +333,20 @@ export -f {config.app_name}
     time.sleep(2)
 
     # Check if services are actually running (not just restart command succeeded)
+    # only check services with no timer or socket, they are the only one that should run immediatly
+    units_to_check = [
+        unit["service_instances"]
+        for unit in config.deployed_units
+        if not (unit["template_socket_name"] or unit["template_timer_name"])
+    ]
+    units_to_check = list(chain.from_iterable(units_to_check))
     failed_units = []
-    for unit in active_units:
+    for unit in units_to_check:
         status_result = run(
-            f"sudo systemctl is-active {unit}",
-            check=False,
+            f"systemctl is-active {unit}",
             capture_output=True,
             text=True,
+            shell=True,
         )
         if status_result.stdout.strip() != "active":
             failed_units.append(unit)
@@ -377,10 +357,23 @@ export -f {config.app_name}
             print(f"\n{'=' * 60}")
             print(f"❌ {unit} failed to start")
             print(f"{'=' * 60}")
+            # This checks for syntax errors or missing dependencies defined in the unit file
+            unit_path = SYSTEMD_SYSTEM_DIR / unit
+            if unit_path.exists():
+                import shlex
+
+                print("→ Checking systemd unit configuration...")
+                run(
+                    f"systemd-analyze verify {shlex.quote(str(unit_path))}",
+                    shell=True,
+                )
+            else:
+                print(f"⚠️ Unit file not found at {unit_path}")
+
             # Show last 30 lines of logs for this unit
             run(
-                f"sudo journalctl -u {unit} -n 30 --no-pager",
-                check=False,
+                f"journalctl -u {unit} -n 30 --no-pager",
+                shell=True,
             )
         sys.exit(EXIT_SERVICE_START_FAILED)
 
@@ -392,43 +385,36 @@ export -f {config.app_name}
         caddyfile_path = bundle_dir / "Caddyfile"
         if caddyfile_path.exists():
             log("Configuring Caddy...")
-            run(f"sudo usermod -aG {config.app_user} caddy", check=False)
+            run(f"usermod -aG {config.app_user} caddy", shell=True)
 
             caddy_config_path = Path(config.caddy_config_path)
 
             # Backup existing config if it exists
             old_config_content = None
             if caddy_config_path.exists():
-                result = run(
-                    f"sudo cat {config.caddy_config_path}",
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode == 0:
-                    old_config_content = result.stdout
+                old_config_content = caddy_config_path.read_text()
 
             # Copy new config
-            run(
-                f"sudo cp {caddyfile_path} {config.caddy_config_path} && "
-                f"sudo chown caddy:caddy {config.caddy_config_path}"
-            )
+            shutil.copy2(caddyfile_path, caddy_config_path)
+            uid = pwd.getpwnam("caddy").pw_uid
+            gid = grp.getgrnam("caddy").gr_gid
+            os.chown(caddy_config_path, uid, gid)
 
-            reload_result = run("sudo systemctl reload caddy", check=False)
+            log("Reloading caddy")
+            reload_result = run("systemctl reload caddy", shell=True)
             if reload_result.returncode != 0:
                 print("Warning: Caddy reload failed", file=sys.stderr)
+                # Show last 30 lines of logs
+                print("→ Recent Caddy logs:")
+                run("journalctl -u caddy.service -n 15 --no-pager", shell=True)
+
                 if old_config_content:
                     log("Restoring previous Caddy configuration...")
-                    run(
-                        f"sudo tee {config.caddy_config_path} > /dev/null",
-                        input=old_config_content,
-                        text=True,
-                        check=True,
-                    )
+                    caddy_config_path.write_text(old_config_content)
                     print("Previous Caddy configuration restored.")
                 else:
                     log("Removing invalid Caddy configuration...")
-                    run(f"sudo rm -f {config.caddy_config_path}", check=False)
+                    caddy_config_path.unlink(missing_ok=True)
 
                 print(
                     "\n⚠️ App is running but Caddy configuration failed.\n"
@@ -462,43 +448,42 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     log("Stopping and disabling services...")
     if regular_units:
         run(
-            f"sudo systemctl disable --now {' '.join(regular_units)} --quiet",
-            check=False,
+            f"systemctl disable --now {' '.join(regular_units)} --quiet",
+            shell=True,
         )
     if template_units:
-        run(f"sudo systemctl disable {' '.join(template_units)} --quiet", check=False)
+        run(f"systemctl disable {' '.join(template_units)} --quiet", shell=True)
 
     log("Removing systemd unit files...")
     for unit in valid_units:
         if not unit.startswith(config.app_name):
             print(f"Refusing to remove non-app unit: {unit}", file=sys.stderr)
             continue
-        run(f"sudo rm -f {SYSTEMD_SYSTEM_DIR / unit}")
+        (SYSTEMD_SYSTEM_DIR / unit).unlink(missing_ok=True)
 
-    run("sudo systemctl daemon-reload && sudo systemctl reset-failed", check=False)
+    run("systemctl daemon-reload && systemctl reset-failed", shell=True)
 
     if config.webserver_enabled:
         log("Removing Caddy configuration...")
-        run(f"sudo rm -f {config.caddy_config_path} && sudo systemctl reload caddy")
+        Path(config.caddy_config_path).unlink(missing_ok=True)
+        run("systemctl reload caddy", shell=True)
 
     log("Deleting app user...")
-    user_exists = (
-        run(f"id -u {config.app_user} >/dev/null 2>&1", check=False).returncode == 0
-    )
-    if user_exists:
-        # Kill any remaining processes owned by the app user before deletion
+    try:
+        pwd.getpwnam(config.app_user)
+    except KeyError:
+        print(f"User {config.app_user} does not exist, skipping deletion")
+    else:
+        # Kill any remaining processed owned by the app user before deletion
         log(f"Terminating processes owned by {config.app_user}...")
-        run(f"sudo pkill -u {config.app_user}", check=False)
-
-        # Wait briefly for processes to terminate gracefully
+        run(f"pkill -u {config.app_user}", shell=True)
+        # briefly for processes to terminate gracefully
         time.sleep(1)
 
         # Force kill any stubborn processes
-        run(f"sudo pkill -9 -u {config.app_user}", check=False)
-        run(f"sudo userdel {config.app_user}", check=False)
-        run(f"sudo groupdel {config.app_user}", check=False)
-    else:
-        print(f"User {config.app_user} does not exist, skipping deletion")
+        run(f"pkill -9 -u {config.app_user}", shell=True)
+        run(f"userdel {config.app_user}", shell=True)
+        run(f"groupdel {config.app_user}", shell=True)
 
     log("Uninstall completed.")
 
