@@ -95,7 +95,7 @@ class Rollback(BaseCommand):
                 _, exists = conn.run(f"test -f {current_bundle}", warn=True, hide=True)
 
                 if exists:
-                    uninstall_cmd = f"python3 {current_bundle} uninstall"
+                    uninstall_cmd = f"sudo python3 {current_bundle} uninstall"
                     _, ok = conn.run(uninstall_cmd, warn=True)
                     if not ok:
                         self.output.warning(
@@ -111,7 +111,7 @@ class Rollback(BaseCommand):
             target_bundle = (
                 f"{fujin_dir}/.versions/{self.config.app_name}-{version}.pyz"
             )
-            install_cmd = f"python3 {target_bundle} install || (echo 'install failed' >&2; exit 1)"
+            install_cmd = f"sudo python3 {target_bundle} install || (echo 'install failed' >&2; exit 1)"
 
             # delete all versions after new target
             cleanup_cmd = (

@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Improve rollback prompt
 - Append git hash to deployed version
 - Auto rollback on app restart failure
 - Added git based versionning as the default
