@@ -278,8 +278,13 @@ class Deploy(BaseCommand):
                 self.output.info("Uploading deployment bundle...")
                 # rsync can use .staging.pyz from prior deploys for faster delta transfers
                 if use_rsync:
-                    conn.rsync_upload(str(zipapp_path), staging_path_q)
-                else:
+                    try:
+                        conn.rsync_upload(str(zipapp_path), staging_path_q)
+                    except FileNotFoundError:
+                        # rsync not available on local host
+                        use_rsync = False
+
+                if not use_rsync:
                     conn.put(str(zipapp_path), staging_path_q, verify=True)
 
                 conn.run(
