@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Reload caddy on timenout to avoid cli hanging
 
+### Deps
+
+- Upgrade dependencies
+
 ## [0.20.1] - 2026-01-31
 
 ### 🚀 Features

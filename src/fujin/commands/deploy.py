@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import shlex
@@ -24,7 +23,6 @@ from fujin.commands.rollback import Rollback
 from fujin.errors import (
     BuildError,
     DeploymentError,
-    UploadError,
     CommandError,
 )
 from fujin.formatting import safe_format
@@ -245,11 +243,8 @@ class Deploy(BaseCommand):
                 interpreter="/usr/bin/env python3",
             )
 
-            logger.info("Calculating local bundle checksum")
-            with open(zipapp_path, "rb") as f:
-                local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
-
-            self._show_deployment_summary(zipapp_path, bundle_version)
+            bundle_size = zipapp_path.stat().st_size
+            self._show_deployment_summary(bundle_size, bundle_version)
 
             remote_bundle_dir = Path(self.config.install_dir) / ".versions"
             remote_bundle_path = (
@@ -260,29 +255,41 @@ class Deploy(BaseCommand):
             remote_bundle_dir_q = shlex.quote(str(remote_bundle_dir))
             remote_bundle_path_q = shlex.quote(str(remote_bundle_path))
 
+            # Minimum size threshold for rsync (1MB) - below this, overhead isn't worth it
+            min_rsync_size = 1024 * 1024
+            staging_path = f"{remote_bundle_dir}/.staging.pyz"
+            staging_path_q = shlex.quote(staging_path)
+
             # Upload and Execute
             with self.connection() as conn:
-                conn.run(f"mkdir -p {remote_bundle_dir_q}")
+                # Check rsync availability while creating the directory (single round trip)
+                # Only check if bundle is large enough to benefit from rsync
+                if bundle_size >= min_rsync_size:
+                    output, _ = conn.run(
+                        f"mkdir -p {remote_bundle_dir_q} > /dev/null && command -v rsync",
+                        warn=True,
+                        hide=True,
+                    )
+                    use_rsync = bool(output.strip())
+                else:
+                    conn.run(f"mkdir -p {remote_bundle_dir_q}", hide=True)
+                    use_rsync = False
 
                 self.output.info("Uploading deployment bundle...")
-                conn.put(str(zipapp_path), remote_bundle_path_q)
+                # Both methods use staging + hardlink so rsync can benefit from prior SCP uploads
+                if use_rsync:
+                    conn.rsync_upload(str(zipapp_path), staging_path)
+                else:
+                    # SCP with verification (rsync verifies internally)
+                    conn.put(str(zipapp_path), staging_path_q, verify=True)
 
-                logger.info("Verifying uploaded bundle checksum")
-                remote_checksum_out, _ = conn.run(
-                    f"sha256sum {remote_bundle_path_q} | awk '{{print $1}}'",
+                # Hardlink staging to versioned path (rm first to handle re-deploys)
+                conn.run(
+                    f"rm -f {remote_bundle_path_q} && ln {staging_path_q} {remote_bundle_path_q}",
                     hide=True,
                 )
-                remote_checksum = remote_checksum_out.strip()
 
-                if local_checksum != remote_checksum:
-                    self.output.error(
-                        f"Upload verification failed! Local: {local_checksum}, Remote: {remote_checksum}"
-                    )
-                    raise UploadError(
-                        "Upload verification failed", checksum_mismatch=True
-                    )
-
-                self.output.success("Bundle uploaded and verified successfully.")
+                self.output.success("Bundle uploaded successfully.")
 
                 self.output.info("Executing remote installation...")
 
@@ -345,10 +352,9 @@ class Deploy(BaseCommand):
                 url = f"https://{domain}"
                 self.output.info(f"Application is available at: {url}")
 
-    def _show_deployment_summary(self, bundle_path: Path, bundle_version: str):
+    def _show_deployment_summary(self, bundle_size: int, bundle_version: str):
         console = Console()
 
-        bundle_size = bundle_path.stat().st_size
         if bundle_size < 1024:
             size_str = f"{bundle_size} B"
         elif bundle_size < 1024 * 1024:

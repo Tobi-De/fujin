@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import codecs
+import hashlib
+import shlex
 import logging
 import os
 import re
 import socket
+import subprocess
+from fujin.errors import UploadError
 import sys
 import termios
 import tty
@@ -213,16 +217,18 @@ class SSH2Connection:
 
         return "".join(stdout_buffer), exit_status == 0
 
-    def put(self, local: str, remote: str) -> None:
+    def put(self, local: str, remote: str, verify: bool = False) -> None:
         """Uploads a local file to the remote host using SCP.
 
         Args:
             local: Path to the local file to upload
             remote: Destination path on the remote host (absolute or relative to cwd)
+            verify: If True, verify the upload with SHA256 checksum comparison
 
         Raises:
             FileNotFoundError: If the local file doesn't exist
             ValueError: If the local path is not a file
+            UploadError: If checksum verification fails (when verify=True)
         """
         local_path = Path(local)
 
@@ -237,6 +243,11 @@ class SSH2Connection:
         # If remote path is relative, prepend cwd
         if not remote.startswith("/") and self.cwd:
             remote = f"{self.cwd}/{remote}"
+
+        local_checksum = None
+        if verify:
+            with open(local, "rb") as f:
+                local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
         channel = self.session.scp_send64(
             remote,
@@ -256,6 +267,45 @@ class SSH2Connection:
                     channel.write(data)
         finally:
             channel.close()
+
+        if verify and local_checksum:
+            remote_q = shlex.quote(remote)
+            remote_checksum_out, _ = self.run(
+                f"sha256sum {remote_q} | awk '{{print $1}}'",
+                hide=True,
+            )
+            remote_checksum = remote_checksum_out.strip()
+
+            if local_checksum != remote_checksum:
+                raise UploadError(
+                    f"Upload verification failed! Local: {local_checksum}, Remote: {remote_checksum}",
+                    checksum_mismatch=True,
+                )
+
+    def rsync_upload(self, local: str, remote: str) -> None:
+        local_path = Path(local)
+
+        # Build rsync command with SSH options
+        ssh_opts = ["-p", str(self.host.port)]
+        if self.host.key_filename:
+            key_path = Path(self.host.key_filename).expanduser()
+            ssh_opts.extend(["-i", str(key_path)])
+
+        rsync_cmd = [
+            "rsync",
+            "-az",  # archive mode, compress
+            "--progress",
+            "-e",
+            "ssh " + " ".join(ssh_opts),
+            str(local_path),
+            f"{self.host.user}@{self.host.address}:{remote}",
+        ]
+
+        logger.info(f"Using rsync for delta upload to {remote}")
+        result = subprocess.run(rsync_cmd)
+
+        if result.returncode != 0:
+            raise UploadError(f"rsync failed with exit code {result.returncode}")
 
 
 @contextmanager
