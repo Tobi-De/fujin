@@ -28,7 +28,7 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
 
 2. **Build the Application**: Your application is built locally using the ``build_command`` specified in your configuration.
 
-3. **Create Deployment Bundle**: Fujin creates a Python zipapp (`.pyz` file) containing:
+3. **Create Deployment Bundle**: Fujin creates a Python zipapp (``.pyz`` file) containing:
 
    - Your distribution file (wheel or binary)
    - Optional ``requirements.txt`` (for Python packages)
@@ -39,7 +39,12 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
    - Installer script (``_installer/__main__.py``)
    - Installation metadata (``config.json``)
 
-4. **Upload Bundle**: The zipapp is uploaded to ``{app_dir}/.install/.versions/{app_name}-{version}.pyz`` and verified using SHA256 checksum.
+4. **Upload Bundle**: The zipapp is uploaded to a staging file (``.staging.pyz``) in ``{app_dir}/.install/.versions/``, then hardlinked to the versioned filename (``{app_name}-{version}.pyz``).
+
+   - For bundles **≥1MB**: Fujin uses **rsync** if available on both local and remote machines. Rsync performs delta transfers, only uploading changed bytes—significantly faster for subsequent deployments where most content (dependencies) remains unchanged.
+   - For bundles **<1MB** or when rsync is unavailable: Fujin uses **SCP** with SHA256 checksum verification.
+
+   The staging file approach ensures that rsync can benefit from previous uploads (even those done via SCP), as it compares against the same ``.staging.pyz`` file.
 
 5. **Execute Installer**: The remote Python interpreter runs the zipapp (``python3 installer.pyz install``), which:
 
@@ -52,11 +57,13 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
    - Enables and restarts services
    - Configures and reloads Caddy (when enabled)
 
-6. **Prune Old Bundles**: Old zipapp bundles are removed from ``.install/.versions/`` according to ``versions_to_keep`` configuration.
+6. **Auto-Rollback on Failure**: If services fail to start after installation, Fujin automatically offers to roll back to the previous version. If you confirm (or use ``--no-input``), the previous bundle is re-executed and the failed bundle is removed.
 
-7. **Record Deployment**: Deployment metadata (version, timestamp, git commit) is appended to the audit log.
+7. **Prune Old Bundles**: Old zipapp bundles are removed from ``.install/.versions/`` according to ``versions_to_keep`` configuration.
 
-8. **Completion**: A success message is displayed with deployment details.
+8. **Record Deployment**: Deployment metadata (version, timestamp, git commit) is appended to the audit log.
+
+9. **Completion**: A success message is displayed with deployment details, including the application URL if a Caddyfile is configured.
 
 Deployment Layout and Permissions
 ----------------------------------
