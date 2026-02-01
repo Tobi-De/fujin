@@ -24,7 +24,6 @@ EXIT_SUCCESS = 0
 EXIT_GENERAL_ERROR = 1
 EXIT_VALIDATION_ERROR = 2
 EXIT_SERVICE_START_FAILED = 3
-EXIT_CADDY_CONFIG_FAILED = 4
 
 run = partial(subprocess.run, shell=True)
 
@@ -79,38 +78,11 @@ def log(msg: str) -> None:
 
 def install(config: InstallConfig, bundle_dir: Path) -> None:
     """Install the application.
-
     Assumes it's running from a directory with extracted bundle files.
-
-    The installation follows a structured flow:
-    1. Validation phase - syntax validation (no external dependencies)
-    2. Directory setup phase - create users and directories
-    3. Installation phase - install app, systemd units
-    4. Health check - verify services started successfully
-    5. Caddy configuration - validate on server and reload
     """
 
     # ==========================================================================
-    # PHASE 1: VALIDATION (syntax only, no side effects)
-    # ==========================================================================
-    # Use 'caddy adapt' for syntax-only validation (doesn't resolve external files)
-    if config.webserver_enabled:
-        caddyfile_path = bundle_dir / "Caddyfile"
-        if caddyfile_path.exists():
-            log("Validating Caddyfile syntax...")
-            result = run(
-                f"caddy adapt --config {caddyfile_path}",
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                print("Caddyfile syntax validation failed", file=sys.stderr)
-                print(result.stderr, file=sys.stderr)
-                sys.exit(EXIT_VALIDATION_ERROR)
-            print("→ Caddyfile syntax is valid")
-
-    # ==========================================================================
-    # PHASE 2: DIRECTORY SETUP
+    # PHASE 1: DIRECTORY SETUP
     # ==========================================================================
     log("Creating app user if needed...")
     try:
@@ -134,7 +106,7 @@ def install(config: InstallConfig, bundle_dir: Path) -> None:
         env_file = env_file.rename(install_dir / ".env")
 
     # ==========================================================================
-    # PHASE 3: INSTALLATION
+    # PHASE 2: INSTALLATION
     # ==========================================================================
     log("Installing application...")
     os.chdir(install_dir)
@@ -214,7 +186,7 @@ export -f {config.app_name}
     app_dir.chmod(0o775)
 
     # ==========================================================================
-    # PHASE 4: CONFIGURING SYSTEMD SERVICES
+    # PHASE 3: CONFIGURING SYSTEMD SERVICES
     # ==========================================================================
 
     log("Configuring systemd services...")
@@ -363,7 +335,7 @@ export -f {config.app_name}
                     f"systemd-analyze verify {shlex.quote(str(unit_path))}",
                 )
             else:
-                print(f"⚠️ Unit file not found at {unit_path}")
+                print("⚠️ Unit file not found at {unit_path}")
 
             # Show last 30 lines of logs for this unit
             run(
@@ -372,7 +344,7 @@ export -f {config.app_name}
         sys.exit(EXIT_SERVICE_START_FAILED)
 
     # ==========================================================================
-    # PHASE 5: CADDY CONFIGURATION
+    # PHASE 4: CADDY CONFIGURATION
     # ==========================================================================
     # Configure Caddy after services are running successfully
     if config.webserver_enabled:
@@ -395,9 +367,15 @@ export -f {config.app_name}
             os.chown(caddy_config_path, uid, gid)
 
             log("Reloading caddy")
-            reload_result = run("systemctl reload caddy")
-            if reload_result.returncode != 0:
-                print("Warning: Caddy reload failed", file=sys.stderr)
+            try:
+                reload_result = run("systemctl reload caddy", timeout=20)
+                reload_failed = reload_result.returncode != 0
+            except subprocess.TimeoutExpired:
+                reload_failed = True
+                print("⚠️ Caddy reload timeout", file=sys.stderr)
+
+            if reload_failed:
+                print("⚠️ Caddy reload failed", file=sys.stderr)
                 # Show last 15 lines of logs
                 print("→ Recent Caddy logs:")
                 run("journalctl -u caddy.service -n 15 --no-pager")
