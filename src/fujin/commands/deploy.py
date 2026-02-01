@@ -276,21 +276,18 @@ class Deploy(BaseCommand):
                     use_rsync = False
 
                 self.output.info("Uploading deployment bundle...")
-                # Both methods use staging + hardlink so rsync can benefit from prior SCP uploads
+                # rsync can use .staging.pyz from prior deploys for faster delta transfers
                 if use_rsync:
-                    conn.rsync_upload(str(zipapp_path), staging_path)
+                    conn.rsync_upload(str(zipapp_path), staging_path_q)
                 else:
-                    # SCP with verification (rsync verifies internally)
                     conn.put(str(zipapp_path), staging_path_q, verify=True)
 
-                # Hardlink staging to versioned path (rm first to handle re-deploys)
                 conn.run(
-                    f"rm -f {remote_bundle_path_q} && ln {staging_path_q} {remote_bundle_path_q}",
+                    f"cp -f {staging_path_q} {remote_bundle_path_q}",
                     hide=True,
                 )
 
                 self.output.success("Bundle uploaded successfully.")
-
                 self.output.info("Executing remote installation...")
 
                 rollback_ran = False
