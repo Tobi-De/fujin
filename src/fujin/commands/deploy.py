@@ -24,6 +24,7 @@ from fujin.errors import (
     BuildError,
     DeploymentError,
     CommandError,
+    UploadError,
 )
 from fujin.formatting import safe_format
 from fujin.secrets import resolve_secrets
@@ -281,7 +282,12 @@ class Deploy(BaseCommand):
                     try:
                         conn.rsync_upload(str(zipapp_path), staging_path_q)
                     except FileNotFoundError:
-                        # rsync not available on local host
+                        self.output.warning(
+                            "rsync not found locally, falling back to SCP"
+                        )
+                        use_rsync = False
+                    except UploadError as e:
+                        self.output.warning(f"rsync failed: {e}, falling back to SCP")
                         use_rsync = False
 
                 if not use_rsync:

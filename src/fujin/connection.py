@@ -288,7 +288,7 @@ class SSH2Connection:
         # Build rsync command with SSH options
         ssh_opts = ["-p", str(self.host.port)]
         if self.host.key_filename:
-            key_path = Path(self.host.key_filename).expanduser()
+            key_path = Path(self.host.key_filename).expanduser().resolve()
             ssh_opts.extend(["-i", str(key_path)])
 
         rsync_cmd = [
