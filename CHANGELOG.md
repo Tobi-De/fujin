@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.3] - 2026-02-01
+
+### 🐛 Bug Fixes
+
+- Previous bundle corruption due to hardlink
+
 ## [0.20.2] - 2026-02-01
 
 ### 🚀 Features
