@@ -329,7 +329,7 @@ wheels = [
 
 [[package]]
 name = "fujin-cli"
-version = "0.20.2"
+version = "0.20.4"
 source = { editable = "." }
 dependencies = [
     { name = "cappa" },
@@ -385,7 +385,7 @@ docs = [
 
 [[package]]
 name = "fujin-secrets-1password"
-version = "0.20.2"
+version = "0.20.4"
 source = { editable = "plugins/fujin-secrets-1password" }
 dependencies = [
     { name = "fujin-cli" },
@@ -400,7 +400,7 @@ requires-dist = [
 
 [[package]]
 name = "fujin-secrets-bitwarden"
-version = "0.20.2"
+version = "0.20.4"
 source = { editable = "plugins/fujin-secrets-bitwarden" }
 dependencies = [
     { name = "fujin-cli" },
@@ -415,7 +415,7 @@ requires-dist = [
 
 [[package]]
 name = "fujin-secrets-doppler"
-version = "0.20.2"
+version = "0.20.4"
 source = { editable = "plugins/fujin-secrets-doppler" }
 dependencies = [
     { name = "fujin-cli" },
