@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.6] - 2026-02-02
+
+### 🚀 Features
+
+- Improve installer to work with services supporting reload
+
 ## [0.20.5] - 2026-02-01
 
 ### 🐛 Bug Fixes
