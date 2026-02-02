@@ -294,7 +294,7 @@ export -f {config.app_name}
     )
 
     restart_result = run(
-        f"systemctl restart {units_str}",
+        f"systemctl reload-or-restart {units_str}",
     )
 
     # Wait briefly for services to stabilize - services that crash immediately
