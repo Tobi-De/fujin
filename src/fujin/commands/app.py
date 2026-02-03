@@ -281,8 +281,17 @@ class App(BaseCommand):
         name: Annotated[
             str | None, cappa.Arg(help="Service name, no value means all")
         ] = None,
+        force: Annotated[
+            bool,
+            cappa.Arg(
+                short="-f",
+                long="--force",
+                help="Force a full restart instead of reload-or-restart",
+            ),
+        ] = False,
     ):
-        self._run_service_command("reload-or-restart", name)
+        command = "restart" if force else "reload-or-restart"
+        self._run_service_command(command, name)
 
     @cappa.command(
         help="Stop the specified service or all services if no name is provided"
