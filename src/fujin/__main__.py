@@ -58,7 +58,7 @@ class Fujin:
     verbose: Annotated[
         int,
         cappa.Arg(
-            short=None,
+            short="-V",
             long="--verbose",
             help="Enable verbose logging",
             action=_setup_logging,
