@@ -108,6 +108,18 @@ class Deploy(BaseCommand):
                 "user": self.selected_host.user,
             }
 
+            # Add unit names to context for cross-service references (e.g., After={web_socket})
+            # Only expose singleton units that make sense as dependency targets:
+            # - socket/timer if they exist (always singletons)
+            # - service only if no socket/timer and single replica
+            for du in self.config.deployed_units:
+                if du.socket_file:
+                    context[f"{du.name}_socket"] = du.template_socket_name
+                if du.timer_file:
+                    context[f"{du.name}_timer"] = du.template_timer_name
+                if not du.socket_file and not du.timer_file and not du.is_template:
+                    context[f"{du.name}_service"] = du.template_service_name
+
             # Copy artifacts
             shutil.copy(distfile_path, bundle_dir / distfile_path.name)
             if self.config.requirements:
