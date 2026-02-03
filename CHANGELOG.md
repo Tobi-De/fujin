@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.7] - 2026-02-03
+
+### 🚀 Features
+
+- App command run reload-or-restart
+
 ## [0.20.6] - 2026-02-02
 
 ### 🚀 Features
