@@ -18,6 +18,7 @@ from select import select
 from typing import Generator
 
 from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
+from ssh2.exceptions import SCPProtocolError
 from ssh2.session import (
     LIBSSH2_SESSION_BLOCK_INBOUND,
     LIBSSH2_SESSION_BLOCK_OUTBOUND,
@@ -249,13 +250,23 @@ class SSH2Connection:
             with open(local, "rb") as f:
                 local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
 
-        channel = self.session.scp_send64(
-            remote,
-            fileinfo.st_mode & 0o777,
-            fileinfo.st_size,
-            fileinfo.st_mtime,
-            fileinfo.st_atime,
-        )
+        try:
+            channel = self.session.scp_send64(
+                remote,
+                fileinfo.st_mode & 0o777,
+                fileinfo.st_size,
+                fileinfo.st_mtime,
+                fileinfo.st_atime,
+            )
+        except SCPProtocolError as e:
+            raise UploadError(
+                f"SCP upload failed for {remote}\n"
+                "Possible causes:\n"
+                "  - Server not bootstrapped (run: fujin server bootstrap)\n"
+                "  - Permission denied (SSH user may not have write access)\n"
+                "  - Remote directory does not exist\n"
+                "  - SSH session has stale group membership (reconnect to server)"
+            ) from e
 
         try:
             with open(local, "rb") as local_fh:
