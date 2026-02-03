@@ -139,12 +139,12 @@ def _build_context_for_units(deployed_units: list[DeployedUnit]) -> dict[str, st
         if du.timer_file:
             context[f"{du.name}_timer"] = du.template_timer_name
         if not du.socket_file and not du.timer_file and not du.is_template:
-            context[f"{du.name}_service"] = du.template_service_name
+            context[du.name] = du.template_service_name
     return context
 
 
 def test_service_with_socket_exposes_socket_variable(service_context_project):
-    """Service with socket exposes {name}_socket, not {name}_service."""
+    """Service with socket exposes {name}_socket."""
     du = DeployedUnit(
         name="web",
         app_name="myapp",
@@ -154,13 +154,12 @@ def test_service_with_socket_exposes_socket_variable(service_context_project):
 
     context = _build_context_for_units([du])
 
-    assert "web_socket" in context
     assert context["web_socket"] == "myapp-web.socket"
-    assert "web_service" not in context
+    assert "web" not in context
 
 
 def test_service_with_timer_exposes_timer_variable(service_context_project):
-    """Service with timer exposes {name}_timer, not {name}_service."""
+    """Service with timer exposes {name}_timer."""
     du = DeployedUnit(
         name="scheduler",
         app_name="myapp",
@@ -170,13 +169,12 @@ def test_service_with_timer_exposes_timer_variable(service_context_project):
 
     context = _build_context_for_units([du])
 
-    assert "scheduler_timer" in context
     assert context["scheduler_timer"] == "myapp-scheduler.timer"
-    assert "scheduler_service" not in context
+    assert "scheduler" not in context
 
 
-def test_standalone_service_exposes_service_variable(service_context_project):
-    """Service without socket or timer exposes {name}_service."""
+def test_standalone_service_exposes_name_variable(service_context_project):
+    """Service without socket or timer exposes {name}."""
     du = DeployedUnit(
         name="worker",
         app_name="myapp",
@@ -185,14 +183,13 @@ def test_standalone_service_exposes_service_variable(service_context_project):
 
     context = _build_context_for_units([du])
 
-    assert "worker_service" in context
-    assert context["worker_service"] == "myapp-worker.service"
+    assert context["worker"] == "myapp-worker.service"
     assert "worker_socket" not in context
     assert "worker_timer" not in context
 
 
 def test_service_with_both_socket_and_timer_exposes_both(service_context_project):
-    """Service with both socket and timer exposes both, but not service."""
+    """Service with both socket and timer exposes both."""
     du = DeployedUnit(
         name="api",
         app_name="myapp",
@@ -203,11 +200,9 @@ def test_service_with_both_socket_and_timer_exposes_both(service_context_project
 
     context = _build_context_for_units([du])
 
-    assert "api_socket" in context
-    assert "api_timer" in context
-    assert "api_service" not in context
     assert context["api_socket"] == "myapp-api.socket"
     assert context["api_timer"] == "myapp-api.timer"
+    assert "api" not in context
 
 
 def test_multiple_services_build_complete_context(service_context_project):
@@ -234,16 +229,9 @@ def test_multiple_services_build_complete_context(service_context_project):
 
     context = _build_context_for_units(units)
 
-    # web has socket
     assert context["web_socket"] == "myapp-web.socket"
-    assert "web_service" not in context
-
-    # scheduler has timer
     assert context["scheduler_timer"] == "myapp-scheduler.timer"
-    assert "scheduler_service" not in context
-
-    # worker is standalone
-    assert context["worker_service"] == "myapp-worker.service"
+    assert context["worker"] == "myapp-worker.service"
 
 
 def test_template_service_without_socket_or_timer_not_exposed():
@@ -258,6 +246,6 @@ def test_template_service_without_socket_or_timer_not_exposed():
     context = _build_context_for_units([du])
 
     # Template services without socket/timer are not useful as dependency targets
-    assert "worker_service" not in context
+    assert "worker" not in context
     assert "worker_socket" not in context
     assert "worker_timer" not in context

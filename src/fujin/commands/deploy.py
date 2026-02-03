@@ -118,7 +118,7 @@ class Deploy(BaseCommand):
                 if du.timer_file:
                     context[f"{du.name}_timer"] = du.template_timer_name
                 if not du.socket_file and not du.timer_file and not du.is_template:
-                    context[f"{du.name}_service"] = du.template_service_name
+                    context[f"{du.name}"] = du.template_service_name
 
             # Copy artifacts
             shutil.copy(distfile_path, bundle_dir / distfile_path.name)
