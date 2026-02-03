@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### 🚀 Features
+
+- Added short name for verbose option
+
 ## [0.20.9] - 2026-02-03
 
 ### 🚀 Features
