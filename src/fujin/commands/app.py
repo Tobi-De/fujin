@@ -274,7 +274,7 @@ class App(BaseCommand):
         self._run_service_command("start", name)
 
     @cappa.command(
-        help="Restart the specified service or all services if no name is provided"
+        help="Reload or restart the specified service or all services if no name is provided"
     )
     def restart(
         self,
@@ -282,7 +282,7 @@ class App(BaseCommand):
             str | None, cappa.Arg(help="Service name, no value means all")
         ] = None,
     ):
-        self._run_service_command("restart", name)
+        self._run_service_command("reload-or-restart", name)
 
     @cappa.command(
         help="Stop the specified service or all services if no name is provided"
