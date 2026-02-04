@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- *(deploy)* Add --no-rollback flag to disable automatic rollback
 - *(deploy)* Add --full-restart flag for forced service restarts
 - *(app)* Allow multiple service names for start/stop/restart/logs/status
 - App command can now receive multiple names
