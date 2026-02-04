@@ -53,6 +53,13 @@ class Deploy(BaseCommand):
             help="Force a full restart instead of reload-or-restart",
         ),
     ] = False
+    no_rollback: Annotated[
+        bool,
+        cappa.Arg(
+            long="--no-rollback",
+            help="Disable automatic rollback on deployment failure",
+        ),
+    ] = False
 
     def __call__(self):
         logger.info("Starting deployment process")
@@ -332,6 +339,11 @@ class Deploy(BaseCommand):
                     if e.code != installer.EXIT_SERVICE_START_FAILED:
                         raise DeploymentError(
                             f"Installation failed with exit code {e.code}"
+                        ) from e
+
+                    if self.no_rollback:
+                        raise DeploymentError(
+                            "Services failed to start. Rollback disabled via --no-rollback."
                         ) from e
 
                     rollback = Rollback(host=self.host, previous=True)
