@@ -364,11 +364,13 @@ class Deploy(BaseCommand):
                             ) from e
                     except KeyboardInterrupt:
                         self.output.info("\nRollback cancelled.")
+                    finally:
+                        # Always remove the failed bundle to prevent it from
+                        # appearing in future rollback options
+                        self.output.info("Removing failed deployment bundle...")
+                        conn.run(f"rm -f {remote_bundle_path_q}", warn=True)
 
-                if rollback_succeeded:
-                    self.output.info("Removing failed deployment bundle...")
-                    conn.run(f"rm -f {remote_bundle_path_q}", warn=True)
-                elif self.config.versions_to_keep and not rollback_ran:
+                if self.config.versions_to_keep and not rollback_ran:
                     self.output.info("Pruning old versions...")
                     conn.run(
                         f"cd {remote_bundle_dir_q} && "
