@@ -1,4 +1,5 @@
 from __future__ import annotations
+from fujin.config import get_git_short_hash
 
 import json
 import logging
@@ -88,7 +89,7 @@ class Deploy(BaseCommand):
 
         version = self.config.version
         git_commit = get_git_short_hash()
-        bundle_version = f"{version}-{git_commit}" if git_commit else version
+        bundle_version = self.config.local_version
         distfile_path = self.config.get_distfile_path(version)
 
         if not self.config.deployed_units:
@@ -422,16 +423,3 @@ class Deploy(BaseCommand):
                     raise cappa.Exit("Deployment cancelled", code=0)
             except KeyboardInterrupt:
                 raise cappa.Exit("\nDeployment cancelled", code=0)
-
-
-def get_git_short_hash() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return ""
