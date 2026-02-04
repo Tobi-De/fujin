@@ -1,5 +1,6 @@
 from __future__ import annotations
 import subprocess
+import argparse
 
 import pwd
 import grp
@@ -76,7 +77,9 @@ def log(msg: str) -> None:
     print(f"==> {msg}", flush=True)
 
 
-def install(config: InstallConfig, bundle_dir: Path) -> None:
+def install(
+    config: InstallConfig, bundle_dir: Path, *, full_restart: bool = False
+) -> None:
     """Install the application.
     Assumes it's running from a directory with extracted bundle files.
     """
@@ -293,8 +296,9 @@ export -f {config.app_name}
         check=True,
     )
 
+    restart_cmd = "restart" if full_restart else "reload-or-restart"
     restart_result = run(
-        f"systemctl reload-or-restart {units_str}",
+        f"systemctl {restart_cmd} {units_str}",
     )
 
     # Wait briefly for services to stabilize - services that crash immediately
@@ -464,22 +468,29 @@ def main() -> None:
 
     Handles extraction of zipapp to temp directory and cleanup.
     """
-    if len(sys.argv) < 2:
-        print("Usage: python3 installer.pyz [install|uninstall]", file=sys.stderr)
-        sys.exit(1)
 
-    command = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        prog="installer.pyz",
+        description="Fujin application installer",
+    )
+    parser.add_argument(
+        "command",
+        choices=["install", "uninstall"],
+        help="Command to run",
+    )
+    parser.add_argument(
+        "--full-restart",
+        action="store_true",
+        help="Force a full restart instead of reload-or-restart",
+    )
 
-    if command not in ("install", "uninstall"):
-        print(f"Unknown command: {command}", file=sys.stderr)
-        print("Usage: python3 installer.pyz [install|uninstall]", file=sys.stderr)
-        sys.exit(1)
+    args = parser.parse_args()
 
     source_path = Path(__file__).parent
     zipapp_file = str(source_path)
 
     with tempfile.TemporaryDirectory(
-        prefix=f"fujin-{command}-{source_path.name}"
+        prefix=f"fujin-{args.command}-{source_path.name}"
     ) as tmpdir:
         try:
             log("Extracting installer bundle...")
@@ -494,15 +505,15 @@ def main() -> None:
             config_path = bundle_dir / "config.json"
             config = InstallConfig(**json.loads(config_path.read_text()))
             try:
-                if command == "install":
-                    install(config, bundle_dir)
+                if args.command == "install":
+                    install(config, bundle_dir, full_restart=args.full_restart)
                 else:
                     uninstall(config, bundle_dir)
             finally:
                 os.chdir(original_dir)
 
         except Exception as e:
-            print(f"ERROR: {command} failed: {e}", file=sys.stderr)
+            print(f"ERROR: {args.command} failed: {e}", file=sys.stderr)
             import traceback
 
             traceback.print_exc()

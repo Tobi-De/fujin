@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- *(app)* Allow multiple service names for start/stop/restart/logs/status
 - App command can now receive multiple names
 - Added short name for verbose option
 

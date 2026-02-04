@@ -46,6 +46,13 @@ class Deploy(BaseCommand):
             help="Do not prompt for input (e.g. retry upload)",
         ),
     ] = False
+    full_restart: Annotated[
+        bool,
+        cappa.Arg(
+            long="--full-restart",
+            help="Force a full restart instead of reload-or-restart",
+        ),
+    ] = False
 
     def __call__(self):
         logger.info("Starting deployment process")
@@ -317,7 +324,10 @@ class Deploy(BaseCommand):
                 rollback_ran = False
                 rollback_succeeded = False
                 try:
-                    conn.run(f"sudo python3 {remote_bundle_path_q} install", pty=True)
+                    install_cmd = f"sudo python3 {remote_bundle_path_q} install"
+                    if self.full_restart:
+                        install_cmd += " --full-restart"
+                    conn.run(install_cmd, pty=True)
                 except CommandError as e:
                     if e.code != installer.EXIT_SERVICE_START_FAILED:
                         raise DeploymentError(
