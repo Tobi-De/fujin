@@ -74,7 +74,7 @@ class App(BaseCommand):
 
             infos = {
                 "app_name": self.config.app_name,
-                "local_version": self.config.version,
+                "local_version": self.config.local_version,
                 "remote_version": remote_version,
             }
             if self.config.caddyfile_exists:

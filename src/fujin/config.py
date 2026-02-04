@@ -1,6 +1,8 @@
 from __future__ import annotations
+from functools import cache
 
 import os
+import subprocess
 import re
 import sys
 from contextlib import suppress
@@ -119,6 +121,11 @@ class Config(msgspec.Struct, kw_only=True):
         if self.installation_mode == InstallationMode.PY_PACKAGE:
             return f".install/.venv/bin/{self.app_name}"
         return f".install/{self.app_name}"
+
+    @property
+    def local_version(self) -> str:
+        git_commit = get_git_short_hash()
+        return f"{self.version}-{git_commit}" if git_commit else self.version
 
     @property
     def app_dir(self) -> str:
@@ -261,3 +268,17 @@ def find_python_version():
             f"Add a python_version key or a .python-version file"
         )
     return py_version_file.read_text().strip()
+
+
+@cache
+def get_git_short_hash() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""

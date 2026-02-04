@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Added short name for verbose option
 
+### 🐛 Bug Fixes
+
+- Improve SCP upload error message with actionable hints
+
 ## [0.20.9] - 2026-02-03
 
 ### 🚀 Features
