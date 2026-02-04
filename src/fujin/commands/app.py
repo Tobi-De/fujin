@@ -23,10 +23,10 @@ class App(BaseCommand):
     @cappa.command(help="Display application information and process status")
     def status(
         self,
-        service: Annotated[
-            str | None,
+        services: Annotated[
+            list[str],
             cappa.Arg(
-                help="Optional service name to show detailed info for a specific service"
+                help="Optional service name(s) to show detailed info for specific services"
             ),
         ] = None,
     ):
@@ -38,9 +38,11 @@ class App(BaseCommand):
             )
             return
 
-        # If service specified, show detailed info for that service only
-        if service:
-            return self._show_service_detail(service)
+        # If services specified, show detailed info for those services only
+        if services:
+            for service in services:
+                self._show_service_detail(service)
+            return
 
         names = []
         for du in self.config.deployed_units:
@@ -263,23 +265,23 @@ class App(BaseCommand):
             )
 
     @cappa.command(
-        help="Start the specified service or all services if no name is provided"
+        help="Start the specified service(s) or all services if no name is provided"
     )
     def start(
         self,
-        name: Annotated[
-            str | None, cappa.Arg(help="Service name, no value means all")
+        names: Annotated[
+            list[str], cappa.Arg(help="Service name(s), no value means all")
         ] = None,
     ):
-        self._run_service_command("start", name)
+        self._run_service_command("start", names)
 
     @cappa.command(
-        help="Reload or restart the specified service or all services if no name is provided"
+        help="Reload or restart the specified service(s) or all services if no name is provided"
     )
     def restart(
         self,
-        name: Annotated[
-            str | None, cappa.Arg(help="Service name, no value means all")
+        names: Annotated[
+            list[str], cappa.Arg(help="Service name(s), no value means all")
         ] = None,
         force: Annotated[
             bool,
@@ -291,43 +293,44 @@ class App(BaseCommand):
         ] = False,
     ):
         command = "restart" if force else "reload-or-restart"
-        self._run_service_command(command, name)
+        self._run_service_command(command, names)
 
     @cappa.command(
-        help="Stop the specified service or all services if no name is provided"
+        help="Stop the specified service(s) or all services if no name is provided"
     )
     def stop(
         self,
-        name: Annotated[
-            str | None, cappa.Arg(help="Service name, no value means all")
+        names: Annotated[
+            list[str], cappa.Arg(help="Service name(s), no value means all")
         ] = None,
     ):
-        self._run_service_command("stop", name)
+        self._run_service_command("stop", names)
 
-    def _run_service_command(self, command: str, name: str | None):
+    def _run_service_command(self, command: str, names: list[str] | None):
         with self.connection() as conn:
             # Use instances for start/stop/restart (operates on running services)
-            names = self._get_runtime_units(name)
-            if not names:
+            units = self._get_runtime_units(names)
+            if not units:
                 self.output.warning("No services found")
                 return
 
             # When stopping, also stop associated sockets
-            if command == "stop" and name:
-                du = next(
-                    (u for u in self.deployed_units if u.name == name),
-                    None,
-                )
-                socket_name = du.template_socket_name if du else None
-                if socket_name:
-                    names.append(socket_name)
+            if command == "stop" and names:
+                for name in names:
+                    du = next(
+                        (u for u in self.deployed_units if u.name == name),
+                        None,
+                    )
+                    socket_name = du.template_socket_name if du else None
+                    if socket_name:
+                        units.append(socket_name)
 
             self.output.output(
-                f"Running [cyan]{command}[/cyan] on: [cyan]{', '.join(names)}[/cyan]"
+                f"Running [cyan]{command}[/cyan] on: [cyan]{', '.join(units)}[/cyan]"
             )
-            conn.run(f"sudo systemctl {command} {' '.join(names)}", pty=True)
+            conn.run(f"sudo systemctl {command} {' '.join(units)}", pty=True)
 
-        msg = f"{name} service" if name else "All Services"
+        msg = f"{', '.join(names)} service(s)" if names else "All Services"
         past_tense = {
             "start": "started",
             "restart": "restarted",
@@ -335,10 +338,10 @@ class App(BaseCommand):
         }.get(command, command)
         self.output.success(f"{msg} {past_tense} successfully!")
 
-    @cappa.command(help="Show logs for the specified service")
+    @cappa.command(help="Show logs for the specified service(s)")
     def logs(
         self,
-        name: Annotated[str | None, cappa.Arg(help="Service name")] = None,
+        names: Annotated[list[str], cappa.Arg(help="Service name(s)")] = None,
         follow: Annotated[
             bool, cappa.Arg(short="-f", long="--follow", help="Follow log output")
         ] = False,
@@ -384,12 +387,12 @@ class App(BaseCommand):
         """
         with self.connection() as conn:
             # Use instances for logs (shows logs from running services)
-            names = self._get_runtime_units(name)
+            units = self._get_runtime_units(names)
 
-            if names:
-                units = " ".join(f"-u {n}" for n in names)
+            if units:
+                unit_args = " ".join(f"-u {n}" for n in units)
 
-                cmd_parts = ["sudo journalctl", units]
+                cmd_parts = ["sudo journalctl", unit_args]
                 if not follow:
                     cmd_parts.append(f"-n {lines}")
                     cmd_parts.append("--no-pager")  # Prevent pager when not following
@@ -404,7 +407,7 @@ class App(BaseCommand):
 
                 journalctl_cmd = " ".join(cmd_parts)
 
-                self.output.output(f"Showing logs for: [cyan]{', '.join(names)}[/cyan]")
+                self.output.output(f"Showing logs for: [cyan]{', '.join(units)}[/cyan]")
                 conn.run(journalctl_cmd, warn=True, pty=True)
             else:
                 self.output.warning("No services found")
@@ -490,13 +493,16 @@ class App(BaseCommand):
             )
         return du
 
-    def _get_runtime_units(self, name: str | None) -> list[str]:
+    def _get_runtime_units(self, names: list[str] | None) -> list[str]:
         """Get runtime units for start/stop/restart/logs."""
-        if not name:
+        if not names:
             return self.config.systemd_units
 
-        du = self._find_unit(name)
-        return du.service_instances()
+        units = []
+        for name in names:
+            du = self._find_unit(name)
+            units.extend(du.service_instances())
+        return units
 
     def _get_template_units(self, name: str) -> list[str]:
         """Get template units for cat/show commands."""

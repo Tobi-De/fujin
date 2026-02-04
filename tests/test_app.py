@@ -97,7 +97,7 @@ def test_get_runtime_units_single_replica(app_test_env):
     """Single replica service returns service instance."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        result = app._get_runtime_units("web")
+        result = app._get_runtime_units(["web"])
         assert result == ["testapp-web.service"]
 
 
@@ -105,8 +105,21 @@ def test_get_runtime_units_multi_replica(app_test_env):
     """Multi-replica service returns all numbered instances."""
     with patch("fujin.config.Config.read", return_value=app_test_env):
         app = App()
-        result = app._get_runtime_units("worker")
+        result = app._get_runtime_units(["worker"])
         assert result == [
+            "testapp-worker@1.service",
+            "testapp-worker@2.service",
+            "testapp-worker@3.service",
+        ]
+
+
+def test_get_runtime_units_multiple_services(app_test_env):
+    """Multiple services returns all their instances."""
+    with patch("fujin.config.Config.read", return_value=app_test_env):
+        app = App()
+        result = app._get_runtime_units(["web", "worker"])
+        assert result == [
+            "testapp-web.service",
             "testapp-worker@1.service",
             "testapp-worker@2.service",
             "testapp-worker@3.service",
