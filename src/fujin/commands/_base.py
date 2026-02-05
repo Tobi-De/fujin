@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
@@ -10,6 +11,8 @@ import cappa
 from fujin.config import Config, HostConfig
 from fujin.connection import SSH2Connection
 from fujin.connection import connection as host_connection
+
+_logging_configured = False
 
 
 @dataclass
@@ -27,6 +30,31 @@ class BaseCommand:
             help="Target host (for multi-host setups). Defaults to first host.",
         ),
     ] = None
+
+    verbose: Annotated[
+        int,
+        cappa.Arg(
+            short="-v",
+            long="--verbose",
+            count=True,
+            help="Increase verbosity (-v, -vv, -vvv)",
+        ),
+    ] = 0
+
+    def __post_init__(self) -> None:
+        global _logging_configured
+
+        if not _logging_configured:
+            if self.verbose == 0:
+                level = logging.WARNING
+            elif self.verbose == 1:
+                level = logging.INFO
+            else:
+                level = logging.DEBUG
+            logging.basicConfig(level=level, format="%(message)s")
+            logging.getLogger("markdown_it").setLevel(logging.WARNING)
+
+            _logging_configured = True
 
     @cached_property
     def config(self) -> Config:

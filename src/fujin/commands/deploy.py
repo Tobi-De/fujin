@@ -1,5 +1,4 @@
 from __future__ import annotations
-from fujin.config import get_git_short_hash
 
 import json
 import logging
@@ -18,18 +17,19 @@ from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.table import Table
 
+import fujin._installer as installer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin.commands.rollback import Rollback
+from fujin.config import get_git_short_hash
 from fujin.errors import (
     BuildError,
-    DeploymentError,
     CommandError,
+    DeploymentError,
     UploadError,
 )
 from fujin.formatting import safe_format
 from fujin.secrets import resolve_secrets
-import fujin._installer as installer
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +62,12 @@ class Deploy(BaseCommand):
     ] = False
 
     def __call__(self):
-        logger.info("Starting deployment process")
+        logger.debug("Starting deployment for %s", self.config.app_name)
+        logger.debug("Target host: %s", self.selected_host.address)
 
         if self.config.secret_config:
             self.output.info("Resolving secrets from configuration...")
+            logger.debug("Using secret adapter: %s", self.config.secret_config.adapter)
             parsed_env = resolve_secrets(
                 self.selected_host.env_content, self.config.secret_config
             )
@@ -73,9 +75,7 @@ class Deploy(BaseCommand):
             parsed_env = self.selected_host.env_content
 
         try:
-            logger.debug(
-                f"Building application with command: {self.config.build_command}"
-            )
+            logger.debug("Build command: %s", self.config.build_command)
             self.output.info(f"Building application ...")
             subprocess.run(self.config.build_command, check=True, shell=True)
         except subprocess.CalledProcessError as e:
@@ -105,6 +105,10 @@ class Deploy(BaseCommand):
         git_commit = get_git_short_hash()
         bundle_version = self.config.local_version
         distfile_path = self.config.get_distfile_path(version)
+        logger.debug("Version: %s (bundle: %s)", version, bundle_version)
+        logger.debug("Distfile: %s", distfile_path)
+        if git_commit:
+            logger.debug("Git commit: %s", git_commit)
 
         if not self.config.deployed_units:
             raise DeploymentError("No systemd units found, nothing to deploy")
@@ -136,8 +140,10 @@ class Deploy(BaseCommand):
                     context[f"{du.name}"] = du.template_service_name
 
             # Copy artifacts
+            logger.debug("Copying distfile to bundle")
             shutil.copy(distfile_path, bundle_dir / distfile_path.name)
             if self.config.requirements:
+                logger.debug("Copying requirements.txt to bundle")
                 shutil.copy(self.config.requirements, bundle_dir / "requirements.txt")
 
             # Track unresolved variables across all files
@@ -152,8 +158,12 @@ class Deploy(BaseCommand):
             systemd_bundle = bundle_dir / "systemd"
             systemd_bundle.mkdir()
 
+            logger.debug(
+                "Processing %d deployed units", len(self.config.deployed_units)
+            )
             for du in self.config.deployed_units:
                 # Validate and resolve main service file
+                logger.debug("Processing unit: %s", du.name)
                 service_content = du.service_file.read_text()
                 resolved_content, unresolved = safe_format(service_content, **context)
                 all_unresolved.update(unresolved)
@@ -162,6 +172,7 @@ class Deploy(BaseCommand):
 
                 # Process and add socket file if exists
                 if du.socket_file:
+                    logger.debug("  Including socket file: %s", du.socket_file.name)
                     socket_content = du.socket_file.read_text()
                     resolved_socket, unresolved = safe_format(socket_content, **context)
                     all_unresolved.update(unresolved)
@@ -169,6 +180,7 @@ class Deploy(BaseCommand):
 
                 # Process and add timer file if exists
                 if du.timer_file:
+                    logger.debug("  Including timer file: %s", du.timer_file.name)
                     timer_content = du.timer_file.read_text()
                     resolved_timer, unresolved = safe_format(timer_content, **context)
                     all_unresolved.update(unresolved)
@@ -196,11 +208,15 @@ class Deploy(BaseCommand):
             if common_dir.exists():
                 common_bundle = systemd_bundle / "common.d"
                 common_bundle.mkdir(exist_ok=True)
-                for dropin in common_dir.glob("*.conf"):
+                common_dropins = list(common_dir.glob("*.conf"))
+                if common_dropins:
+                    logger.debug("Processing %d common dropins", len(common_dropins))
+                for dropin in common_dropins:
                     dropin_content = dropin.read_text()
                     resolved_dropin, unresolved = safe_format(dropin_content, **context)
                     all_unresolved.update(unresolved)
                     (common_bundle / dropin.name).write_text(resolved_dropin)
+                    logger.debug("  Bundled common dropin: %s", dropin.name)
 
             # Handle service-specific dropins
             for service_dropin_dir in (self.config.local_config_dir / "systemd").glob(
@@ -208,11 +224,18 @@ class Deploy(BaseCommand):
             ):
                 bundle_dropin_dir = systemd_bundle / service_dropin_dir.name
                 bundle_dropin_dir.mkdir()
-                for dropin in service_dropin_dir.glob("*.conf"):
+                dropins = list(service_dropin_dir.glob("*.conf"))
+                logger.debug(
+                    "Processing %d dropins for %s",
+                    len(dropins),
+                    service_dropin_dir.name,
+                )
+                for dropin in dropins:
                     dropin_content = dropin.read_text()
                     resolved_dropin, unresolved = safe_format(dropin_content, **context)
                     all_unresolved.update(unresolved)
                     (bundle_dropin_dir / dropin.name).write_text(resolved_dropin)
+                    logger.debug("  Bundled dropin: %s", dropin.name)
 
             if self.config.caddyfile_exists:
                 logger.debug("Resolving and bundling Caddyfile")
@@ -246,7 +269,7 @@ class Deploy(BaseCommand):
                 "deployed_units": deployed_units_data,
             }
 
-            logger.info("Creating Python zipapp installer")
+            logger.debug("Creating Python zipapp installer")
             zipapp_dir = Path(tmpdir) / "zipapp_source"
             zipapp_dir.mkdir()
 
@@ -270,6 +293,7 @@ class Deploy(BaseCommand):
                 zipapp_path,
                 interpreter="/usr/bin/env python3",
             )
+            logger.debug("Created zipapp at %s", zipapp_path)
 
             bundle_size = zipapp_path.stat().st_size
             self._show_deployment_summary(bundle_size, bundle_version)
@@ -306,6 +330,7 @@ class Deploy(BaseCommand):
                 self.output.info("Uploading deployment bundle...")
                 # rsync can use .staging.pyz from prior deploys for faster delta transfers
                 if use_rsync:
+                    logger.debug("Using rsync for upload")
                     try:
                         conn.rsync_upload(str(zipapp_path), staging_path_q)
                     except FileNotFoundError:
@@ -318,6 +343,7 @@ class Deploy(BaseCommand):
                         use_rsync = False
 
                 if not use_rsync:
+                    logger.debug("Using SCP for upload")
                     conn.put(str(zipapp_path), staging_path_q, verify=True)
 
                 conn.run(
@@ -334,6 +360,8 @@ class Deploy(BaseCommand):
                     install_cmd = f"sudo python3 {remote_bundle_path_q} install"
                     if self.full_restart:
                         install_cmd += " --full-restart"
+                    if self.verbose > 0:
+                        install_cmd += f" --verbose {self.verbose}"
                     conn.run(install_cmd, pty=True)
                 except CommandError as e:
                     if e.code != installer.EXIT_SERVICE_START_FAILED:
@@ -372,6 +400,7 @@ class Deploy(BaseCommand):
 
                 if self.config.versions_to_keep and not rollback_ran:
                     self.output.info("Pruning old versions...")
+                    logger.debug("Keeping %d versions", self.config.versions_to_keep)
                     conn.run(
                         f"cd {remote_bundle_dir_q} && "
                         f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
