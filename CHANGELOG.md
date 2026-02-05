@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Better logging infrastructure
 - *(deploy)* Add --no-rollback flag to disable automatic rollback
 - *(deploy)* Add --full-restart flag for forced service restarts
 - *(app)* Allow multiple service names for start/stop/restart/logs/status
@@ -16,6 +17,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🐛 Bug Fixes
 
+- *(deploy)* Always remove failed bundle even on Ctrl+C during rollback
 - Improve SCP upload error message with actionable hints
 
 ## [0.20.9] - 2026-02-03

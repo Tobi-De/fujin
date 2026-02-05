@@ -1,19 +1,19 @@
 from __future__ import annotations
-import subprocess
-import argparse
 
-import pwd
+import argparse
 import grp
-from itertools import chain
-import shutil
 import json
+import logging
 import os
+import pwd
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import zipfile
-from functools import partial
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -26,7 +26,7 @@ EXIT_GENERAL_ERROR = 1
 EXIT_VALIDATION_ERROR = 2
 EXIT_SERVICE_START_FAILED = 3
 
-run = partial(subprocess.run, shell=True)
+logger = logging.getLogger("fujin.installer")
 
 
 class DeployedUnit(TypedDict):
@@ -73,8 +73,32 @@ class InstallConfig:
         return f"/home/{self.deploy_user}/.local/bin/uv"
 
 
-def log(msg: str) -> None:
-    print(f"==> {msg}", flush=True)
+class _InstallerFormatter(logging.Formatter):
+    FORMATS = {
+        logging.DEBUG: "    → %(message)s",
+        logging.INFO: "==> %(message)s",
+        logging.WARNING: "⚠️  %(message)s",
+        logging.ERROR: "❌  %(message)s",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        fmt = self.FORMATS.get(record.levelno, "%(message)s")
+        return logging.Formatter(fmt).format(record)
+
+
+def _setup_logging(verbose: int) -> None:
+    """Configure logging for the installer."""
+    if verbose == 0:
+        level = logging.WARNING
+    elif verbose == 1:
+        level = logging.INFO
+    else:
+        level = logging.DEBUG
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(_InstallerFormatter())
+    logger.addHandler(handler)
+    logger.setLevel(level)
 
 
 def install(
@@ -87,18 +111,19 @@ def install(
     # ==========================================================================
     # PHASE 1: DIRECTORY SETUP
     # ==========================================================================
-    log("Creating app user if needed...")
+    logger.info("Setting up directories and app user...")
     try:
         pwd.getpwnam(config.app_user)
+        logger.debug("User %s already exists", config.app_user)
     except KeyError:
-        log(f"Creating system user: {config.app_user}")
+        logger.debug("Creating system user: %s", config.app_user)
         run(
             f"useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}",
         )
 
-    log("Setting up directories...")
     app_dir = Path(config.app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
+    logger.debug("Created app directory: %s", app_dir)
 
     install_dir = app_dir / ".install"
     install_dir.mkdir(exist_ok=True)
@@ -107,19 +132,21 @@ def install(
     env_file = bundle_dir / ".env"
     if env_file.exists():
         env_file = env_file.rename(install_dir / ".env")
+        logger.debug("Moved .env to %s", install_dir / ".env")
 
     # ==========================================================================
     # PHASE 2: INSTALLATION
     # ==========================================================================
-    log("Installing application...")
+    logger.info("Installing application...")
     os.chdir(install_dir)
 
     # record app version
     (install_dir / ".version").write_text(config.version)
+    logger.debug("Recorded version: %s", config.version)
 
     service_helpers = _format_service_helpers(config)
     if config.installation_mode == "python-package":
-        log("Installing Python package...")
+        logger.debug("Installation mode: python-package")
 
         uv_python_install_dir = "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python"
 
@@ -140,13 +167,20 @@ export -f {config.app_name}
         distfile_path = bundle_dir / config.distfile_name
         venv_path = install_dir / ".venv"
         if not venv_path.exists():
+            logger.debug(
+                "Creating virtual environment with Python %s", config.python_version
+            )
             run(
                 f"{uv_python_install_dir} {config.uv_path} venv -p {config.python_version} --managed-python",
             )
+        else:
+            logger.debug("Virtual environment already exists")
 
+        logger.debug("Installing package: %s", config.distfile_name)
         dist_install = f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} {config.uv_path} pip install {distfile_path}"
         if config.requirements:
             requirements_path = bundle_dir / "requirements.txt"
+            logger.debug("Installing with requirements file")
             run(
                 f"{dist_install} --no-deps && {config.uv_path} pip install -r {requirements_path} ",
             )
@@ -154,7 +188,7 @@ export -f {config.app_name}
             run(dist_install)
 
     else:
-        log("Installing binary...")
+        logger.debug("Installation mode: binary")
         (install_dir / ".appenv").write_text(f"""set -a
 source {install_dir}/.env
 set +a
@@ -171,8 +205,10 @@ export -f {config.app_name}
         full_path_app_bin.unlink(missing_ok=True)
         full_path_app_bin.write_bytes((bundle_dir / config.distfile_name).read_bytes())
         full_path_app_bin.chmod(0o755)
+        logger.debug("Installed binary: %s", full_path_app_bin)
 
-    log("Setting file ownership and permissions...")
+    logger.info("Setting file ownership and permissions...")
+    logger.debug("Setting ownership to %s:%s", config.deploy_user, config.app_user)
     # Only chown the .install directory - leave app runtime data untouched
     run(f"chown -R {config.deploy_user}:{config.app_user} {install_dir}")
     # Make .install directory group-writable (deploy user can update, app user can read)
@@ -181,6 +217,7 @@ export -f {config.app_name}
 
     # .venv permissions: readable/executable by group, writable by owner
     if (install_dir / ".venv").exists():
+        logger.debug("Setting venv permissions")
         run(f"find {install_dir}/.venv -type d -exec chmod 755 {{}} +")
         run(f"find {install_dir}/.venv -type f -exec chmod 644 {{}} +")
         run(f"find {install_dir}/.venv/bin -type f -exec chmod 755 {{}} +")
@@ -192,7 +229,7 @@ export -f {config.app_name}
     # PHASE 3: CONFIGURING SYSTEMD SERVICES
     # ==========================================================================
 
-    log("Configuring systemd services...")
+    logger.info("Configuring systemd services...")
     systemd_dir = bundle_dir / "systemd"
 
     valid_units = []
@@ -203,63 +240,76 @@ export -f {config.app_name}
         if unit["template_timer_name"]:
             valid_units.append(unit["template_timer_name"])
 
-    log("Discovering installed unit files")
     installed_units = [
         f.name for f in SYSTEMD_SYSTEM_DIR.glob(f"{config.app_name}*") if f.is_file()
     ]
+    logger.debug("Found %d existing unit files", len(installed_units))
 
-    log("Disabling + stopping stale units")
-    for unit in installed_units:
-        if unit not in valid_units:
+    # Clean up stale units
+    stale_units = [u for u in installed_units if u not in valid_units]
+    if stale_units:
+        logger.debug("Removing %d stale units", len(stale_units))
+        for unit in stale_units:
             cmd = f"systemctl disable {unit} --quiet"
             if not unit.endswith("@.service"):
                 cmd += " --now"
-            print(f"→ Stopping + disabling stale unit: {unit}")
+            logger.debug("Disabling stale unit: %s", unit)
             run(cmd)
             run(f"systemctl reset-failed {unit}", capture_output=True)
 
-    log("Removing stale service files")
     for search_dir in [SYSTEMD_SYSTEM_DIR, SYSTEMD_WANTS_DIR]:
         if not search_dir.exists():
             continue
         for file_path in search_dir.glob(f"{config.app_name}*"):
             if file_path.is_file() and file_path.name not in valid_units:
-                print(f"→ Removing stale file: {file_path}")
+                logger.debug("Removing stale file: %s", file_path.name)
                 file_path.unlink(missing_ok=True)
 
-    log("Cleaning up stale dropin directories...")
     for dropin_dir in SYSTEMD_SYSTEM_DIR.glob(f"{config.app_name}*.d"):
+        logger.debug("Removing stale dropin directory: %s", dropin_dir.name)
         shutil.rmtree(dropin_dir)
 
-    log("Installing new service files...")
+    # Install new service files
+    logger.debug("Installing %d service units", len(config.deployed_units))
     for unit in config.deployed_units:
         service_file = systemd_dir / unit["service_file"]
         content = service_file.read_text()
         deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
         deployed_path.write_text(content)
+        logger.debug("Wrote %s", deployed_path.name)
 
         if unit["socket_file"]:
             socket_file = systemd_dir / unit["socket_file"]
             socket_content = socket_file.read_text()
             socket_deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_socket_name"]
             socket_deployed_path.write_text(socket_content)
+            logger.debug("Wrote %s", socket_deployed_path.name)
 
         if unit["timer_file"]:
             timer_file = systemd_dir / unit["timer_file"]
             timer_content = timer_file.read_text()
             timer_deployed_path = SYSTEMD_SYSTEM_DIR / unit["template_timer_name"]
             timer_deployed_path.write_text(timer_content)
+            logger.debug("Wrote %s", timer_deployed_path.name)
 
     # Deploy common dropins (apply to all services)
     common_dir = systemd_dir / "common.d"
     if common_dir.exists():
-        for dropin_path in common_dir.glob("*.conf"):
+        common_dropins = list(common_dir.glob("*.conf"))
+        if common_dropins:
+            logger.debug("Deploying %d common dropins", len(common_dropins))
+        for dropin_path in common_dropins:
             dropin_content = dropin_path.read_text()
             for unit in config.deployed_units:
                 dropin_dir = SYSTEMD_SYSTEM_DIR / f"{unit['template_service_name']}.d"
                 dropin_dir.mkdir(parents=True, exist_ok=True)
                 dropin_dest = dropin_dir / dropin_path.name
                 dropin_dest.write_text(dropin_content)
+                logger.debug(
+                    "Wrote common dropin %s to %s",
+                    dropin_path.name,
+                    dropin_dir.name,
+                )
 
     # Deploy service-specific dropins
     for service_dropin_dir_path in systemd_dir.glob("*.service.d"):
@@ -276,12 +326,19 @@ export -f {config.app_name}
                 SYSTEMD_SYSTEM_DIR / f"{matching_unit['template_service_name']}.d"
             )
             deployed_dropin_dir.mkdir(exist_ok=True, parents=True)
-            for dropin_path in service_dropin_dir_path.glob("*.conf"):
+            dropins = list(service_dropin_dir_path.glob("*.conf"))
+            logger.debug(
+                "Deploying %d dropins for %s",
+                len(dropins),
+                matching_unit["template_service_name"],
+            )
+            for dropin_path in dropins:
                 dropin_content = dropin_path.read_text()
                 dropin_dest = deployed_dropin_dir / dropin_path.name
                 dropin_dest.write_text(dropin_content)
+                logger.debug("Wrote dropin %s", dropin_path.name)
 
-    log("Restarting services...")
+    logger.info("Restarting services...")
     active_units = []
     for unit in config.deployed_units:
         active_units.extend(unit["service_instances"])
@@ -318,32 +375,36 @@ export -f {config.app_name}
         status_result = run(
             f"systemctl is-active {unit}",
             capture_output=True,
-            text=True,
         )
         if status_result.stdout.strip() != "active":
             failed_units.append(unit)
 
     if restart_result.returncode != 0 or failed_units:
-        log("⚠️ Services failed to start! Fetching recent logs...")
+        logger.error("Services failed to start!")
         for unit in failed_units:
-            print(f"\n{'=' * 60}")
-            print(f"❌ {unit} failed to start")
-            print(f"{'=' * 60}")
+            logger.error("")
+            logger.error("=" * 60)
+            logger.error("%s failed to start", unit)
+            logger.error("=" * 60)
             # This checks for syntax errors or missing dependencies defined in the unit file
             unit_path = SYSTEMD_SYSTEM_DIR / unit
             if unit_path.exists():
                 import shlex
 
-                print("→ Checking systemd unit configuration...")
-                run(
+                logger.error("Checking systemd unit configuration...")
+                # Always show output for failed services - don't suppress
+                subprocess.run(
                     f"systemd-analyze verify {shlex.quote(str(unit_path))}",
+                    shell=True,
                 )
             else:
-                print("⚠️ Unit file not found at {unit_path}")
+                logger.error("Unit file not found at %s", unit_path)
 
             # Show last 30 lines of logs for this unit
-            run(
+            logger.error("Recent logs:")
+            subprocess.run(
                 f"journalctl -u {unit} -n 30 --no-pager",
+                shell=True,
             )
         sys.exit(EXIT_SERVICE_START_FAILED)
 
@@ -354,7 +415,7 @@ export -f {config.app_name}
     if config.webserver_enabled:
         caddyfile_path = bundle_dir / "Caddyfile"
         if caddyfile_path.exists():
-            log("Configuring Caddy...")
+            logger.info("Configuring Caddy...")
             run(f"usermod -aG {config.app_user} caddy")
 
             caddy_config_path = Path(config.caddy_config_path)
@@ -370,36 +431,42 @@ export -f {config.app_name}
             gid = grp.getgrnam("caddy").gr_gid
             os.chown(caddy_config_path, uid, gid)
 
-            log("Reloading caddy")
+            logger.debug("Reloading Caddy")
             try:
-                reload_result = run("systemctl reload caddy", timeout=20)
+                reload_result = run(
+                    "systemctl reload caddy",
+                    timeout=20,
+                    capture_output=True,
+                )
                 reload_failed = reload_result.returncode != 0
             except subprocess.TimeoutExpired:
                 reload_failed = True
-                print("⚠️ Caddy reload timeout", file=sys.stderr)
+                logger.warning("Caddy reload timeout")
 
             if reload_failed:
-                print("⚠️ Caddy reload failed", file=sys.stderr)
-                # Show last 15 lines of logs
-                print("→ Recent Caddy logs:")
-                run("journalctl -u caddy.service -n 15 --no-pager")
+                logger.warning("Caddy reload failed")
+                # Always show Caddy logs on failure - don't suppress
+                logger.warning("Recent Caddy logs:")
+                subprocess.run(
+                    "journalctl -u caddy.service -n 15 --no-pager",
+                    shell=True,
+                )
 
                 if old_config_content:
-                    log("Restoring previous Caddy configuration...")
+                    logger.warning("Restoring previous Caddy configuration")
                     caddy_config_path.write_text(old_config_content)
-                    print("Previous Caddy configuration restored.")
                 else:
-                    log("Removing invalid Caddy configuration...")
+                    logger.warning("Removing invalid Caddy configuration")
                     caddy_config_path.unlink(missing_ok=True)
 
-                print(
-                    "\n⚠️ App is running but Caddy configuration failed.\n"
-                    "Fix your Caddyfile and redeploy, or manually update the config."
+                logger.warning(
+                    "App is running but Caddy configuration failed. "
+                    "Fix your Caddyfile and redeploy."
                 )
             else:
-                print("→ Caddy configuration updated and reloaded")
+                logger.debug("Caddy configuration updated and reloaded")
 
-    log("Install completed successfully.")
+    logger.info("Install completed successfully.")
 
 
 def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
@@ -407,7 +474,7 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
 
     Assumes it's running from a directory with extracted bundle files.
     """
-    log("Uninstalling application...")
+    logger.info("Uninstalling %s...", config.app_name)
 
     regular_units = []
     template_units = []
@@ -421,7 +488,8 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
 
     valid_units = regular_units + template_units
 
-    log("Stopping and disabling services...")
+    logger.info("Stopping services...")
+    logger.debug("Disabling %d units", len(valid_units))
     if regular_units:
         run(
             f"systemctl disable --now {' '.join(regular_units)} --quiet",
@@ -429,38 +497,61 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
     if template_units:
         run(f"systemctl disable {' '.join(template_units)} --quiet")
 
-    log("Removing systemd unit files...")
+    logger.debug("Removing systemd unit files")
     for unit in valid_units:
         if not unit.startswith(config.app_name):
-            print(f"Refusing to remove non-app unit: {unit}", file=sys.stderr)
+            logger.error("Refusing to remove non-app unit: %s", unit)
             continue
         (SYSTEMD_SYSTEM_DIR / unit).unlink(missing_ok=True)
+        logger.debug("Removed %s", unit)
 
     run("systemctl daemon-reload && systemctl reset-failed")
 
     if config.webserver_enabled:
-        log("Removing Caddy configuration...")
+        logger.info("Removing Caddy configuration...")
         Path(config.caddy_config_path).unlink(missing_ok=True)
+        logger.debug("Reloading Caddy")
         run("systemctl reload caddy")
-        run(f"gpasswd -d caddy {config.app_user}", stdout=subprocess.DEVNULL)
+        logger.debug("Removing caddy from %s group", config.app_user)
+        run(f"gpasswd -d caddy {config.app_user}")
 
-    log("Deleting app user...")
+    logger.info("Deleting app user...")
     try:
         pwd.getpwnam(config.app_user)
     except KeyError:
-        print(f"User {config.app_user} does not exist, skipping deletion")
+        logger.debug("User %s does not exist, skipping", config.app_user)
     else:
-        # Kill any remaining processed owned by the app user before deletion
-        log(f"Terminating processes owned by {config.app_user}...")
+        logger.debug("Terminating processes owned by %s", config.app_user)
         run(f"pkill -u {config.app_user}")
-        # briefly for processes to terminate gracefully
         time.sleep(1)
-
-        # Force kill any stubborn processes
         run(f"pkill -9 -u {config.app_user}")
-        run(f"userdel {config.app_user}", stdout=subprocess.DEVNULL)
+        logger.debug("Deleting user %s", config.app_user)
+        run(f"userdel {config.app_user}")
 
-    log("Uninstall completed.")
+    logger.info("Uninstall completed.")
+
+
+def run(
+    cmd: str,
+    *,
+    check: bool = False,
+    capture_output: bool = False,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a shell command with verbosity-aware output."""
+    is_debug = logger.level <= logging.DEBUG
+
+    if is_debug and not capture_output:
+        logger.debug("Running: %s", cmd)
+
+    kwargs = {"shell": True, "check": check, "timeout": timeout}
+
+    if capture_output:
+        kwargs.update(capture_output=True, text=True)
+    elif not is_debug:
+        kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    return subprocess.run(cmd, **kwargs)
 
 
 def main() -> None:
@@ -483,8 +574,17 @@ def main() -> None:
         action="store_true",
         help="Force a full restart instead of reload-or-restart",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        type=int,
+        default=0,
+        help="Verbosity level (0=warning, 1=info, 2+=debug)",
+    )
 
     args = parser.parse_args()
+
+    _setup_logging(args.verbose)
 
     source_path = Path(__file__).parent
     zipapp_file = str(source_path)
@@ -493,7 +593,7 @@ def main() -> None:
         prefix=f"fujin-{args.command}-{source_path.name}"
     ) as tmpdir:
         try:
-            log("Extracting installer bundle...")
+            logger.debug("Extracting installer bundle...")
             with zipfile.ZipFile(zipapp_file, "r") as zf:
                 zf.extractall(tmpdir)
 
@@ -513,7 +613,7 @@ def main() -> None:
                 os.chdir(original_dir)
 
         except Exception as e:
-            print(f"ERROR: {args.command} failed: {e}", file=sys.stderr)
+            logger.error("ERROR: %s failed: %s", args.command, e)
             import traceback
 
             traceback.print_exc()
