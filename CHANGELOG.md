@@ -4,10 +4,11 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.21.0] - 2026-02-06
 
 ### 🚀 Features
 
+- Ignore service file starting with _
 - Better logging infrastructure
 - *(deploy)* Add --no-rollback flag to disable automatic rollback
 - *(deploy)* Add --full-restart flag for forced service restarts
