@@ -329,7 +329,7 @@ wheels = [
 
 [[package]]
 name = "fujin-cli"
-version = "0.20.9"
+version = "0.21.0"
 source = { editable = "." }
 dependencies = [
     { name = "cappa" },
@@ -337,6 +337,13 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "ssh2-python" },
+]
+
+[package.optional-dependencies]
+ui = [
+    { name = "sse-starlette" },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -364,8 +371,12 @@ requires-dist = [
     { name = "msgspec", extras = ["toml"], specifier = ">=0.20" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "rich", specifier = ">=14.3.1" },
+    { name = "sse-starlette", marker = "extra == 'ui'", specifier = ">=2.0" },
     { name = "ssh2-python", specifier = ">=1.2.0.post1" },
+    { name = "starlette", marker = "extra == 'ui'", specifier = ">=0.40" },
+    { name = "uvicorn", marker = "extra == 'ui'", specifier = ">=0.30" },
 ]
+provides-extras = ["ui"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -385,7 +396,7 @@ docs = [
 
 [[package]]
 name = "fujin-secrets-1password"
-version = "0.20.9"
+version = "0.21.0"
 source = { editable = "plugins/fujin-secrets-1password" }
 dependencies = [
     { name = "fujin-cli" },
@@ -400,7 +411,7 @@ requires-dist = [
 
 [[package]]
 name = "fujin-secrets-bitwarden"
-version = "0.20.9"
+version = "0.21.0"
 source = { editable = "plugins/fujin-secrets-bitwarden" }
 dependencies = [
     { name = "fujin-cli" },
@@ -415,7 +426,7 @@ requires-dist = [
 
 [[package]]
 name = "fujin-secrets-doppler"
-version = "0.20.9"
+version = "0.21.0"
 source = { editable = "plugins/fujin-secrets-doppler" }
 dependencies = [
     { name = "fujin-cli" },
@@ -1219,6 +1230,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/90/76/437d71068094df0726366574cf3432a4ed754217b436eb7429415cf2d480/sqlparse-0.5.5.tar.gz", hash = "sha256:e20d4a9b0b8585fdf63b10d30066c7c94c5d7a7ec47c889a2d83a3caa93ff28e", size = 120815, upload-time = "2025-12-19T07:17:45.073Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/4b/359f28a903c13438ef59ebeee215fb25da53066db67b305c125f1c6d2a25/sqlparse-0.5.5-py3-none-any.whl", hash = "sha256:12a08b3bf3eec877c519589833aed092e2444e68240a3577e8e26148acc7b1ba", size = 46138, upload-time = "2025-12-19T07:17:46.573Z" },
+]
+
+[[package]]
+name = "sse-starlette"
+version = "3.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "starlette" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/8d/00d280c03ffd39aaee0e86ec81e2d3b9253036a0f93f51d10503adef0e65/sse_starlette-3.2.0.tar.gz", hash = "sha256:8127594edfb51abe44eac9c49e59b0b01f1039d0c7461c6fd91d4e03b70da422", size = 27253, upload-time = "2026-01-17T13:11:05.62Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/96/7f/832f015020844a8b8f7a9cbc103dd76ba8e3875004c41e08440ea3a2b41a/sse_starlette-3.2.0-py3-none-any.whl", hash = "sha256:5876954bd51920fc2cd51baee47a080eb88a37b5b784e615abb0b283f801cdbf", size = 12763, upload-time = "2026-01-17T13:11:03.775Z" },
 ]
 
 [[package]]
