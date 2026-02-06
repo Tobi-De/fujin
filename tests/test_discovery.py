@@ -255,3 +255,109 @@ ListenStream=/run/web.sock
         "myapp-web.service",
         "myapp-web.socket",
     ]
+
+
+def test_discover_skips_underscore_prefixed_services(tmp_path):
+    """Should skip services with names starting with underscore."""
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    # Create a regular service
+    (systemd_dir / "web.service").write_text("""[Unit]
+Description=Web server
+
+[Service]
+ExecStart=/bin/true
+""")
+
+    # Create an underscore-prefixed service (should be skipped)
+    (systemd_dir / "_helper.service").write_text("""[Unit]
+Description=Internal helper
+
+[Service]
+ExecStart=/bin/true
+""")
+
+    units = discover_deployed_units(install_dir, "myapp", {})
+
+    assert len(units) == 1
+    assert units[0].name == "web"
+
+
+def test_discover_skips_underscore_template_services(tmp_path):
+    """Should skip template services with names starting with underscore."""
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    # Create a regular template service
+    (systemd_dir / "worker@.service").write_text("""[Unit]
+Description=Worker %i
+
+[Service]
+ExecStart=/bin/true
+""")
+
+    # Create an underscore-prefixed template service (should be skipped)
+    (systemd_dir / "_internal@.service").write_text("""[Unit]
+Description=Internal %i
+
+[Service]
+ExecStart=/bin/true
+""")
+
+    units = discover_deployed_units(install_dir, "myapp", {"worker": 2, "_internal": 2})
+
+    assert len(units) == 1
+    assert units[0].name == "worker"
+
+
+def test_discover_skips_all_underscore_services(tmp_path):
+    """Should return empty list if all services are underscore-prefixed."""
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    # Create only underscore-prefixed services
+    (systemd_dir / "_helper.service").write_text("""[Unit]
+Description=Helper
+
+[Service]
+ExecStart=/bin/true
+""")
+
+    (systemd_dir / "_internal.service").write_text("""[Unit]
+Description=Internal
+
+[Service]
+ExecStart=/bin/true
+""")
+
+    units = discover_deployed_units(install_dir, "myapp", {})
+
+    assert units == []
+
+
+def test_discover_underscore_files_not_validated(tmp_path):
+    """Underscore-prefixed files should not be validated (can be malformed)."""
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    # Create a valid regular service
+    (systemd_dir / "web.service").write_text("""[Unit]
+Description=Web
+
+[Service]
+ExecStart=/bin/true
+""")
+
+    # Create a malformed underscore-prefixed service (should be skipped before validation)
+    (systemd_dir / "_broken.service").write_text("This is not valid INI\n[[[broken")
+
+    # Should not raise an error because _broken.service is skipped before validation
+    units = discover_deployed_units(install_dir, "myapp", {})
+
+    assert len(units) == 1
+    assert units[0].name == "web"
