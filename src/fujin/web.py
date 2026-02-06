@@ -494,7 +494,7 @@ async def api_logs_stream(request: Request) -> EventSourceResponse:
                 for line in log_lines:
                     if line.startswith("-- cursor:"):
                         last_cursor = line.replace("-- cursor:", "").strip()
-                    elif line.strip():
+                    elif line.strip() and not line.startswith("-- "):
                         new_lines.append(line)
 
                 if new_lines:
