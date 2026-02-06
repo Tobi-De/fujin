@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import grp
+import shlex
 import json
 import logging
 import os
@@ -131,8 +132,9 @@ def install(
     # Move .env file to .install/
     env_file = bundle_dir / ".env"
     if env_file.exists():
-        env_file = env_file.rename(install_dir / ".env")
-        logger.debug("Moved .env to %s", install_dir / ".env")
+        shutil.move(env_file, install_dir / ".env")
+        env_file = install_dir / ".env"
+        logger.debug("Moved .env to %s", env_file)
 
     # ==========================================================================
     # PHASE 2: INSTALLATION
@@ -216,11 +218,12 @@ export -f {config.app_name}
     env_file.chmod(0o640)
 
     # .venv permissions: readable/executable by group, writable by owner
+    # Use chmod -R with symbolic modes to traverse once instead of 3 find commands
     if (install_dir / ".venv").exists():
         logger.debug("Setting venv permissions")
-        run(f"find {install_dir}/.venv -type d -exec chmod 755 {{}} +")
-        run(f"find {install_dir}/.venv -type f -exec chmod 644 {{}} +")
-        run(f"find {install_dir}/.venv/bin -type f -exec chmod 755 {{}} +")
+        run(
+            f"chmod -R u+rwX,go+rX {install_dir}/.venv && chmod -R u+x {install_dir}/.venv/bin"
+        )
     # Ensure app_dir itself is group-writable so app can create files
     run(f"chown {config.deploy_user}:{config.app_user} {app_dir}")
     app_dir.chmod(0o775)
@@ -245,17 +248,19 @@ export -f {config.app_name}
     ]
     logger.debug("Found %d existing unit files", len(installed_units))
 
-    # Clean up stale units
+    # Clean up stale units - batch operations for efficiency
     stale_units = [u for u in installed_units if u not in valid_units]
     if stale_units:
         logger.debug("Removing %d stale units", len(stale_units))
-        for unit in stale_units:
-            cmd = f"systemctl disable {unit} --quiet"
-            if not unit.endswith("@.service"):
-                cmd += " --now"
-            logger.debug("Disabling stale unit: %s", unit)
-            run(cmd)
-            run(f"systemctl reset-failed {unit}", capture_output=True)
+        # Separate template units (can't use --now) from regular units
+        template_stale = [u for u in stale_units if u.endswith("@.service")]
+        regular_stale = [u for u in stale_units if not u.endswith("@.service")]
+        if regular_stale:
+            run(f"systemctl disable --now --quiet {' '.join(regular_stale)}")
+        if template_stale:
+            run(f"systemctl disable --quiet {' '.join(template_stale)}")
+        # Reset failed state for all stale units at once
+        run(f"systemctl reset-failed {' '.join(stale_units)}", capture_output=True)
 
     for search_dir in [SYSTEMD_SYSTEM_DIR, SYSTEMD_WANTS_DIR]:
         if not search_dir.exists():
@@ -358,39 +363,49 @@ export -f {config.app_name}
         f"systemctl {restart_cmd} {units_str}",
     )
 
-    # Wait briefly for services to stabilize - services that crash immediately
-    # may appear "active" right after restart before systemd detects the failure
-    time.sleep(2)
-
     # Check if services are actually running (not just restart command succeeded)
-    # only check services with no timer or socket, they are the only one that should run immediatly
+    # Only check services with no timer or socket - they should run immediately
     units_to_check = [
         unit["service_instances"]
         for unit in config.deployed_units
         if not (unit["template_socket_name"] or unit["template_timer_name"])
     ]
     units_to_check = list(chain.from_iterable(units_to_check))
+
+    # Poll for service status with short intervals instead of fixed sleep
+    # Services that crash immediately may appear "active" briefly before systemd detects failure
     failed_units = []
-    for unit in units_to_check:
-        status_result = run(
-            f"systemctl is-active {unit}",
-            capture_output=True,
-        )
-        if status_result.stdout.strip() != "active":
-            failed_units.append(unit)
+    if units_to_check:
+        max_attempts = 10
+        poll_interval = 0.3
+        for attempt in range(max_attempts):
+            # Batch check all units at once - systemctl is-active returns one status per line
+            status_result = run(
+                f"systemctl is-active {' '.join(units_to_check)}",
+                capture_output=True,
+            )
+            statuses = status_result.stdout.strip().split("\n")
+            failed_units = [
+                unit
+                for unit, status in zip(units_to_check, statuses)
+                if status != "active"
+            ]
+            if not failed_units:
+                break
+            # If we still have failures, wait a bit and retry (services may be starting)
+            if attempt < max_attempts - 1:
+                time.sleep(poll_interval)
 
     if restart_result.returncode != 0 or failed_units:
         logger.error("Services failed to start!")
         for unit in failed_units:
-            logger.error("")
-            logger.error("=" * 60)
+            print("")
+            print("=" * 60)
             logger.error("%s failed to start", unit)
-            logger.error("=" * 60)
+            print("=" * 60)
             # This checks for syntax errors or missing dependencies defined in the unit file
             unit_path = SYSTEMD_SYSTEM_DIR / unit
             if unit_path.exists():
-                import shlex
-
                 logger.error("Checking systemd unit configuration...")
                 # Always show output for failed services - don't suppress
                 subprocess.run(
