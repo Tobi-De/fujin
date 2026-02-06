@@ -42,6 +42,12 @@ dependencies = [
   "ssh2-python>=1.2.0.post1",
 ]
 
+optional-dependencies.ui = [
+  "sse-starlette>=2",
+  "starlette>=0.40",
+  "uvicorn>=0.30",
+]
+
 urls.Documentation = "https://github.com/Tobi-De/fujin#readme"
 urls.Issues = "https://github.com/Tobi-De/fujin/issues"
 urls.Source = "https://github.com/Tobi-De/fujin"
