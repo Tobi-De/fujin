@@ -7,6 +7,11 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script>
+  <!-- Prism.js for syntax highlighting -->
+  <link href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-ini.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-nginx.min.js"></script>
   <style>
     /* Catppuccin Mocha palette */
     :root {
@@ -44,37 +49,18 @@
         extend: {
           colors: {
             ctp: {
-              rosewater: '#f5e0dc',
-              flamingo: '#f2cdcd',
-              pink: '#f5c2e7',
-              mauve: '#cba6f7',
-              red: '#f38ba8',
-              maroon: '#eba0ac',
-              peach: '#fab387',
-              yellow: '#f9e2af',
-              green: '#a6e3a1',
-              teal: '#94e2d5',
-              sky: '#89dceb',
-              sapphire: '#74c7ec',
-              blue: '#89b4fa',
-              lavender: '#b4befe',
-              text: '#cdd6f4',
-              subtext1: '#bac2de',
-              subtext0: '#a6adc8',
-              overlay2: '#9399b2',
-              overlay1: '#7f849c',
-              overlay0: '#6c7086',
-              surface2: '#585b70',
-              surface1: '#45475a',
-              surface0: '#313244',
-              base: '#1e1e2e',
-              mantle: '#181825',
-              crust: '#11111b',
+              rosewater: '#f5e0dc', flamingo: '#f2cdcd', pink: '#f5c2e7',
+              mauve: '#cba6f7', red: '#f38ba8', maroon: '#eba0ac',
+              peach: '#fab387', yellow: '#f9e2af', green: '#a6e3a1',
+              teal: '#94e2d5', sky: '#89dceb', sapphire: '#74c7ec',
+              blue: '#89b4fa', lavender: '#b4befe', text: '#cdd6f4',
+              subtext1: '#bac2de', subtext0: '#a6adc8', overlay2: '#9399b2',
+              overlay1: '#7f849c', overlay0: '#6c7086', surface2: '#585b70',
+              surface1: '#45475a', surface0: '#313244', base: '#1e1e2e',
+              mantle: '#181825', crust: '#11111b',
             }
           },
-          fontFamily: {
-            mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
-          }
+          fontFamily: { mono: ['JetBrains Mono', 'Fira Code', 'monospace'] }
         }
       }
     }
@@ -95,28 +81,40 @@
     /* Log line highlighting */
     .log-line-err { color: var(--ctp-red); }
     .log-line-warn { color: var(--ctp-yellow); }
-    .log-line-info { color: var(--ctp-text); }
 
-    /* Pulse animation for live indicator */
-    @keyframes pulse-dot {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
-    }
+    /* Pulse animation */
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
     .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
 
-    /* Tab active state */
-    .tab-active {
-      border-bottom: 2px solid var(--ctp-mauve);
-      color: var(--ctp-mauve);
+    /* Tab states */
+    .tab-active { border-bottom: 2px solid var(--ctp-mauve); color: var(--ctp-mauve); }
+    .tab-inactive { border-bottom: 2px solid transparent; color: var(--ctp-overlay1); }
+    .tab-inactive:hover { color: var(--ctp-subtext0); border-bottom-color: var(--ctp-surface2); }
+
+    /* Override Prism.js theme to match Catppuccin */
+    code[class*="language-"], pre[class*="language-"] {
+      background: var(--ctp-crust) !important;
+      color: var(--ctp-text) !important;
+      font-size: 0.8125rem !important;
+      text-shadow: none !important;
     }
-    .tab-inactive {
-      border-bottom: 2px solid transparent;
-      color: var(--ctp-overlay1);
+    .token.comment, .token.prolog, .token.doctype, .token.cdata { color: var(--ctp-overlay1) !important; }
+    .token.punctuation { color: var(--ctp-overlay2) !important; }
+    .token.property, .token.tag, .token.constant, .token.symbol, .token.deleted { color: var(--ctp-red) !important; }
+    .token.boolean, .token.number { color: var(--ctp-peach) !important; }
+    .token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted { color: var(--ctp-green) !important; }
+    .token.operator, .token.entity, .token.url { color: var(--ctp-sky) !important; }
+    .token.atrule, .token.attr-value, .token.keyword { color: var(--ctp-mauve) !important; }
+    .token.function, .token.class-name { color: var(--ctp-blue) !important; }
+    .token.regex, .token.important, .token.variable { color: var(--ctp-yellow) !important; }
+    .token.section { color: var(--ctp-sapphire) !important; }
+
+    /* Slide-in panel */
+    .slide-panel {
+      transform: translateX(100%);
+      transition: transform 0.2s ease-out;
     }
-    .tab-inactive:hover {
-      color: var(--ctp-subtext0);
-      border-bottom-color: var(--ctp-surface2);
-    }
+    .slide-panel.open { transform: translateX(0); }
   </style>
 </head>
 <body class="bg-ctp-base text-ctp-text min-h-screen">
@@ -128,12 +126,16 @@
         <h1 class="text-xl font-semibold text-ctp-text">
           <span class="text-ctp-mauve">fujin</span> ui
         </h1>
-        <span id="app-name" class="text-sm text-ctp-overlay1 bg-ctp-surface0 px-2 py-0.5 rounded">
-          loading...
-        </span>
+        <span id="app-name" class="text-sm text-ctp-overlay1 bg-ctp-surface0 px-2 py-0.5 rounded">loading...</span>
       </div>
       <div class="flex items-center gap-4">
-        <div id="host-info" class="text-sm text-ctp-overlay1"></div>
+        <!-- Host Switcher -->
+        <div id="host-switcher" class="hidden">
+          <select id="host-select" onchange="switchHost(this.value)"
+                  class="bg-ctp-surface0 text-ctp-text border border-ctp-surface1 rounded px-3 py-1 text-sm focus:outline-none focus:border-ctp-mauve">
+          </select>
+        </div>
+        <div id="host-info" class="text-sm text-ctp-overlay1 font-mono"></div>
         <div id="connection-status" class="flex items-center gap-1.5 text-xs">
           <div class="w-2 h-2 rounded-full bg-ctp-overlay0"></div>
           <span class="text-ctp-overlay1">connecting</span>
@@ -146,17 +148,11 @@
   <nav class="bg-ctp-mantle border-b border-ctp-surface0">
     <div class="max-w-7xl mx-auto px-6 flex gap-0">
       <button onclick="switchTab('dashboard')" id="tab-dashboard"
-              class="tab-active px-4 py-3 text-sm font-medium transition-colors">
-        Dashboard
-      </button>
+              class="tab-active px-4 py-3 text-sm font-medium transition-colors">Dashboard</button>
       <button onclick="switchTab('logs')" id="tab-logs"
-              class="tab-inactive px-4 py-3 text-sm font-medium transition-colors">
-        Logs
-      </button>
+              class="tab-inactive px-4 py-3 text-sm font-medium transition-colors">Logs</button>
       <button onclick="switchTab('config')" id="tab-config"
-              class="tab-inactive px-4 py-3 text-sm font-medium transition-colors">
-        Config
-      </button>
+              class="tab-inactive px-4 py-3 text-sm font-medium transition-colors">Config</button>
     </div>
   </nav>
 
@@ -165,26 +161,17 @@
 
     <!-- Dashboard Tab -->
     <div id="panel-dashboard">
-      <!-- Info Cards Row -->
+      <!-- Info Cards -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <!-- Version Card -->
         <div class="bg-ctp-surface0 rounded-lg p-4 border border-ctp-surface1">
           <div class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-2">Version</div>
-          <div class="flex items-baseline gap-2">
-            <span id="remote-version" class="text-lg font-mono font-medium text-ctp-text">--</span>
-          </div>
-          <div class="mt-1 text-xs text-ctp-overlay0">
-            local: <span id="local-version" class="font-mono">--</span>
-          </div>
+          <span id="remote-version" class="text-lg font-mono font-medium text-ctp-text">--</span>
+          <div class="mt-1 text-xs text-ctp-overlay0">local: <span id="local-version" class="font-mono">--</span></div>
         </div>
-
-        <!-- Domain Card -->
         <div class="bg-ctp-surface0 rounded-lg p-4 border border-ctp-surface1">
           <div class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-2">Domain</div>
           <div id="domain-info" class="text-lg font-mono text-ctp-sapphire">--</div>
         </div>
-
-        <!-- Host Card -->
         <div class="bg-ctp-surface0 rounded-lg p-4 border border-ctp-surface1">
           <div class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-2">Host</div>
           <div id="host-detail" class="text-lg font-mono text-ctp-text">--</div>
@@ -196,9 +183,7 @@
         <div class="px-4 py-3 border-b border-ctp-surface1">
           <h2 class="text-sm font-semibold text-ctp-subtext1 uppercase tracking-wider">Services</h2>
         </div>
-        <div id="services-list" class="divide-y divide-ctp-surface1">
-          <div class="px-4 py-8 text-center text-ctp-overlay0 text-sm">Loading services...</div>
-        </div>
+        <div id="services-list" class="divide-y divide-ctp-surface1"></div>
       </div>
 
       <!-- Audit Log -->
@@ -206,64 +191,47 @@
         <div class="px-4 py-3 border-b border-ctp-surface1">
           <h2 class="text-sm font-semibold text-ctp-subtext1 uppercase tracking-wider">Recent Deployments</h2>
         </div>
-        <div id="audit-log" class="divide-y divide-ctp-surface1">
-          <div class="px-4 py-8 text-center text-ctp-overlay0 text-sm">Loading audit log...</div>
-        </div>
+        <div id="audit-log" class="divide-y divide-ctp-surface1"></div>
       </div>
     </div>
 
     <!-- Logs Tab -->
     <div id="panel-logs" class="hidden">
-      <!-- Log Controls -->
       <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 mb-4">
         <div class="flex flex-wrap items-center gap-4">
-          <!-- Service Filter -->
           <div class="flex items-center gap-2">
             <label class="text-xs text-ctp-overlay1 uppercase tracking-wider">Service</label>
             <select id="log-service" onchange="fetchLogs()"
                     class="bg-ctp-surface1 text-ctp-text border border-ctp-surface2 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-ctp-mauve">
               <option value="">All</option>
+              <option value="__caddy__">caddy</option>
             </select>
           </div>
-
-          <!-- Level Filter -->
           <div class="flex items-center gap-2">
             <label class="text-xs text-ctp-overlay1 uppercase tracking-wider">Level</label>
             <select id="log-level" onchange="fetchLogs()"
                     class="bg-ctp-surface1 text-ctp-text border border-ctp-surface2 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-ctp-mauve">
               <option value="">All</option>
-              <option value="emerg">emerg</option>
-              <option value="alert">alert</option>
-              <option value="crit">crit</option>
-              <option value="err">err</option>
-              <option value="warning">warning</option>
-              <option value="notice">notice</option>
-              <option value="info">info</option>
-              <option value="debug">debug</option>
+              <option value="emerg">emerg</option><option value="alert">alert</option>
+              <option value="crit">crit</option><option value="err">err</option>
+              <option value="warning">warning</option><option value="notice">notice</option>
+              <option value="info">info</option><option value="debug">debug</option>
             </select>
           </div>
-
-          <!-- Grep Filter -->
           <div class="flex items-center gap-2 flex-1 min-w-[200px]">
             <label class="text-xs text-ctp-overlay1 uppercase tracking-wider">Filter</label>
             <input id="log-grep" type="text" placeholder="grep pattern..."
                    onkeydown="if(event.key==='Enter') fetchLogs()"
                    class="bg-ctp-surface1 text-ctp-text border border-ctp-surface2 rounded px-3 py-1.5 text-sm w-full focus:outline-none focus:border-ctp-mauve placeholder-ctp-overlay0">
           </div>
-
-          <!-- Lines -->
           <div class="flex items-center gap-2">
             <label class="text-xs text-ctp-overlay1 uppercase tracking-wider">Lines</label>
             <select id="log-lines" onchange="fetchLogs()"
                     class="bg-ctp-surface1 text-ctp-text border border-ctp-surface2 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-ctp-mauve">
-              <option value="50">50</option>
-              <option value="100" selected>100</option>
-              <option value="200">200</option>
-              <option value="500">500</option>
+              <option value="50">50</option><option value="100" selected>100</option>
+              <option value="200">200</option><option value="500">500</option>
             </select>
           </div>
-
-          <!-- Live Toggle -->
           <button id="live-toggle" onclick="toggleLive()"
                   class="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm border border-ctp-surface2 bg-ctp-surface1 text-ctp-overlay1 hover:text-ctp-text transition-colors">
             <div id="live-dot" class="w-2 h-2 rounded-full bg-ctp-overlay0"></div>
@@ -271,190 +239,177 @@
           </button>
         </div>
       </div>
-
-      <!-- Log Output -->
       <div class="bg-ctp-crust rounded-lg border border-ctp-surface0 overflow-hidden">
-        <pre id="log-output" class="p-4 text-xs font-mono leading-relaxed overflow-auto max-h-[calc(100vh-320px)] whitespace-pre-wrap break-all">Waiting for logs...</pre>
+        <pre id="log-output" class="p-4 text-xs font-mono leading-relaxed overflow-auto max-h-[calc(100vh-320px)] whitespace-pre-wrap break-all"></pre>
       </div>
     </div>
 
     <!-- Config Tab -->
     <div id="panel-config" class="hidden">
-      <!-- Caddyfile -->
-      <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 mb-4">
+      <div id="caddy-section" class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 mb-4">
         <div class="px-4 py-3 border-b border-ctp-surface1 flex items-center justify-between">
           <h2 class="text-sm font-semibold text-ctp-subtext1 uppercase tracking-wider">Caddyfile</h2>
           <span class="text-xs text-ctp-overlay0 font-mono" id="caddy-path"></span>
         </div>
-        <pre id="caddy-content" class="p-4 text-sm font-mono text-ctp-text overflow-auto max-h-80 whitespace-pre-wrap">Loading...</pre>
+        <div id="caddy-content" class="overflow-auto max-h-80"></div>
       </div>
-
-      <!-- Systemd Units -->
-      <div id="units-container">
-        <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 text-center text-ctp-overlay0 text-sm">
-          Loading systemd units...
-        </div>
-      </div>
+      <div id="units-container"></div>
     </div>
 
   </main>
 
+  <!-- Service Detail Slide Panel -->
+  <div id="service-panel-overlay" class="fixed inset-0 bg-black/40 z-40 hidden" onclick="closeServicePanel()"></div>
+  <div id="service-panel" class="slide-panel fixed top-0 right-0 h-full w-full max-w-2xl bg-ctp-mantle border-l border-ctp-surface0 z-50 overflow-y-auto">
+    <div class="sticky top-0 bg-ctp-mantle border-b border-ctp-surface0 px-6 py-4 flex items-center justify-between">
+      <h2 id="sp-title" class="text-lg font-semibold text-ctp-text"></h2>
+      <button onclick="closeServicePanel()" class="text-ctp-overlay1 hover:text-ctp-text p-1">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="sp-content" class="p-6 space-y-6"></div>
+  </div>
+
   <script>
-    // State
+    // ── State ──
     let currentTab = 'dashboard';
     let liveMode = false;
     let eventSource = null;
     let appData = null;
 
-    // Tab switching
+    // ── Helpers ──
+    function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    function statusColor(s) {
+      return { active:'text-ctp-green', partial:'text-ctp-yellow', inactive:'text-ctp-overlay0',
+               failed:'text-ctp-red', unknown:'text-ctp-overlay0' }[s] || 'text-ctp-overlay0';
+    }
+    function statusDot(s) {
+      return { active:'bg-ctp-green', partial:'bg-ctp-yellow', inactive:'bg-ctp-overlay0',
+               failed:'bg-ctp-red', unknown:'bg-ctp-overlay0' }[s] || 'bg-ctp-overlay0';
+    }
+
+    function highlightCode(text, lang) {
+      const grammar = lang === 'nginx' ? Prism.languages.nginx : Prism.languages.ini;
+      const langClass = lang === 'nginx' ? 'language-nginx' : 'language-ini';
+      return `<pre class="!m-0 !p-4 !bg-ctp-crust rounded overflow-auto max-h-80"><code class="${langClass}">${Prism.highlight(text, grammar, lang)}</code></pre>`;
+    }
+
+    // ── Tabs ──
     function switchTab(tab) {
-      // Hide all panels
-      document.getElementById('panel-dashboard').classList.add('hidden');
-      document.getElementById('panel-logs').classList.add('hidden');
-      document.getElementById('panel-config').classList.add('hidden');
-
-      // Deactivate all tabs
-      document.getElementById('tab-dashboard').className = 'tab-inactive px-4 py-3 text-sm font-medium transition-colors';
-      document.getElementById('tab-logs').className = 'tab-inactive px-4 py-3 text-sm font-medium transition-colors';
-      document.getElementById('tab-config').className = 'tab-inactive px-4 py-3 text-sm font-medium transition-colors';
-
-      // Show selected
-      document.getElementById(`panel-${tab}`).classList.remove('hidden');
-      document.getElementById(`tab-${tab}`).className = 'tab-active px-4 py-3 text-sm font-medium transition-colors';
-
+      ['dashboard','logs','config'].forEach(t => {
+        document.getElementById(`panel-${t}`).classList.toggle('hidden', t !== tab);
+        document.getElementById(`tab-${t}`).className =
+          (t === tab ? 'tab-active' : 'tab-inactive') + ' px-4 py-3 text-sm font-medium transition-colors';
+      });
       currentTab = tab;
-
-      // Load data for tab
-      if (tab === 'logs' && !document.getElementById('log-output').dataset.loaded) {
-        fetchLogs();
-      }
-      if (tab === 'config' && !document.getElementById('caddy-content').dataset.loaded) {
-        fetchConfig();
-      }
+      if (tab === 'logs' && !document.getElementById('log-output').dataset.loaded) fetchLogs();
+      if (tab === 'config' && !document.getElementById('caddy-content').dataset.loaded) fetchConfig();
     }
 
-    // Status colors
-    function statusColor(status) {
-      const colors = {
-        'active': 'text-ctp-green',
-        'partial': 'text-ctp-yellow',
-        'inactive': 'text-ctp-overlay0',
-        'failed': 'text-ctp-red',
-        'unknown': 'text-ctp-overlay0',
-      };
-      return colors[status] || 'text-ctp-overlay0';
+    // ── Host Switcher ──
+    async function loadHosts() {
+      try {
+        const resp = await fetch('/api/hosts');
+        const data = await resp.json();
+        if (data.hosts.length > 1) {
+          const switcher = document.getElementById('host-switcher');
+          const select = document.getElementById('host-select');
+          switcher.classList.remove('hidden');
+          select.innerHTML = data.hosts.map(h =>
+            `<option value="${h.name || h.address}" ${(h.name || h.address) === data.current ? 'selected' : ''}>${h.name || h.address}</option>`
+          ).join('');
+        }
+      } catch(e) { /* single host, no switcher needed */ }
     }
 
-    function statusDot(status) {
-      const colors = {
-        'active': 'bg-ctp-green',
-        'partial': 'bg-ctp-yellow',
-        'inactive': 'bg-ctp-overlay0',
-        'failed': 'bg-ctp-red',
-        'unknown': 'bg-ctp-overlay0',
-      };
-      return colors[status] || 'bg-ctp-overlay0';
+    async function switchHost(hostName) {
+      try {
+        const resp = await fetch('/api/hosts/switch', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({host: hostName})
+        });
+        if (resp.ok) {
+          // Reset loaded flags and re-fetch
+          delete document.getElementById('log-output').dataset.loaded;
+          delete document.getElementById('caddy-content').dataset.loaded;
+          if (liveMode) stopLive();
+          await fetchStatus();
+          if (currentTab === 'logs') fetchLogs();
+          if (currentTab === 'config') fetchConfig();
+        }
+      } catch(e) { console.error('Failed to switch host:', e); }
     }
 
-    // Fetch dashboard data
+    // ── Dashboard ──
     async function fetchStatus() {
       try {
         const resp = await fetch('/api/status');
         const data = await resp.json();
         appData = data;
 
-        // Update header
         document.getElementById('app-name').textContent = data.app_name;
         document.getElementById('host-info').textContent = `${data.host.user}@${data.host.address}`;
 
-        // Connection status
-        const connEl = document.getElementById('connection-status');
-        connEl.innerHTML = `
-          <div class="w-2 h-2 rounded-full bg-ctp-green pulse-dot"></div>
-          <span class="text-ctp-green">connected</span>
-        `;
+        document.getElementById('connection-status').innerHTML =
+          `<div class="w-2 h-2 rounded-full bg-ctp-green pulse-dot"></div><span class="text-ctp-green">connected</span>`;
 
-        // Version
         document.getElementById('remote-version').textContent = data.remote_version;
         document.getElementById('local-version').textContent = data.local_version;
 
-        // Domain
         const domainEl = document.getElementById('domain-info');
         if (data.domain) {
           domainEl.innerHTML = `<a href="https://${data.domain}" target="_blank" class="hover:underline">${data.domain}</a>`;
+          domainEl.className = 'text-lg font-mono text-ctp-sapphire';
         } else {
-          domainEl.textContent = 'No domain configured';
-          domainEl.className = 'text-sm text-ctp-overlay0';
+          domainEl.textContent = '--';
+          domainEl.className = 'text-lg font-mono text-ctp-overlay0';
         }
 
-        // Host
-        document.getElementById('host-detail').textContent = `${data.host.name}`;
+        document.getElementById('host-detail').textContent = data.host.name;
 
-        // Services
         renderServices(data.services);
 
-        // Service filter in logs
-        const serviceSelect = document.getElementById('log-service');
-        // Preserve current selection
-        const currentSelection = serviceSelect.value;
-        serviceSelect.innerHTML = '<option value="">All</option>';
+        // Update log service dropdown (preserve selection)
+        const sel = document.getElementById('log-service');
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">All</option><option value="__caddy__">caddy</option>';
         for (const svc of data.services) {
-          const opt = document.createElement('option');
-          opt.value = svc.name;
-          opt.textContent = svc.name;
-          serviceSelect.appendChild(opt);
+          sel.innerHTML += `<option value="${svc.name}">${svc.name}</option>`;
         }
-        serviceSelect.value = currentSelection;
+        sel.value = cur;
 
-        // Audit log
         renderAudit(data.audit);
-
       } catch (err) {
         console.error('Failed to fetch status:', err);
-        const connEl = document.getElementById('connection-status');
-        connEl.innerHTML = `
-          <div class="w-2 h-2 rounded-full bg-ctp-red"></div>
-          <span class="text-ctp-red">error</span>
-        `;
+        document.getElementById('connection-status').innerHTML =
+          `<div class="w-2 h-2 rounded-full bg-ctp-red"></div><span class="text-ctp-red">error</span>`;
       }
     }
 
     function renderServices(services) {
-      const container = document.getElementById('services-list');
-      if (!services.length) {
-        container.innerHTML = '<div class="px-4 py-6 text-center text-ctp-overlay0 text-sm">No services discovered</div>';
-        return;
-      }
+      const c = document.getElementById('services-list');
+      if (!services.length) { c.innerHTML = ''; return; }
 
-      container.innerHTML = services.map(svc => {
-        const statusText = svc.is_template
-          ? `${svc.running}/${svc.total}`
-          : svc.instances[0]?.status || 'unknown';
+      c.innerHTML = services.map(svc => {
+        const statusText = svc.is_template ? `${svc.running}/${svc.total}` : svc.instances[0]?.status || 'unknown';
         const status = svc.status;
 
         let instancesHtml = '';
         if (svc.is_template) {
-          instancesHtml = `
-            <div class="mt-2 flex flex-wrap gap-2">
-              ${svc.instances.map(inst => `
-                <span class="text-xs font-mono px-2 py-0.5 rounded bg-ctp-mantle ${statusColor(inst.status === 'active' ? 'active' : 'failed')}">
-                  ${inst.name.replace('.service', '')}
-                </span>
-              `).join('')}
-            </div>
-          `;
+          instancesHtml = `<div class="mt-2 flex flex-wrap gap-1.5">` +
+            svc.instances.map(inst =>
+              `<span class="text-xs font-mono px-1.5 py-0.5 rounded bg-ctp-mantle ${statusColor(inst.status === 'active' ? 'active' : 'failed')}">${inst.name.replace('.service','')}</span>`
+            ).join('') + `</div>`;
         }
 
-        let extraBadges = '';
-        if (svc.socket) {
-          extraBadges += `<span class="text-xs font-mono px-2 py-0.5 rounded bg-ctp-mantle ${statusColor(svc.socket.status === 'active' ? 'active' : 'inactive')}">socket: ${svc.socket.status}</span>`;
-        }
-        if (svc.timer) {
-          extraBadges += `<span class="text-xs font-mono px-2 py-0.5 rounded bg-ctp-mantle ${statusColor(svc.timer.status === 'active' ? 'active' : 'inactive')}">timer: ${svc.timer.status}</span>`;
-        }
+        let badges = '';
+        if (svc.socket) badges += `<span class="text-xs font-mono px-1.5 py-0.5 rounded bg-ctp-mantle ${statusColor(svc.socket.status==='active'?'active':'inactive')}">socket</span>`;
+        if (svc.timer) badges += `<span class="text-xs font-mono px-1.5 py-0.5 rounded bg-ctp-mantle ${statusColor(svc.timer.status==='active'?'active':'inactive')}">timer</span>`;
 
         return `
-          <div class="px-4 py-3 flex items-center justify-between">
+          <div class="px-4 py-3 flex items-center justify-between hover:bg-ctp-surface1/30 cursor-pointer transition-colors" onclick="openServicePanel('${svc.name}')">
             <div class="flex items-center gap-3">
               <div class="w-2.5 h-2.5 rounded-full ${statusDot(status)}"></div>
               <div>
@@ -464,63 +419,165 @@
               </div>
             </div>
             <div class="flex items-center gap-2">
-              ${extraBadges}
+              ${badges}
               <span class="font-mono text-sm ${statusColor(status)}">${statusText}</span>
+              <svg class="w-4 h-4 text-ctp-overlay0 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
             </div>
-          </div>
-        `;
+          </div>`;
       }).join('');
     }
 
     function renderAudit(entries) {
-      const container = document.getElementById('audit-log');
-      if (!entries.length) {
-        container.innerHTML = '<div class="px-4 py-6 text-center text-ctp-overlay0 text-sm">No deployment history</div>';
-        return;
-      }
+      const c = document.getElementById('audit-log');
+      if (!entries.length) { c.innerHTML = ''; return; }
 
-      container.innerHTML = entries.map(entry => {
-        const date = new Date(entry.timestamp);
-        const timeStr = date.toLocaleString();
+      c.innerHTML = entries.map(entry => {
+        const timeStr = new Date(entry.timestamp).toLocaleString();
+        const opColor = {deploy:'text-ctp-green',rollback:'text-ctp-yellow',down:'text-ctp-red','full-down':'text-ctp-red'}[entry.operation] || 'text-ctp-text';
+        let detail = entry.version || '';
+        if (entry.from_version && entry.to_version) detail = `${entry.from_version} \u2192 ${entry.to_version}`;
 
-        const opColors = {
-          'deploy': 'text-ctp-green',
-          'rollback': 'text-ctp-yellow',
-          'down': 'text-ctp-red',
-          'full-down': 'text-ctp-red',
-        };
-        const opColor = opColors[entry.operation] || 'text-ctp-text';
-
-        let detail = '';
-        if (entry.version) detail = entry.version;
-        if (entry.from_version && entry.to_version) {
-          detail = `${entry.from_version} → ${entry.to_version}`;
-        }
-
-        return `
-          <div class="px-4 py-2.5 flex items-center justify-between text-sm">
-            <div class="flex items-center gap-3">
-              <span class="font-mono font-medium ${opColor}">${entry.operation}</span>
-              <span class="font-mono text-ctp-subtext0">${detail}</span>
-            </div>
-            <div class="flex items-center gap-3 text-ctp-overlay0">
-              <span>${entry.user || ''}</span>
-              <span class="font-mono text-xs">${timeStr}</span>
-            </div>
+        return `<div class="px-4 py-2.5 flex items-center justify-between text-sm">
+          <div class="flex items-center gap-3">
+            <span class="font-mono font-medium ${opColor}">${entry.operation}</span>
+            <span class="font-mono text-ctp-subtext0">${detail}</span>
           </div>
-        `;
+          <div class="flex items-center gap-3 text-ctp-overlay0">
+            <span>${entry.user||''}</span>
+            <span class="font-mono text-xs">${timeStr}</span>
+          </div>
+        </div>`;
       }).join('');
     }
 
-    // Fetch logs
+    // ── Service Detail Panel ──
+    async function openServicePanel(name) {
+      document.getElementById('service-panel-overlay').classList.remove('hidden');
+      const panel = document.getElementById('service-panel');
+      panel.classList.add('open');
+      document.getElementById('sp-title').textContent = name;
+      document.getElementById('sp-content').innerHTML = '<div class="text-ctp-overlay0 text-sm">Loading...</div>';
+
+      try {
+        const resp = await fetch(`/api/services/${name}`);
+        const svc = await resp.json();
+        if (svc.error) { document.getElementById('sp-content').innerHTML = `<div class="text-ctp-red">${svc.error}</div>`; return; }
+
+        let html = '';
+
+        // Actions
+        html += `
+          <div>
+            <h3 class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-3">Actions</h3>
+            <div class="flex gap-2">
+              <button onclick="serviceAction('${name}','start')" class="px-3 py-1.5 text-sm rounded border border-ctp-green/30 text-ctp-green hover:bg-ctp-green/10 transition-colors">Start</button>
+              <button onclick="serviceAction('${name}','restart')" class="px-3 py-1.5 text-sm rounded border border-ctp-yellow/30 text-ctp-yellow hover:bg-ctp-yellow/10 transition-colors">Restart</button>
+              <button onclick="serviceAction('${name}','restart',true)" class="px-3 py-1.5 text-sm rounded border border-ctp-peach/30 text-ctp-peach hover:bg-ctp-peach/10 transition-colors">Force Restart</button>
+              <button onclick="serviceAction('${name}','stop')" class="px-3 py-1.5 text-sm rounded border border-ctp-red/30 text-ctp-red hover:bg-ctp-red/10 transition-colors">Stop</button>
+            </div>
+          </div>`;
+
+        // Status message area
+        html += `<div id="sp-action-msg" class="text-sm hidden"></div>`;
+
+        // Instances
+        html += `<div><h3 class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-3">Instances</h3>
+          <div class="space-y-2">`;
+        for (const inst of svc.instances) {
+          const state = inst.active_state;
+          const dot = statusDot(state);
+          const col = statusColor(state);
+          const since = (state === 'active' && inst.active_since) ? `<span class="text-xs text-ctp-overlay0 ml-2">since ${inst.active_since}</span>` : '';
+          html += `<div class="flex items-center gap-3 px-3 py-2 bg-ctp-surface0 rounded">
+            <div class="w-2 h-2 rounded-full ${dot}"></div>
+            <span class="font-mono text-sm text-ctp-text flex-1">${inst.name}</span>
+            <span class="font-mono text-xs ${col}">${state}/${inst.sub_state}</span>
+            ${since}
+          </div>`;
+        }
+        html += `</div></div>`;
+
+        // Logs (last 50 for this service)
+        html += `<div><h3 class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-3">Recent Logs</h3>
+          <div class="bg-ctp-crust rounded border border-ctp-surface0">
+            <pre id="sp-logs" class="p-3 text-xs font-mono leading-relaxed overflow-auto max-h-64 whitespace-pre-wrap break-all"></pre>
+          </div></div>`;
+
+        // Unit file
+        if (svc.unit_content) {
+          html += `<div><h3 class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-3">${esc(svc.template_service_name)}</h3>
+            ${highlightCode(svc.unit_content, 'ini')}</div>`;
+        }
+        if (svc.socket_content) {
+          html += `<div><h3 class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-3">${esc(name)}.socket</h3>
+            ${highlightCode(svc.socket_content, 'ini')}</div>`;
+        }
+        if (svc.timer_content) {
+          html += `<div><h3 class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-3">${esc(name)}.timer</h3>
+            ${highlightCode(svc.timer_content, 'ini')}</div>`;
+        }
+
+        document.getElementById('sp-content').innerHTML = html;
+
+        // Fetch logs for this service
+        const logsResp = await fetch(`/api/logs?service=${name}&lines=50`);
+        const logsData = await logsResp.json();
+        const logsEl = document.getElementById('sp-logs');
+        if (logsEl && logsData.logs) {
+          renderLogLinesInto(logsEl, logsData.logs);
+          logsEl.scrollTop = logsEl.scrollHeight;
+        }
+      } catch(e) {
+        document.getElementById('sp-content').innerHTML = `<div class="text-ctp-red">Error: ${e.message}</div>`;
+      }
+    }
+
+    function closeServicePanel() {
+      document.getElementById('service-panel-overlay').classList.add('hidden');
+      document.getElementById('service-panel').classList.remove('open');
+    }
+
+    async function serviceAction(name, action, force) {
+      const msgEl = document.getElementById('sp-action-msg');
+      msgEl.classList.remove('hidden');
+      msgEl.className = 'text-sm text-ctp-overlay1';
+      msgEl.textContent = `Running ${action}...`;
+
+      try {
+        const resp = await fetch(`/api/services/${name}/action`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action, force: !!force})
+        });
+        const data = await resp.json();
+        if (data.ok) {
+          msgEl.className = 'text-sm text-ctp-green';
+          msgEl.textContent = `${action} completed successfully`;
+        } else {
+          msgEl.className = 'text-sm text-ctp-red';
+          msgEl.textContent = data.error || `${action} failed`;
+        }
+        // Refresh dashboard status
+        setTimeout(() => { fetchStatus(); }, 1000);
+        // Refresh panel after a moment
+        setTimeout(() => { openServicePanel(name); }, 1500);
+      } catch(e) {
+        msgEl.className = 'text-sm text-ctp-red';
+        msgEl.textContent = `Error: ${e.message}`;
+      }
+    }
+
+    // ── Logs ──
     async function fetchLogs() {
       const service = document.getElementById('log-service').value;
       const level = document.getElementById('log-level').value;
       const grep = document.getElementById('log-grep').value;
       const lines = document.getElementById('log-lines').value;
-
       const output = document.getElementById('log-output');
-      output.textContent = 'Fetching logs...';
+      output.innerHTML = '<span class="text-ctp-overlay0">Fetching logs...</span>';
+
+      // Reconnect SSE with new filter params if live mode is active
+      restartLiveIfActive();
 
       const params = new URLSearchParams();
       if (service) params.set('service', service);
@@ -532,49 +589,34 @@
         const resp = await fetch(`/api/logs?${params}`);
         const data = await resp.json();
         output.dataset.loaded = 'true';
-
-        if (data.error) {
-          output.textContent = `Error: ${data.error}`;
-        } else {
-          renderLogLines(data.logs);
-        }
+        if (data.error) { output.innerHTML = `<span class="text-ctp-red">${esc(data.error)}</span>`; }
+        else { renderLogLinesInto(output, data.logs); }
       } catch (err) {
-        output.textContent = `Failed to fetch logs: ${err.message}`;
+        output.innerHTML = `<span class="text-ctp-red">Failed to fetch logs: ${esc(err.message)}</span>`;
       }
     }
 
-    function renderLogLines(text) {
-      const output = document.getElementById('log-output');
-      if (!text.trim()) {
-        output.textContent = 'No log entries found.';
-        return;
-      }
-
-      // Color-code log lines
-      const lines = text.split('\n');
-      output.innerHTML = lines.map(line => {
-        let cls = '';
+    function renderLogLinesInto(el, text) {
+      if (!text || !text.trim()) { el.innerHTML = ''; return; }
+      el.innerHTML = text.split('\n').map(line => {
         const lower = line.toLowerCase();
-        if (lower.includes(' err') || lower.includes('error') || lower.includes('critical') || lower.includes('fatal')) {
-          cls = 'log-line-err';
-        } else if (lower.includes(' warn') || lower.includes('warning')) {
-          cls = 'log-line-warn';
-        }
-        // Escape HTML
-        const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        let cls = '';
+        if (lower.includes(' err') || lower.includes('error') || lower.includes('critical') || lower.includes('fatal')) cls = 'log-line-err';
+        else if (lower.includes(' warn') || lower.includes('warning')) cls = 'log-line-warn';
+        const escaped = esc(line);
         return cls ? `<span class="${cls}">${escaped}</span>` : escaped;
       }).join('\n');
-
-      // Auto-scroll to bottom
-      output.scrollTop = output.scrollHeight;
+      el.scrollTop = el.scrollHeight;
     }
 
-    // Live log streaming
-    function toggleLive() {
+    // ── Live Streaming ──
+    function toggleLive() { liveMode ? stopLive() : startLive(); }
+
+    function restartLiveIfActive() {
+      // Restart the SSE stream with current filter params if live mode is on
       if (liveMode) {
-        stopLive();
-      } else {
-        startLive();
+        closeSseConnection();
+        openSseConnection();
       }
     }
 
@@ -582,124 +624,99 @@
       liveMode = true;
       const btn = document.getElementById('live-toggle');
       const dot = document.getElementById('live-dot');
-      const label = document.getElementById('live-label');
-
-      btn.classList.remove('border-ctp-surface2', 'bg-ctp-surface1', 'text-ctp-overlay1');
-      btn.classList.add('border-ctp-green', 'bg-ctp-green/10', 'text-ctp-green');
+      btn.classList.remove('border-ctp-surface2','bg-ctp-surface1','text-ctp-overlay1');
+      btn.classList.add('border-ctp-green','bg-ctp-green/10','text-ctp-green');
       dot.classList.remove('bg-ctp-overlay0');
-      dot.classList.add('bg-ctp-green', 'pulse-dot');
-      label.textContent = 'Live';
+      dot.classList.add('bg-ctp-green','pulse-dot');
+      openSseConnection();
+    }
 
-      const service = document.getElementById('log-service').value;
-      const level = document.getElementById('log-level').value;
+    function openSseConnection() {
+      closeSseConnection();
 
       const params = new URLSearchParams();
+      const service = document.getElementById('log-service').value;
+      const level = document.getElementById('log-level').value;
       if (service) params.set('service', service);
       if (level) params.set('level', level);
 
       eventSource = new EventSource(`/api/logs/stream?${params}`);
       eventSource.onmessage = (event) => {
+        if (!event.data || !event.data.trim()) return;
         const output = document.getElementById('log-output');
         const wasAtBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 50;
-
-        // Append new lines
-        const lines = event.data.split('\n');
-        const fragment = lines.map(line => {
-          let cls = '';
+        const fragment = event.data.split('\n').map(line => {
           const lower = line.toLowerCase();
+          let cls = '';
           if (lower.includes(' err') || lower.includes('error')) cls = 'log-line-err';
           else if (lower.includes(' warn') || lower.includes('warning')) cls = 'log-line-warn';
-          const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          const escaped = esc(line);
           return cls ? `<span class="${cls}">${escaped}</span>` : escaped;
         }).join('\n');
-
         output.innerHTML += '\n' + fragment;
-
-        if (wasAtBottom) {
-          output.scrollTop = output.scrollHeight;
-        }
+        if (wasAtBottom) output.scrollTop = output.scrollHeight;
       };
+      eventSource.onerror = () => console.warn('SSE connection error, retrying...');
+    }
 
-      eventSource.onerror = () => {
-        console.warn('SSE connection error, retrying...');
-      };
+    function closeSseConnection() {
+      if (eventSource) { eventSource.close(); eventSource = null; }
     }
 
     function stopLive() {
       liveMode = false;
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
-
+      closeSseConnection();
       const btn = document.getElementById('live-toggle');
       const dot = document.getElementById('live-dot');
-      const label = document.getElementById('live-label');
-
-      btn.classList.add('border-ctp-surface2', 'bg-ctp-surface1', 'text-ctp-overlay1');
-      btn.classList.remove('border-ctp-green', 'bg-ctp-green/10', 'text-ctp-green');
+      btn.classList.add('border-ctp-surface2','bg-ctp-surface1','text-ctp-overlay1');
+      btn.classList.remove('border-ctp-green','bg-ctp-green/10','text-ctp-green');
       dot.classList.add('bg-ctp-overlay0');
-      dot.classList.remove('bg-ctp-green', 'pulse-dot');
-      label.textContent = 'Live';
+      dot.classList.remove('bg-ctp-green','pulse-dot');
     }
 
-    // Fetch config
+    // ── Config ──
     async function fetchConfig() {
-      // Caddyfile
       try {
         const resp = await fetch('/api/config/caddy');
         const data = await resp.json();
         const el = document.getElementById('caddy-content');
         el.dataset.loaded = 'true';
-
         if (data.exists && data.content) {
-          el.textContent = data.content;
+          el.innerHTML = highlightCode(data.content, 'nginx');
         } else {
-          el.textContent = 'No Caddyfile configured for this project.';
-          el.className = 'p-4 text-sm text-ctp-overlay0';
+          document.getElementById('caddy-section').classList.add('hidden');
         }
       } catch (err) {
-        document.getElementById('caddy-content').textContent = `Error: ${err.message}`;
+        document.getElementById('caddy-content').innerHTML = `<div class="p-4 text-ctp-red text-sm">${esc(err.message)}</div>`;
       }
 
-      // Systemd units
       try {
         const resp = await fetch('/api/config/units');
         const data = await resp.json();
         const container = document.getElementById('units-container');
-
-        if (!Object.keys(data.units).length) {
-          container.innerHTML = '<div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 text-center text-ctp-overlay0 text-sm">No systemd units found</div>';
-          return;
-        }
+        if (!Object.keys(data.units).length) { container.innerHTML = ''; return; }
 
         container.innerHTML = Object.entries(data.units).map(([name, content]) => `
           <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 mb-4">
             <div class="px-4 py-3 border-b border-ctp-surface1">
-              <h3 class="text-sm font-semibold font-mono text-ctp-subtext1">${name}</h3>
+              <h3 class="text-sm font-semibold font-mono text-ctp-subtext1">${esc(name)}</h3>
             </div>
-            <pre class="p-4 text-sm font-mono text-ctp-text overflow-auto max-h-80 whitespace-pre-wrap">${content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+            ${highlightCode(content, 'ini')}
           </div>
         `).join('');
       } catch (err) {
         document.getElementById('units-container').innerHTML =
-          `<div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 text-ctp-red text-sm">Error: ${err.message}</div>`;
+          `<div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 text-ctp-red text-sm">${esc(err.message)}</div>`;
       }
     }
 
-    // Auto-refresh dashboard every 30s
-    let refreshInterval = null;
-    function startAutoRefresh() {
-      refreshInterval = setInterval(() => {
-        if (currentTab === 'dashboard') {
-          fetchStatus();
-        }
-      }, 30000);
-    }
-
-    // Init
+    // ── Init ──
+    loadHosts();
     fetchStatus();
-    startAutoRefresh();
+    setInterval(() => { if (currentTab === 'dashboard') fetchStatus(); }, 30000);
+
+    // Close panel on Escape
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeServicePanel(); });
   </script>
 </body>
 </html>
