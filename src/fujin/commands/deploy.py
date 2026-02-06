@@ -115,8 +115,8 @@ class Deploy(BaseCommand):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.output.info("Preparing deployment bundle...")
-            bundle_dir = Path(tmpdir) / f"{self.config.app_name}-bundle"
-            bundle_dir.mkdir()
+            zipapp_dir = Path(tmpdir) / "zipapp_source"
+            zipapp_dir.mkdir()
 
             context = {
                 "app_name": self.config.app_name,
@@ -139,12 +139,14 @@ class Deploy(BaseCommand):
                 if not du.socket_file and not du.timer_file and not du.is_template:
                     context[f"{du.name}"] = du.template_service_name
 
-            # Copy artifacts
+            # Copy installer entry point
+            shutil.copy(installer.__file__, zipapp_dir / "__main__.py")
+
             logger.debug("Copying distfile to bundle")
-            shutil.copy(distfile_path, bundle_dir / distfile_path.name)
+            shutil.copy(distfile_path, zipapp_dir / distfile_path.name)
             if self.config.requirements:
                 logger.debug("Copying requirements.txt to bundle")
-                shutil.copy(self.config.requirements, bundle_dir / "requirements.txt")
+                shutil.copy(self.config.requirements, zipapp_dir / "requirements.txt")
 
             # Track unresolved variables across all files
             all_unresolved = set()
@@ -152,11 +154,11 @@ class Deploy(BaseCommand):
             # resolve and copy env file
             resolved_env, unresolved = safe_format(parsed_env, **context)
             all_unresolved.update(unresolved)
-            (bundle_dir / ".env").write_text(resolved_env)
+            (zipapp_dir / ".env").write_text(resolved_env)
 
             logger.debug("Validating and resolving systemd units")
-            systemd_bundle = bundle_dir / "systemd"
-            systemd_bundle.mkdir()
+            systemd_dir = zipapp_dir / "systemd"
+            systemd_dir.mkdir()
 
             logger.debug(
                 "Processing %d deployed units", len(self.config.deployed_units)
@@ -168,7 +170,7 @@ class Deploy(BaseCommand):
                 resolved_content, unresolved = safe_format(service_content, **context)
                 all_unresolved.update(unresolved)
 
-                (systemd_bundle / du.service_file.name).write_text(resolved_content)
+                (systemd_dir / du.service_file.name).write_text(resolved_content)
 
                 # Process and add socket file if exists
                 if du.socket_file:
@@ -176,7 +178,7 @@ class Deploy(BaseCommand):
                     socket_content = du.socket_file.read_text()
                     resolved_socket, unresolved = safe_format(socket_content, **context)
                     all_unresolved.update(unresolved)
-                    (systemd_bundle / du.socket_file.name).write_text(resolved_socket)
+                    (systemd_dir / du.socket_file.name).write_text(resolved_socket)
 
                 # Process and add timer file if exists
                 if du.timer_file:
@@ -184,7 +186,7 @@ class Deploy(BaseCommand):
                     timer_content = du.timer_file.read_text()
                     resolved_timer, unresolved = safe_format(timer_content, **context)
                     all_unresolved.update(unresolved)
-                    (systemd_bundle / du.timer_file.name).write_text(resolved_timer)
+                    (systemd_dir / du.timer_file.name).write_text(resolved_timer)
 
             # Build installer metadata from deployed units
             deployed_units_data = []
@@ -206,7 +208,7 @@ class Deploy(BaseCommand):
             # Handle common dropins
             common_dir = self.config.local_config_dir / "systemd" / "common.d"
             if common_dir.exists():
-                common_bundle = systemd_bundle / "common.d"
+                common_bundle = systemd_dir / "common.d"
                 common_bundle.mkdir(exist_ok=True)
                 common_dropins = list(common_dir.glob("*.conf"))
                 if common_dropins:
@@ -222,7 +224,7 @@ class Deploy(BaseCommand):
             for service_dropin_dir in (self.config.local_config_dir / "systemd").glob(
                 "*.service.d"
             ):
-                bundle_dropin_dir = systemd_bundle / service_dropin_dir.name
+                bundle_dropin_dir = systemd_dir / service_dropin_dir.name
                 bundle_dropin_dir.mkdir()
                 dropins = list(service_dropin_dir.glob("*.conf"))
                 logger.debug(
@@ -244,7 +246,7 @@ class Deploy(BaseCommand):
                     caddyfile_content, **context
                 )
                 all_unresolved.update(unresolved)
-                (bundle_dir / "Caddyfile").write_text(resolved_caddyfile)
+                (zipapp_dir / "Caddyfile").write_text(resolved_caddyfile)
 
             if all_unresolved:
                 self.output.warning(
@@ -269,24 +271,10 @@ class Deploy(BaseCommand):
                 "deployed_units": deployed_units_data,
             }
 
+            # Write config without indent for smaller size
+            (zipapp_dir / "config.json").write_text(json.dumps(installer_config))
+
             logger.debug("Creating Python zipapp installer")
-            zipapp_dir = Path(tmpdir) / "zipapp_source"
-            zipapp_dir.mkdir()
-
-            shutil.copy(installer.__file__, zipapp_dir / "__main__.py")
-
-            # Copy bundle artifacts into zipapp
-            for item in bundle_dir.iterdir():
-                dest = zipapp_dir / item.name
-                if item.is_dir():
-                    shutil.copytree(item, dest)
-                else:
-                    shutil.copy(item, dest)
-
-            (zipapp_dir / "config.json").write_text(
-                json.dumps(installer_config, indent=2)
-            )
-
             zipapp_path = Path(tmpdir) / "installer.pyz"
             zipapp.create_archive(
                 zipapp_dir,
@@ -309,8 +297,6 @@ class Deploy(BaseCommand):
 
             # Minimum size threshold for rsync (1MB) - below this, overhead isn't worth it
             min_rsync_size = 1024 * 1024
-            staging_path = f"{remote_bundle_dir}/.staging.pyz"
-            staging_path_q = shlex.quote(staging_path)
 
             # Upload and Execute
             with self.connection() as conn:
@@ -328,11 +314,18 @@ class Deploy(BaseCommand):
                     use_rsync = False
 
                 self.output.info("Uploading deployment bundle...")
-                # rsync can use .staging.pyz from prior deploys for faster delta transfers
+                # rsync uses staging file for delta transfer benefits from prior deploys
                 if use_rsync:
+                    staging_path = f"{remote_bundle_dir}/.staging.pyz"
+                    staging_path_q = shlex.quote(staging_path)
                     logger.debug("Using rsync for upload")
                     try:
                         conn.rsync_upload(str(zipapp_path), staging_path_q)
+                        # Copy staging to final path (preserves staging for next deploy's delta)
+                        conn.run(
+                            f"cp -f {staging_path_q} {remote_bundle_path_q}",
+                            hide=True,
+                        )
                     except FileNotFoundError:
                         self.output.warning(
                             "rsync not found locally, falling back to SCP"
@@ -344,12 +337,7 @@ class Deploy(BaseCommand):
 
                 if not use_rsync:
                     logger.debug("Using SCP for upload")
-                    conn.put(str(zipapp_path), staging_path_q, verify=True)
-
-                conn.run(
-                    f"cp -f {staging_path_q} {remote_bundle_path_q}",
-                    hide=True,
-                )
+                    conn.put(str(zipapp_path), remote_bundle_path_q, verify=True)
 
                 self.output.success("Bundle uploaded successfully.")
                 self.output.info("Executing remote installation...")
