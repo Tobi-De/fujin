@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fujin UI</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script>
+  <style>
+    /* Catppuccin Mocha palette */
+    :root {
+      --ctp-rosewater: #f5e0dc;
+      --ctp-flamingo: #f2cdcd;
+      --ctp-pink: #f5c2e7;
+      --ctp-mauve: #cba6f7;
+      --ctp-red: #f38ba8;
+      --ctp-maroon: #eba0ac;
+      --ctp-peach: #fab387;
+      --ctp-yellow: #f9e2af;
+      --ctp-green: #a6e3a1;
+      --ctp-teal: #94e2d5;
+      --ctp-sky: #89dceb;
+      --ctp-sapphire: #74c7ec;
+      --ctp-blue: #89b4fa;
+      --ctp-lavender: #b4befe;
+      --ctp-text: #cdd6f4;
+      --ctp-subtext1: #bac2de;
+      --ctp-subtext0: #a6adc8;
+      --ctp-overlay2: #9399b2;
+      --ctp-overlay1: #7f849c;
+      --ctp-overlay0: #6c7086;
+      --ctp-surface2: #585b70;
+      --ctp-surface1: #45475a;
+      --ctp-surface0: #313244;
+      --ctp-base: #1e1e2e;
+      --ctp-mantle: #181825;
+      --ctp-crust: #11111b;
+    }
+  </style>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ctp: {
+              rosewater: '#f5e0dc',
+              flamingo: '#f2cdcd',
+              pink: '#f5c2e7',
+              mauve: '#cba6f7',
+              red: '#f38ba8',
+              maroon: '#eba0ac',
+              peach: '#fab387',
+              yellow: '#f9e2af',
+              green: '#a6e3a1',
+              teal: '#94e2d5',
+              sky: '#89dceb',
+              sapphire: '#74c7ec',
+              blue: '#89b4fa',
+              lavender: '#b4befe',
+              text: '#cdd6f4',
+              subtext1: '#bac2de',
+              subtext0: '#a6adc8',
+              overlay2: '#9399b2',
+              overlay1: '#7f849c',
+              overlay0: '#6c7086',
+              surface2: '#585b70',
+              surface1: '#45475a',
+              surface0: '#313244',
+              base: '#1e1e2e',
+              mantle: '#181825',
+              crust: '#11111b',
+            }
+          },
+          fontFamily: {
+            mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    code, pre, .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+    /* Custom scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: var(--ctp-mantle); }
+    ::-webkit-scrollbar-thumb { background: var(--ctp-surface2); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--ctp-overlay0); }
+
+    /* Log line highlighting */
+    .log-line-err { color: var(--ctp-red); }
+    .log-line-warn { color: var(--ctp-yellow); }
+    .log-line-info { color: var(--ctp-text); }
+
+    /* Pulse animation for live indicator */
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+    /* Tab active state */
+    .tab-active {
+      border-bottom: 2px solid var(--ctp-mauve);
+      color: var(--ctp-mauve);
+    }
+    .tab-inactive {
+      border-bottom: 2px solid transparent;
+      color: var(--ctp-overlay1);
+    }
+    .tab-inactive:hover {
+      color: var(--ctp-subtext0);
+      border-bottom-color: var(--ctp-surface2);
+    }
+  </style>
+</head>
+<body class="bg-ctp-base text-ctp-text min-h-screen">
+
+  <!-- Header -->
+  <header class="bg-ctp-mantle border-b border-ctp-surface0">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <h1 class="text-xl font-semibold text-ctp-text">
+          <span class="text-ctp-mauve">fujin</span> ui
+        </h1>
+        <span id="app-name" class="text-sm text-ctp-overlay1 bg-ctp-surface0 px-2 py-0.5 rounded">
+          loading...
+        </span>
+      </div>
+      <div class="flex items-center gap-4">
+        <div id="host-info" class="text-sm text-ctp-overlay1"></div>
+        <div id="connection-status" class="flex items-center gap-1.5 text-xs">
+          <div class="w-2 h-2 rounded-full bg-ctp-overlay0"></div>
+          <span class="text-ctp-overlay1">connecting</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="bg-ctp-mantle border-b border-ctp-surface0">
+    <div class="max-w-7xl mx-auto px-6 flex gap-0">
+      <button onclick="switchTab('dashboard')" id="tab-dashboard"
+              class="tab-active px-4 py-3 text-sm font-medium transition-colors">
+        Dashboard
+      </button>
+      <button onclick="switchTab('logs')" id="tab-logs"
+              class="tab-inactive px-4 py-3 text-sm font-medium transition-colors">
+        Logs
+      </button>
+      <button onclick="switchTab('config')" id="tab-config"
+              class="tab-inactive px-4 py-3 text-sm font-medium transition-colors">
+        Config
+      </button>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="max-w-7xl mx-auto px-6 py-6">
+
+    <!-- Dashboard Tab -->
+    <div id="panel-dashboard">
+      <!-- Info Cards Row -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <!-- Version Card -->
+        <div class="bg-ctp-surface0 rounded-lg p-4 border border-ctp-surface1">
+          <div class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-2">Version</div>
+          <div class="flex items-baseline gap-2">
+            <span id="remote-version" class="text-lg font-mono font-medium text-ctp-text">--</span>
+          </div>
+          <div class="mt-1 text-xs text-ctp-overlay0">
+            local: <span id="local-version" class="font-mono">--</span>
+          </div>
+        </div>
+
+        <!-- Domain Card -->
+        <div class="bg-ctp-surface0 rounded-lg p-4 border border-ctp-surface1">
+          <div class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-2">Domain</div>
+          <div id="domain-info" class="text-lg font-mono text-ctp-sapphire">--</div>
+        </div>
+
+        <!-- Host Card -->
+        <div class="bg-ctp-surface0 rounded-lg p-4 border border-ctp-surface1">
+          <div class="text-xs text-ctp-overlay1 uppercase tracking-wider mb-2">Host</div>
+          <div id="host-detail" class="text-lg font-mono text-ctp-text">--</div>
+        </div>
+      </div>
+
+      <!-- Services -->
+      <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 mb-6">
+        <div class="px-4 py-3 border-b border-ctp-surface1">
+          <h2 class="text-sm font-semibold text-ctp-subtext1 uppercase tracking-wider">Services</h2>
+        </div>
+        <div id="services-list" class="divide-y divide-ctp-surface1">
+          <div class="px-4 py-8 text-center text-ctp-overlay0 text-sm">Loading services...</div>
+        </div>
+      </div>
+
+      <!-- Audit Log -->
+      <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1">
+        <div class="px-4 py-3 border-b border-ctp-surface1">
+          <h2 class="text-sm font-semibold text-ctp-subtext1 uppercase tracking-wider">Recent Deployments</h2>
+        </div>
+        <div id="audit-log" class="divide-y divide-ctp-surface1">
+          <div class="px-4 py-8 text-center text-ctp-overlay0 text-sm">Loading audit log...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Logs Tab -->
+    <div id="panel-logs" class="hidden">
+      <!-- Log Controls -->
+      <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 mb-4">
+        <div class="flex flex-wrap items-center gap-4">
+          <!-- Service Filter -->
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-ctp-overlay1 uppercase tracking-wider">Service</label>
+            <select id="log-service" onchange="fetchLogs()"
+                    class="bg-ctp-surface1 text-ctp-text border border-ctp-surface2 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-ctp-mauve">
+              <option value="">All</option>
+            </select>
+          </div>
+
+          <!-- Level Filter -->
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-ctp-overlay1 uppercase tracking-wider">Level</label>
+            <select id="log-level" onchange="fetchLogs()"
+                    class="bg-ctp-surface1 text-ctp-text border border-ctp-surface2 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-ctp-mauve">
+              <option value="">All</option>
+              <option value="emerg">emerg</option>
+              <option value="alert">alert</option>
+              <option value="crit">crit</option>
+              <option value="err">err</option>
+              <option value="warning">warning</option>
+              <option value="notice">notice</option>
+              <option value="info">info</option>
+              <option value="debug">debug</option>
+            </select>
+          </div>
+
+          <!-- Grep Filter -->
+          <div class="flex items-center gap-2 flex-1 min-w-[200px]">
+            <label class="text-xs text-ctp-overlay1 uppercase tracking-wider">Filter</label>
+            <input id="log-grep" type="text" placeholder="grep pattern..."
+                   onkeydown="if(event.key==='Enter') fetchLogs()"
+                   class="bg-ctp-surface1 text-ctp-text border border-ctp-surface2 rounded px-3 py-1.5 text-sm w-full focus:outline-none focus:border-ctp-mauve placeholder-ctp-overlay0">
+          </div>
+
+          <!-- Lines -->
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-ctp-overlay1 uppercase tracking-wider">Lines</label>
+            <select id="log-lines" onchange="fetchLogs()"
+                    class="bg-ctp-surface1 text-ctp-text border border-ctp-surface2 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-ctp-mauve">
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+            </select>
+          </div>
+
+          <!-- Live Toggle -->
+          <button id="live-toggle" onclick="toggleLive()"
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm border border-ctp-surface2 bg-ctp-surface1 text-ctp-overlay1 hover:text-ctp-text transition-colors">
+            <div id="live-dot" class="w-2 h-2 rounded-full bg-ctp-overlay0"></div>
+            <span id="live-label">Live</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Log Output -->
+      <div class="bg-ctp-crust rounded-lg border border-ctp-surface0 overflow-hidden">
+        <pre id="log-output" class="p-4 text-xs font-mono leading-relaxed overflow-auto max-h-[calc(100vh-320px)] whitespace-pre-wrap break-all">Waiting for logs...</pre>
+      </div>
+    </div>
+
+    <!-- Config Tab -->
+    <div id="panel-config" class="hidden">
+      <!-- Caddyfile -->
+      <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 mb-4">
+        <div class="px-4 py-3 border-b border-ctp-surface1 flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-ctp-subtext1 uppercase tracking-wider">Caddyfile</h2>
+          <span class="text-xs text-ctp-overlay0 font-mono" id="caddy-path"></span>
+        </div>
+        <pre id="caddy-content" class="p-4 text-sm font-mono text-ctp-text overflow-auto max-h-80 whitespace-pre-wrap">Loading...</pre>
+      </div>
+
+      <!-- Systemd Units -->
+      <div id="units-container">
+        <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 text-center text-ctp-overlay0 text-sm">
+          Loading systemd units...
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // State
+    let currentTab = 'dashboard';
+    let liveMode = false;
+    let eventSource = null;
+    let appData = null;
+
+    // Tab switching
+    function switchTab(tab) {
+      // Hide all panels
+      document.getElementById('panel-dashboard').classList.add('hidden');
+      document.getElementById('panel-logs').classList.add('hidden');
+      document.getElementById('panel-config').classList.add('hidden');
+
+      // Deactivate all tabs
+      document.getElementById('tab-dashboard').className = 'tab-inactive px-4 py-3 text-sm font-medium transition-colors';
+      document.getElementById('tab-logs').className = 'tab-inactive px-4 py-3 text-sm font-medium transition-colors';
+      document.getElementById('tab-config').className = 'tab-inactive px-4 py-3 text-sm font-medium transition-colors';
+
+      // Show selected
+      document.getElementById(`panel-${tab}`).classList.remove('hidden');
+      document.getElementById(`tab-${tab}`).className = 'tab-active px-4 py-3 text-sm font-medium transition-colors';
+
+      currentTab = tab;
+
+      // Load data for tab
+      if (tab === 'logs' && !document.getElementById('log-output').dataset.loaded) {
+        fetchLogs();
+      }
+      if (tab === 'config' && !document.getElementById('caddy-content').dataset.loaded) {
+        fetchConfig();
+      }
+    }
+
+    // Status colors
+    function statusColor(status) {
+      const colors = {
+        'active': 'text-ctp-green',
+        'partial': 'text-ctp-yellow',
+        'inactive': 'text-ctp-overlay0',
+        'failed': 'text-ctp-red',
+        'unknown': 'text-ctp-overlay0',
+      };
+      return colors[status] || 'text-ctp-overlay0';
+    }
+
+    function statusDot(status) {
+      const colors = {
+        'active': 'bg-ctp-green',
+        'partial': 'bg-ctp-yellow',
+        'inactive': 'bg-ctp-overlay0',
+        'failed': 'bg-ctp-red',
+        'unknown': 'bg-ctp-overlay0',
+      };
+      return colors[status] || 'bg-ctp-overlay0';
+    }
+
+    // Fetch dashboard data
+    async function fetchStatus() {
+      try {
+        const resp = await fetch('/api/status');
+        const data = await resp.json();
+        appData = data;
+
+        // Update header
+        document.getElementById('app-name').textContent = data.app_name;
+        document.getElementById('host-info').textContent = `${data.host.user}@${data.host.address}`;
+
+        // Connection status
+        const connEl = document.getElementById('connection-status');
+        connEl.innerHTML = `
+          <div class="w-2 h-2 rounded-full bg-ctp-green pulse-dot"></div>
+          <span class="text-ctp-green">connected</span>
+        `;
+
+        // Version
+        document.getElementById('remote-version').textContent = data.remote_version;
+        document.getElementById('local-version').textContent = data.local_version;
+
+        // Domain
+        const domainEl = document.getElementById('domain-info');
+        if (data.domain) {
+          domainEl.innerHTML = `<a href="https://${data.domain}" target="_blank" class="hover:underline">${data.domain}</a>`;
+        } else {
+          domainEl.textContent = 'No domain configured';
+          domainEl.className = 'text-sm text-ctp-overlay0';
+        }
+
+        // Host
+        document.getElementById('host-detail').textContent = `${data.host.name}`;
+
+        // Services
+        renderServices(data.services);
+
+        // Service filter in logs
+        const serviceSelect = document.getElementById('log-service');
+        // Preserve current selection
+        const currentSelection = serviceSelect.value;
+        serviceSelect.innerHTML = '<option value="">All</option>';
+        for (const svc of data.services) {
+          const opt = document.createElement('option');
+          opt.value = svc.name;
+          opt.textContent = svc.name;
+          serviceSelect.appendChild(opt);
+        }
+        serviceSelect.value = currentSelection;
+
+        // Audit log
+        renderAudit(data.audit);
+
+      } catch (err) {
+        console.error('Failed to fetch status:', err);
+        const connEl = document.getElementById('connection-status');
+        connEl.innerHTML = `
+          <div class="w-2 h-2 rounded-full bg-ctp-red"></div>
+          <span class="text-ctp-red">error</span>
+        `;
+      }
+    }
+
+    function renderServices(services) {
+      const container = document.getElementById('services-list');
+      if (!services.length) {
+        container.innerHTML = '<div class="px-4 py-6 text-center text-ctp-overlay0 text-sm">No services discovered</div>';
+        return;
+      }
+
+      container.innerHTML = services.map(svc => {
+        const statusText = svc.is_template
+          ? `${svc.running}/${svc.total}`
+          : svc.instances[0]?.status || 'unknown';
+        const status = svc.status;
+
+        let instancesHtml = '';
+        if (svc.is_template) {
+          instancesHtml = `
+            <div class="mt-2 flex flex-wrap gap-2">
+              ${svc.instances.map(inst => `
+                <span class="text-xs font-mono px-2 py-0.5 rounded bg-ctp-mantle ${statusColor(inst.status === 'active' ? 'active' : 'failed')}">
+                  ${inst.name.replace('.service', '')}
+                </span>
+              `).join('')}
+            </div>
+          `;
+        }
+
+        let extraBadges = '';
+        if (svc.socket) {
+          extraBadges += `<span class="text-xs font-mono px-2 py-0.5 rounded bg-ctp-mantle ${statusColor(svc.socket.status === 'active' ? 'active' : 'inactive')}">socket: ${svc.socket.status}</span>`;
+        }
+        if (svc.timer) {
+          extraBadges += `<span class="text-xs font-mono px-2 py-0.5 rounded bg-ctp-mantle ${statusColor(svc.timer.status === 'active' ? 'active' : 'inactive')}">timer: ${svc.timer.status}</span>`;
+        }
+
+        return `
+          <div class="px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="w-2.5 h-2.5 rounded-full ${statusDot(status)}"></div>
+              <div>
+                <span class="font-medium text-ctp-text">${svc.name}</span>
+                ${svc.is_template ? `<span class="text-xs text-ctp-overlay0 ml-2">${svc.replicas} replicas</span>` : ''}
+                ${instancesHtml}
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              ${extraBadges}
+              <span class="font-mono text-sm ${statusColor(status)}">${statusText}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderAudit(entries) {
+      const container = document.getElementById('audit-log');
+      if (!entries.length) {
+        container.innerHTML = '<div class="px-4 py-6 text-center text-ctp-overlay0 text-sm">No deployment history</div>';
+        return;
+      }
+
+      container.innerHTML = entries.map(entry => {
+        const date = new Date(entry.timestamp);
+        const timeStr = date.toLocaleString();
+
+        const opColors = {
+          'deploy': 'text-ctp-green',
+          'rollback': 'text-ctp-yellow',
+          'down': 'text-ctp-red',
+          'full-down': 'text-ctp-red',
+        };
+        const opColor = opColors[entry.operation] || 'text-ctp-text';
+
+        let detail = '';
+        if (entry.version) detail = entry.version;
+        if (entry.from_version && entry.to_version) {
+          detail = `${entry.from_version} → ${entry.to_version}`;
+        }
+
+        return `
+          <div class="px-4 py-2.5 flex items-center justify-between text-sm">
+            <div class="flex items-center gap-3">
+              <span class="font-mono font-medium ${opColor}">${entry.operation}</span>
+              <span class="font-mono text-ctp-subtext0">${detail}</span>
+            </div>
+            <div class="flex items-center gap-3 text-ctp-overlay0">
+              <span>${entry.user || ''}</span>
+              <span class="font-mono text-xs">${timeStr}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    // Fetch logs
+    async function fetchLogs() {
+      const service = document.getElementById('log-service').value;
+      const level = document.getElementById('log-level').value;
+      const grep = document.getElementById('log-grep').value;
+      const lines = document.getElementById('log-lines').value;
+
+      const output = document.getElementById('log-output');
+      output.textContent = 'Fetching logs...';
+
+      const params = new URLSearchParams();
+      if (service) params.set('service', service);
+      if (level) params.set('level', level);
+      if (grep) params.set('grep', grep);
+      params.set('lines', lines);
+
+      try {
+        const resp = await fetch(`/api/logs?${params}`);
+        const data = await resp.json();
+        output.dataset.loaded = 'true';
+
+        if (data.error) {
+          output.textContent = `Error: ${data.error}`;
+        } else {
+          renderLogLines(data.logs);
+        }
+      } catch (err) {
+        output.textContent = `Failed to fetch logs: ${err.message}`;
+      }
+    }
+
+    function renderLogLines(text) {
+      const output = document.getElementById('log-output');
+      if (!text.trim()) {
+        output.textContent = 'No log entries found.';
+        return;
+      }
+
+      // Color-code log lines
+      const lines = text.split('\n');
+      output.innerHTML = lines.map(line => {
+        let cls = '';
+        const lower = line.toLowerCase();
+        if (lower.includes(' err') || lower.includes('error') || lower.includes('critical') || lower.includes('fatal')) {
+          cls = 'log-line-err';
+        } else if (lower.includes(' warn') || lower.includes('warning')) {
+          cls = 'log-line-warn';
+        }
+        // Escape HTML
+        const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return cls ? `<span class="${cls}">${escaped}</span>` : escaped;
+      }).join('\n');
+
+      // Auto-scroll to bottom
+      output.scrollTop = output.scrollHeight;
+    }
+
+    // Live log streaming
+    function toggleLive() {
+      if (liveMode) {
+        stopLive();
+      } else {
+        startLive();
+      }
+    }
+
+    function startLive() {
+      liveMode = true;
+      const btn = document.getElementById('live-toggle');
+      const dot = document.getElementById('live-dot');
+      const label = document.getElementById('live-label');
+
+      btn.classList.remove('border-ctp-surface2', 'bg-ctp-surface1', 'text-ctp-overlay1');
+      btn.classList.add('border-ctp-green', 'bg-ctp-green/10', 'text-ctp-green');
+      dot.classList.remove('bg-ctp-overlay0');
+      dot.classList.add('bg-ctp-green', 'pulse-dot');
+      label.textContent = 'Live';
+
+      const service = document.getElementById('log-service').value;
+      const level = document.getElementById('log-level').value;
+
+      const params = new URLSearchParams();
+      if (service) params.set('service', service);
+      if (level) params.set('level', level);
+
+      eventSource = new EventSource(`/api/logs/stream?${params}`);
+      eventSource.onmessage = (event) => {
+        const output = document.getElementById('log-output');
+        const wasAtBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 50;
+
+        // Append new lines
+        const lines = event.data.split('\n');
+        const fragment = lines.map(line => {
+          let cls = '';
+          const lower = line.toLowerCase();
+          if (lower.includes(' err') || lower.includes('error')) cls = 'log-line-err';
+          else if (lower.includes(' warn') || lower.includes('warning')) cls = 'log-line-warn';
+          const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          return cls ? `<span class="${cls}">${escaped}</span>` : escaped;
+        }).join('\n');
+
+        output.innerHTML += '\n' + fragment;
+
+        if (wasAtBottom) {
+          output.scrollTop = output.scrollHeight;
+        }
+      };
+
+      eventSource.onerror = () => {
+        console.warn('SSE connection error, retrying...');
+      };
+    }
+
+    function stopLive() {
+      liveMode = false;
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+
+      const btn = document.getElementById('live-toggle');
+      const dot = document.getElementById('live-dot');
+      const label = document.getElementById('live-label');
+
+      btn.classList.add('border-ctp-surface2', 'bg-ctp-surface1', 'text-ctp-overlay1');
+      btn.classList.remove('border-ctp-green', 'bg-ctp-green/10', 'text-ctp-green');
+      dot.classList.add('bg-ctp-overlay0');
+      dot.classList.remove('bg-ctp-green', 'pulse-dot');
+      label.textContent = 'Live';
+    }
+
+    // Fetch config
+    async function fetchConfig() {
+      // Caddyfile
+      try {
+        const resp = await fetch('/api/config/caddy');
+        const data = await resp.json();
+        const el = document.getElementById('caddy-content');
+        el.dataset.loaded = 'true';
+
+        if (data.exists && data.content) {
+          el.textContent = data.content;
+        } else {
+          el.textContent = 'No Caddyfile configured for this project.';
+          el.className = 'p-4 text-sm text-ctp-overlay0';
+        }
+      } catch (err) {
+        document.getElementById('caddy-content').textContent = `Error: ${err.message}`;
+      }
+
+      // Systemd units
+      try {
+        const resp = await fetch('/api/config/units');
+        const data = await resp.json();
+        const container = document.getElementById('units-container');
+
+        if (!Object.keys(data.units).length) {
+          container.innerHTML = '<div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 text-center text-ctp-overlay0 text-sm">No systemd units found</div>';
+          return;
+        }
+
+        container.innerHTML = Object.entries(data.units).map(([name, content]) => `
+          <div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 mb-4">
+            <div class="px-4 py-3 border-b border-ctp-surface1">
+              <h3 class="text-sm font-semibold font-mono text-ctp-subtext1">${name}</h3>
+            </div>
+            <pre class="p-4 text-sm font-mono text-ctp-text overflow-auto max-h-80 whitespace-pre-wrap">${content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+          </div>
+        `).join('');
+      } catch (err) {
+        document.getElementById('units-container').innerHTML =
+          `<div class="bg-ctp-surface0 rounded-lg border border-ctp-surface1 p-4 text-ctp-red text-sm">Error: ${err.message}</div>`;
+      }
+    }
+
+    // Auto-refresh dashboard every 30s
+    let refreshInterval = null;
+    function startAutoRefresh() {
+      refreshInterval = setInterval(() => {
+        if (currentTab === 'dashboard') {
+          fetchStatus();
+        }
+      }, 30000);
+    }
+
+    // Init
+    fetchStatus();
+    startAutoRefresh();
+  </script>
+</body>
+</html>

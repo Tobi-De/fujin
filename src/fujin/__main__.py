@@ -16,6 +16,7 @@ from fujin.commands.prune import Prune
 from fujin.commands.rollback import Rollback
 from fujin.commands.server import Server
 from fujin.commands.showenv import Showenv
+from fujin.commands.ui import Ui
 from fujin.commands.up import Up
 
 if sys.version_info >= (3, 11):
@@ -39,6 +40,7 @@ class Fujin:
         | Down
         | Migrate
         | Showenv
+        | Ui
     ]
 
 
