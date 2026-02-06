@@ -83,18 +83,20 @@ def discover_deployed_units(
         if service_file.parent != systemd_dir:
             continue
 
-        _validate_unit_file(service_file)
-
         # Parse filename to extract service name
         # Handles both "web.service" and "web@.service"
         filename = service_file.name
         name = filename.removesuffix(".service").removesuffix("@")
 
+        if name.startswith("_"):
+            continue
+
+        _validate_unit_file(service_file)
+
         # Look for associated socket and timer files (always singletons)
         socket_path = systemd_dir / f"{name}.socket"
         timer_path = systemd_dir / f"{name}.timer"
 
-        # Validate associated files if they exist
         socket_file: Path | None = None
         timer_file: Path | None = None
 
