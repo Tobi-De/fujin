@@ -123,7 +123,7 @@ def test_service_lifecycle(deployed_app, vps_container, monkeypatch):
 
     with patch("fujin.config.Config.read", return_value=config):
         app = App()
-        app.restart(name="web")
+        app.restart(names=["web"])
 
     wait_for_service(vps_container["name"], "mgmtapp-web.service")
 
@@ -140,7 +140,7 @@ def test_service_lifecycle(deployed_app, vps_container, monkeypatch):
 
     with patch("fujin.config.Config.read", return_value=config):
         app = App()
-        app.stop(name="web")
+        app.stop(names=["web"])
 
     stdout, _ = exec_in_container(
         vps_container["name"], "systemctl is-active mgmtapp-web.service"
@@ -149,7 +149,7 @@ def test_service_lifecycle(deployed_app, vps_container, monkeypatch):
 
     with patch("fujin.config.Config.read", return_value=config):
         app = App()
-        app.start(name="web")
+        app.start(names=["web"])
 
     wait_for_service(vps_container["name"], "mgmtapp-web.service")
 
@@ -165,7 +165,7 @@ def test_service_lifecycle(deployed_app, vps_container, monkeypatch):
 
     with patch("fujin.config.Config.read", return_value=config):
         app = App()
-        app.restart(name=None)  # Restart all
+        app.restart(names=None)  # Restart all
 
     wait_for_service(vps_container["name"], "mgmtapp-web.service")
     wait_for_service(vps_container["name"], "mgmtapp-worker.service")
@@ -203,7 +203,7 @@ def test_app_introspection(deployed_app, vps_container, monkeypatch):
 
     with patch("fujin.config.Config.read", return_value=config):
         app = App()
-        app.logs(name="web", lines=10, follow=False)
+        app.logs(names=["web"], lines=10, follow=False)
 
     stdout, success = exec_in_container(
         vps_container["name"],
