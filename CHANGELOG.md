@@ -8,10 +8,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Add --strict flag to rollback and combine version queries into single SSH call
 - Log requirements hash in verbose mode
 
 ### 🐛 Bug Fixes
 
+- Fail deploy with rollback
 - Use is-failed instead of is-active for post-deploy service checks
 
 ## [0.21.0] - 2026-02-06
