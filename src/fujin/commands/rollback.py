@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import shlex
 from dataclasses import dataclass
 from typing import Annotated
@@ -23,17 +25,29 @@ class Rollback(BaseCommand):
             help="Automatically roll back to the most recent previous version without prompting",
         ),
     ] = False
+    strict: Annotated[
+        bool,
+        cappa.Arg(
+            long="--strict",
+            short="-s",
+            help="Exit with an error if no rollback targets are available",
+        ),
+    ] = False
 
     def __call__(self):
         with self.connection() as conn:
             shlex.quote(self.config.app_dir)
             fujin_dir = shlex.quote(self.config.install_dir)
-            result, _ = conn.run(f"ls -1t {fujin_dir}/.versions", warn=True, hide=True)
-            if not result:
-                self.output.info("No rollback targets available")
-                return
+            result, _ = conn.run(
+                f"cat {fujin_dir}/.version 2>/dev/null; echo '---'; ls -1t {fujin_dir}/.versions",
+                warn=True,
+                hide=True,
+            )
 
-            filenames = result.strip().splitlines()
+            parts = result.split("---\n", 1)
+            current_version = parts[0].strip()
+            filenames = parts[1].strip().splitlines() if len(parts) > 1 else []
+
             versions = []
             prefix = f"{self.config.app_name}-"
             for fname in filenames:
@@ -41,21 +55,14 @@ class Rollback(BaseCommand):
                     v = fname[len(prefix) : -4]
                     versions.append(v)
 
-            if not versions:
-                self.output.info("No rollback targets available")
-                return
-
-            current_version, _ = conn.run(
-                f"cat {fujin_dir}/.version", warn=True, hide=True
-            )
-            current_version = current_version.strip()
-
             # Filter out current version from choices
             available_versions = [v for v in versions if v != current_version]
 
             if not available_versions:
-                self.output.info("No previous versions available for rollback")
-                return
+                msg = "No previous versions available for rollback"
+                if self.strict:
+                    raise cappa.Exit(msg, code=1)
+                return self.output.info(msg)
 
             if self.previous:
                 version = available_versions[0]
