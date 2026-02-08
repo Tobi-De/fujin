@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Log requirements hash in verbose mode
 
+### 🐛 Bug Fixes
+
+- Use is-failed instead of is-active for post-deploy service checks
+
 ## [0.21.0] - 2026-02-06
 
 ### 🚀 Features

@@ -24,7 +24,11 @@ def test_rollback_aborts_on_keyboard_interrupt(minimal_config_dict):
     config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
-    mock_conn.run.return_value = ("testapp-1.0.0.pyz\ntestapp-0.9.0.pyz", True)
+    # Combined: cat .version; echo '---'; ls -1t .versions
+    mock_conn.run.return_value = (
+        "1.0.0\n---\ntestapp-1.0.0.pyz\ntestapp-0.9.0.pyz",
+        True,
+    )
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -50,10 +54,11 @@ def test_rollback_aborts_when_user_declines_confirmation(minimal_config_dict):
     config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
-    mock_conn.run.side_effect = [
-        ("testapp-1.1.0.pyz\ntestapp-1.0.0.pyz", True),  # ls -1t
-        ("1.1.0", True),  # cat .version
-    ]
+    # Combined: cat .version; echo '---'; ls -1t .versions
+    mock_conn.run.return_value = (
+        "1.1.0\n---\ntestapp-1.1.0.pyz\ntestapp-1.0.0.pyz",
+        True,
+    )
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -71,15 +76,61 @@ def test_rollback_aborts_when_user_declines_confirmation(minimal_config_dict):
         rollback = Rollback()
         rollback()
 
-        # Should only have called ls and cat, not uninstall/install
-        assert mock_conn.run.call_count == 2
+        # Should only have called the combined command, not uninstall/install
+        assert mock_conn.run.call_count == 1
+
+
+def test_rollback_strict_fails_when_no_targets_available(minimal_config_dict):
+    """Rollback with --strict exits with error when no rollback targets are available."""
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    mock_conn = MagicMock()
+    mock_conn.run.return_value = ("", False)  # Command failed entirely
+
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch.object(Rollback, "connection") as mock_connection,
+        patch.object(Rollback, "output", MagicMock()),
+    ):
+        mock_connection.return_value.__enter__.return_value = mock_conn
+        mock_connection.return_value.__exit__.return_value = None
+
+        rollback = Rollback(strict=True)
+
+        with pytest.raises(SystemExit) as exc_info:
+            rollback()
+
+        assert exc_info.value.code == 1
+
+
+def test_rollback_strict_fails_when_only_current_version_exists(minimal_config_dict):
+    """Rollback with --strict exits with error when only the current version exists."""
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    mock_conn = MagicMock()
+
+    # Combined: cat .version; echo '---'; ls -1t .versions (only current version)
+    mock_conn.run.return_value = ("1.0.0\n---\ntestapp-1.0.0.pyz", True)
+
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch.object(Rollback, "connection") as mock_connection,
+        patch.object(Rollback, "output", MagicMock()),
+    ):
+        mock_connection.return_value.__enter__.return_value = mock_conn
+        mock_connection.return_value.__exit__.return_value = None
+
+        rollback = Rollback(strict=True)
+
+        with pytest.raises(SystemExit) as exc_info:
+            rollback()
+
+        assert exc_info.value.code == 1
 
 
 def test_rollback_shows_info_when_no_targets_available(minimal_config_dict):
     """Rollback shows info when no rollback targets are available."""
     config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
-    mock_conn.run.return_value = ("", False)  # No versions directory
+    mock_conn.run.return_value = ("", False)  # Command failed entirely
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -101,11 +152,8 @@ def test_rollback_shows_info_when_only_current_version_exists(minimal_config_dic
     config = msgspec.convert(minimal_config_dict, type=Config)
     mock_conn = MagicMock()
 
-    # Only one version exists and it's the current one
-    mock_conn.run.side_effect = [
-        ("testapp-1.0.0.pyz", True),  # ls -1t (only current version)
-        ("1.0.0", True),  # cat .version
-    ]
+    # Combined: cat .version; echo '---'; ls -1t .versions (only current version)
+    mock_conn.run.return_value = ("1.0.0\n---\ntestapp-1.0.0.pyz", True)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
@@ -130,8 +178,8 @@ def test_rollback_previous_flag_auto_selects_most_recent(minimal_config_dict):
     mock_conn = MagicMock()
 
     mock_conn.run.side_effect = [
-        ("testapp-1.1.0.pyz\ntestapp-1.0.0.pyz\ntestapp-0.9.0.pyz", True),  # ls -1t
-        ("1.1.0", True),  # cat .version (current)
+        # Combined: cat .version; echo '---'; ls -1t .versions
+        ("1.1.0\n---\ntestapp-1.1.0.pyz\ntestapp-1.0.0.pyz\ntestapp-0.9.0.pyz", True),
         (None, True),  # test -f (bundle exists)
         ("", True),  # uninstall
         ("", True),  # install + cleanup
