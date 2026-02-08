@@ -374,21 +374,23 @@ export -f {config.app_name}
 
     # Poll for service status with short intervals instead of fixed sleep
     # Services that crash immediately may appear "active" briefly before systemd detects failure
+    # Use is-failed instead of is-active to correctly handle oneshot services,
+    # which transition to "inactive" after successful completion.
     failed_units = []
     if units_to_check:
         max_attempts = 10
         poll_interval = 0.3
         for attempt in range(max_attempts):
-            # Batch check all units at once - systemctl is-active returns one status per line
+            # Batch check all units at once - systemctl is-failed returns one status per line
             status_result = run(
-                f"systemctl is-active {' '.join(units_to_check)}",
+                f"systemctl is-failed {' '.join(units_to_check)}",
                 capture_output=True,
             )
             statuses = status_result.stdout.strip().split("\n")
             failed_units = [
                 unit
                 for unit, status in zip(units_to_check, statuses)
-                if status != "active"
+                if status == "failed"
             ]
             if not failed_units:
                 break
