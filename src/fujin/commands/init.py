@@ -194,7 +194,6 @@ class Init(BaseCommand):
         dropin.write_text(
             f"""
 [Service]
-Type=simple
 User={{app_user}}
 WorkingDirectory={{app_dir}}
 EnvironmentFile={{install_dir}}/.env

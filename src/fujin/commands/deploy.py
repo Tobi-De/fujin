@@ -93,10 +93,11 @@ class Deploy(BaseCommand):
         if self.config.requirements:
             req_file = Path(self.config.requirements)
             if req_file.exists():
-                logger.debug(
-                    "Requirements file hash: %s",
-                    hashlib.file_digest(req_file.read_bytes(), "sha256").hexdigest(),
-                )
+                with open(req_file, "rb") as f:
+                    logger.debug(
+                        "Requirements file hash: %s",
+                        hashlib.file_digest(f, "sha256").hexdigest(),
+                    )
             else:
                 self.output.error(
                     f"Requirements file not found: {self.config.requirements}"
