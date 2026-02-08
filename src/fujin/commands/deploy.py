@@ -372,7 +372,7 @@ class Deploy(BaseCommand):
                             "Services failed to start. Rollback disabled via --no-rollback."
                         ) from e
 
-                    rollback = Rollback(host=self.host, previous=True)
+                    rollback = Rollback(host=self.host, previous=True, strict=True)
                     self.output.info(
                         "Services failed to start. Rolling back to previous version."
                     )

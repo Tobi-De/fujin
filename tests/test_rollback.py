@@ -144,7 +144,9 @@ def test_rollback_shows_info_when_no_targets_available(minimal_config_dict):
         rollback()
 
         # Should show info message
-        mock_output.info.assert_called_with("No rollback targets available")
+        mock_output.info.assert_called_with(
+            "No previous versions available for rollback"
+        )
 
 
 def test_rollback_shows_info_when_only_current_version_exists(minimal_config_dict):
