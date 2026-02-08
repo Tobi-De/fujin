@@ -4,6 +4,7 @@ import json
 import logging
 import shlex
 import shutil
+import hashlib
 import subprocess
 import tempfile
 import zipapp
@@ -89,17 +90,26 @@ class Deploy(BaseCommand):
             )
             raise BuildError("Build failed", command=self.config.build_command) from e
         # the build commands might be responsible for creating the requirements file
-        if self.config.requirements and not Path(self.config.requirements).exists():
-            self.output.error(
-                f"Requirements file not found: {self.config.requirements}"
-            )
-            self.output.info(
-                "\nTroubleshooting:\n"
-                "  - Ensure your build_command generates the requirements file\n"
-                "  - Check that the 'requirements' path in fujin.toml is correct\n"
-                f"  - Try running: uv pip compile pyproject.toml -o {self.config.requirements}"
-            )
-            raise BuildError(f"Requirements file not found: {self.config.requirements}")
+        if self.config.requirements:
+            req_file = Path(self.config.requirements)
+            if req_file.exists():
+                logger.debug(
+                    "Requirements file hash: %s",
+                    hashlib.file_digest(req_file.read_bytes(), "sha256").hexdigest(),
+                )
+            else:
+                self.output.error(
+                    f"Requirements file not found: {self.config.requirements}"
+                )
+                self.output.info(
+                    "\nTroubleshooting:\n"
+                    "  - Ensure your build_command generates the requirements file\n"
+                    "  - Check that the 'requirements' path in fujin.toml is correct\n"
+                    f"  - Try running: uv pip compile pyproject.toml -o {self.config.requirements}"
+                )
+                raise BuildError(
+                    f"Requirements file not found: {self.config.requirements}"
+                )
 
         version = self.config.version
         git_commit = get_git_short_hash()
@@ -295,8 +305,8 @@ class Deploy(BaseCommand):
             remote_bundle_dir_q = shlex.quote(str(remote_bundle_dir))
             remote_bundle_path_q = shlex.quote(str(remote_bundle_path))
 
-            # Minimum size threshold for rsync (1MB) - below this, overhead isn't worth it
-            min_rsync_size = 1024 * 1024
+            # Minimum size threshold for rsync (30MB) - below this, overhead isn't worth it
+            min_rsync_size = 30 * 1024
 
             # Upload and Execute
             with self.connection() as conn:
