@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.3] - 2026-02-12
+
+### 🐛 Bug Fixes
+
+- Rsync upload was triggering on >30k instead of 30MB
+
 ## [0.21.2] - 2026-02-08
 
 ### 🚀 Features
