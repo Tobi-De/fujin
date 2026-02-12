@@ -307,7 +307,7 @@ class Deploy(BaseCommand):
             remote_bundle_path_q = shlex.quote(str(remote_bundle_path))
 
             # Minimum size threshold for rsync (30MB) - below this, overhead isn't worth it
-            min_rsync_size = 30 * 1024
+            min_rsync_size = 30 * 1024 * 1024
 
             # Upload and Execute
             with self.connection() as conn:
