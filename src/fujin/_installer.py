@@ -433,7 +433,6 @@ export -f {config.app_name}
         caddyfile_path = bundle_dir / "Caddyfile"
         if caddyfile_path.exists():
             logger.info("Configuring Caddy...")
-            run(f"usermod -aG {config.app_user} caddy")
 
             caddy_config_path = Path(config.caddy_config_path)
 
@@ -529,8 +528,6 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
         Path(config.caddy_config_path).unlink(missing_ok=True)
         logger.debug("Reloading Caddy")
         run("systemctl reload caddy")
-        logger.debug("Removing caddy from %s group", config.app_user)
-        run(f"gpasswd -d caddy {config.app_user}")
 
     logger.info("Deleting app user...")
     try:
