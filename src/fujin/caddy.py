@@ -30,9 +30,9 @@ def get_install_commands(version: str | None = None) -> list[str]:
     commands.append(f"rm /tmp/{filename} /tmp/LICENSE /tmp/README.md")
 
     # User and Group
-    commands.append("sudo groupadd --force --system caddy")
+    commands.append("sudo groupadd --force --system caddy || true")
     commands.append(
-        "sudo useradd --system --gid caddy --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin --comment 'Caddy web server' caddy || true"
+        "sudo useradd --system --gid caddy --groups www-data --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin --comment 'Caddy web server' caddy || true"
     )
 
     # Config dirs
