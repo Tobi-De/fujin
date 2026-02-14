@@ -220,7 +220,6 @@ After=network.target
 
 [Service]
 UMask=0002
-ExecStartPre={{install_dir}}/.venv/bin/{app_name} setup
 ExecStart={{install_dir}}/.venv/bin/{app_name} prodserver --uds /run/{app_name}/web.sock
 ExecReload=/bin/kill -s HUP $MAINPID
 KillMode=mixed
@@ -232,12 +231,30 @@ WantedBy=multi-user.target
         )
         self.output.success(f"  Created {web_service}")
 
-        # Worker service
+        setup_service = systemd_dir / "setup.service"
+        setup_service.write_text(
+            f"""
+[Unit]
+Description={app_name} setup
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{install_dir}}/.venv/bin/{app_name} setup
+
+[Install]
+WantedBy=multi-user.target
+"""
+        )
+        self.output.success(f"  Created {setup_service}")
+
         worker_service = systemd_dir / "worker.service"
         worker_service.write_text(
             f"""
 [Unit]
 Description={app_name} worker
+Requires={{setup}}
+After={{setup}}
 After=network.target
 
 [Service]
