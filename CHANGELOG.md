@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.21.4] - 2026-02-14
 
 ### 🚀 Features
 
@@ -13,6 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚜 Refactor
 
+- Simplify  command with positional kind argument
 - Removing caddy group add
 
 ## [0.21.3] - 2026-02-12
