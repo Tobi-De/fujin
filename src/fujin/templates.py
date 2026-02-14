@@ -141,6 +141,23 @@ NEW_DROPIN_TEMPLATE = """# Systemd dropin configuration
 # More options: https://www.freedesktop.org/software/systemd/man/systemd.exec.html
 """
 
+# Socket Template
+NEW_SOCKET_TEMPLATE = """# Systemd socket for {name}
+# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.socket.html
+
+[Unit]
+Description={{app_name}} {name} socket
+
+[Socket]
+ListenStream=/run/{{app_name}}/{name}.sock
+SocketUser={{app_user}}
+SocketGroup={{app_user}}
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target
+"""
+
 # Caddyfile Template
 CADDYFILE_TEMPLATE = """# Caddyfile for {app_name}
 # Learn more: https://caddyserver.com/docs/caddyfile

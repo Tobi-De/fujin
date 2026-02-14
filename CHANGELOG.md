@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- Add caddy to www-data group for convenience
 - Improve falco templates
 
 ### 🚜 Refactor
