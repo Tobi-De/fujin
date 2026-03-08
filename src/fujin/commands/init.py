@@ -192,13 +192,11 @@ class Init(BaseCommand):
 
         dropin = dropin_dir / "base.conf"
         dropin.write_text(
-            f"""
+            """
 [Service]
 User={{app_user}}
 WorkingDirectory={{app_dir}}
 EnvironmentFile={{install_dir}}/.env
-RuntimeDirectory={app_name}
-RuntimeDirectoryMode=0755
 Restart=on-failure
 RestartSec=5s
 
@@ -220,6 +218,8 @@ After=network.target
 
 [Service]
 UMask=0002
+RuntimeDirectory={app_name}
+RuntimeDirectoryMode=0755
 ExecStart={{install_dir}}/.venv/bin/{app_name} prodserver --uds /run/{app_name}/web.sock
 ExecReload=/bin/kill -s HUP $MAINPID
 KillMode=mixed
