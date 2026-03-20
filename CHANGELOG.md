@@ -4,10 +4,11 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.22.0] - 2026-03-20
 
 ### 🚀 Features
 
+- Ssh keys management
 - Try system ssh interactive auth if using agent fails
 
 ### 🐛 Bug Fixes
