@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### 🐛 Bug Fixes
+
+- Falco templates bad config
+
 ## [0.21.4] - 2026-02-14
 
 ### 🚀 Features

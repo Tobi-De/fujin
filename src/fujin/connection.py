@@ -343,7 +343,6 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
     logger.info("Authenticating...")
     auth_methods_tried = []
     authenticated = False
-    auth_method_used = None
 
     # Method 1: Explicit key file (if specified)
     if host.key_filename:
@@ -354,7 +353,6 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
             session.userauth_publickey_fromfile(host.user, str(key_path), passphrase)
             authenticated = session.userauth_authenticated()
             if authenticated:
-                auth_method_used = f"key file: {key_path}"
                 logger.info(f"✓ Authenticated using {key_path}")
             auth_methods_tried.append(f"key file: {key_path}")
         except Exception as e:
@@ -417,6 +415,46 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         except Exception as e:
             logger.debug(f"Password auth failed: {e}")
             auth_methods_tried.append("password (failed)")
+
+    # Method 5: Keyboard-interactive via native SSH (for Tailscale, etc.)
+    if not authenticated:
+        try:
+            available_methods = session.userauth_list(host.user)
+            if available_methods and "keyboard-interactive" in available_methods:
+                logger.info(
+                    "Trying keyboard-interactive auth via native SSH (Tailscale, etc.)..."
+                )
+                # Spawn native ssh to handle interactive auth (shows URL, waits for browser)
+                ssh_cmd = [
+                    "ssh",
+                    "-p",
+                    str(host.port),
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    f"{host.user}@{host.address}",
+                    "exit",
+                ]
+                result = subprocess.run(ssh_cmd)
+                if result.returncode == 0:
+                    # Auth succeeded via native SSH, retry with ssh2-python
+                    # Need to create a new session since the old one may be in a bad state
+                    sock.close()
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(30)
+                    sock.connect((host.address, host.port))
+                    sock.settimeout(None)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    session = Session()
+                    session.handshake(sock)
+                    # Retry agent auth (Tailscale adds credentials to agent after browser auth)
+                    session.agent_auth(host.user)
+                    authenticated = session.userauth_authenticated()
+                    if authenticated:
+                        logger.info("✓ Authenticated after keyboard-interactive flow")
+                    auth_methods_tried.append("keyboard-interactive (native ssh)")
+        except Exception as e:
+            logger.debug(f"Keyboard-interactive auth failed: {e}")
+            auth_methods_tried.append("keyboard-interactive (failed)")
 
     if not authenticated:
         sock.close()
