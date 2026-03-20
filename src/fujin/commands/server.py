@@ -3,12 +3,14 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
 import cappa
 import tomli_w
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
 
 from fujin import caddy
 from fujin.commands import BaseCommand
@@ -342,3 +344,173 @@ class Server(BaseCommand):
                 f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
                 pty=True,
             )
+
+    @cappa.command(help="List authorized SSH keys")
+    def keys(
+        self,
+        user: Annotated[
+            str | None,
+            cappa.Arg(long="--user", help="List keys for a specific user"),
+        ] = None,
+    ):
+        with self.connection() as conn:
+            cat = "sudo cat" if user else "cat"
+            path = (
+                f"/home/{user}/.ssh/authorized_keys"
+                if user
+                else "~/.ssh/authorized_keys"
+            )
+            content, success = conn.run(f"{cat} {path}", warn=True, hide=True)
+            if not success or not content.strip():
+                self.output.warning(
+                    f"No authorized keys found for {user or self.selected_host.user}"
+                )
+                return
+
+            table = Table(show_header=True)
+            table.add_column("#", style="dim", width=3)
+            table.add_column("Type", width=12)
+            table.add_column("Fingerprint", width=48)
+            table.add_column("Comment")
+
+            for idx, line in enumerate(content.strip().splitlines(), 1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(None, 2)
+                if len(parts) < 2:
+                    continue
+                fp_output, fp_ok = conn.run(
+                    f"echo {shlex.quote(line)} | ssh-keygen -lf -", warn=True, hide=True
+                )
+                fingerprint = fp_output.split()[1] if fp_ok and fp_output else "unknown"
+                table.add_row(
+                    str(idx), parts[0], fingerprint, parts[2] if len(parts) > 2 else ""
+                )
+
+            self.output.output(table)
+
+    @cappa.command(name="add-key", help="Generate SSH key pair and authorize it")
+    def add_key(
+        self,
+        name: Annotated[
+            str, cappa.Arg(help="Name/comment for the key (e.g., 'ci-deploy')")
+        ],
+        user: Annotated[
+            str | None,
+            cappa.Arg(long="--user", help="Add key for a specific user"),
+        ] = None,
+    ):
+        with self.connection() as conn:
+            comment = f"{name} (fujin@{date.today().isoformat()})"
+            temp_key = f"/tmp/fujin_key_{secrets.token_hex(8)}"
+
+            _, success = conn.run(
+                f"ssh-keygen -t ed25519 -f {temp_key} -N '' -C {shlex.quote(comment)}",
+                hide=True,
+            )
+            if not success:
+                self.output.error("Failed to generate SSH key pair")
+                return
+
+            private_key, _ = conn.run(f"cat {temp_key}", hide=True)
+            public_key, _ = conn.run(f"cat {temp_key}.pub", hide=True)
+
+            if user:
+                path = f"/home/{user}/.ssh"
+                conn.run(
+                    f"sudo mkdir -p {path} && "
+                    f"echo {shlex.quote(public_key.strip())} | sudo tee -a {path}/authorized_keys && "
+                    f"sudo chown -R {user}:{user} {path} && sudo chmod 600 {path}/authorized_keys",
+                    hide=True,
+                )
+            else:
+                conn.run(
+                    f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+                    f"echo {shlex.quote(public_key.strip())} >> ~/.ssh/authorized_keys && "
+                    f"chmod 600 ~/.ssh/authorized_keys",
+                    hide=True,
+                )
+
+            conn.run(f"rm -f {temp_key} {temp_key}.pub", hide=True)
+
+            self.output.success(f"Generated SSH key pair for: {name}")
+            self.output.output("")
+            self.output.output(
+                "[bold]Private key (copy this to your CI secrets):[/bold]"
+            )
+            self.output.output("─" * 50)
+            self.output.output(private_key.strip())
+            self.output.output("─" * 50)
+            self.output.output("")
+            self.output.output(f"[bold]Public key added with comment:[/bold] {comment}")
+
+    @cappa.command(name="remove-key", help="Remove an authorized SSH key")
+    def remove_key(
+        self,
+        key: Annotated[
+            str, cappa.Arg(help="Key index (from 'keys' command) or comment to match")
+        ],
+        user: Annotated[
+            str | None,
+            cappa.Arg(long="--user", help="Remove key from a specific user"),
+        ] = None,
+        force: Annotated[
+            bool,
+            cappa.Arg(long="--force", short="-f", help="Skip confirmation prompt"),
+        ] = False,
+    ):
+        with self.connection() as conn:
+            cat = "sudo cat" if user else "cat"
+            path = (
+                f"/home/{user}/.ssh/authorized_keys"
+                if user
+                else "~/.ssh/authorized_keys"
+            )
+            content, success = conn.run(f"{cat} {path}", warn=True, hide=True)
+            if not success or not content.strip():
+                self.output.warning(
+                    f"No authorized keys found for {user or self.selected_host.user}"
+                )
+                return
+
+            lines = content.strip().splitlines()
+            key_lines = [
+                (i, line)
+                for i, line in enumerate(lines)
+                if line.strip() and not line.strip().startswith("#")
+            ]
+
+            # Find the key to remove - try as index first, then as comment match
+            remove_index, line_to_remove = None, None
+            try:
+                idx = int(key)
+                if 1 <= idx <= len(key_lines):
+                    remove_index, line_to_remove = key_lines[idx - 1]
+            except ValueError:
+                for orig_idx, line in key_lines:
+                    if key in line:
+                        remove_index, line_to_remove = orig_idx, line
+                        break
+
+            if line_to_remove is None:
+                self.output.error(f"Key not found: {key}")
+                return
+
+            parts = line_to_remove.split(None, 2)
+            comment = parts[2] if len(parts) > 2 else "(no comment)"
+            self.output.output(f"Key to remove: [bold]{comment}[/bold]")
+
+            if not force:
+                try:
+                    if not Confirm.ask("Are you sure?"):
+                        return
+                except KeyboardInterrupt:
+                    return
+
+            new_content = (
+                "\n".join(l for i, l in enumerate(lines) if i != remove_index) + "\n"
+            )
+            write = f"sudo tee {path}" if user else f"tee {path}"
+            conn.run(f"echo {shlex.quote(new_content)} | {write}", hide=True)
+            self.output.success(f"Key removed: {comment}")

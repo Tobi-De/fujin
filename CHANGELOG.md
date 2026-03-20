@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [unreleased]
 
+### 🚀 Features
+
+- Try system ssh interactive auth if using agent fails
+
 ### 🐛 Bug Fixes
 
 - Falco templates bad config
