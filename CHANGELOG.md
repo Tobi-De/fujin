@@ -4,10 +4,11 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.23.0] - 2026-03-21
 
 ### 🚀 Features
 
+- Stream .env directly to server instead of bundling
 - Add --bundle-dir option to preserve deployment bundle
 
 ## [0.22.2] - 2026-03-21
