@@ -147,13 +147,11 @@ download-pocketbase:
     set -euo pipefail
     CORE_VERSION=$(grep '^version = ' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
     echo "Syncing plugin versions to $CORE_VERSION..."
-    for plugin in bitwarden 1password doppler; do
-        pyproject="plugins/fujin-secrets-${plugin}/pyproject.toml"
-        if [ -f "$pyproject" ]; then
-            echo "  - fujin-secrets-${plugin}"
-            sed -i "s/^version = .*/version = \"$CORE_VERSION\"/" "$pyproject"
-            sed -i "s/\"fujin-cli>=.*\"/\"fujin-cli>=$CORE_VERSION\"/" "$pyproject"
-        fi
+    for pyproject in plugins/*/pyproject.toml; do
+        plugin_name=$(basename "$(dirname "$pyproject")")
+        echo "  - $plugin_name"
+        sed -i "s/^version = .*/version = \"$CORE_VERSION\"/" "$pyproject"
+        sed -i "s/\"fujin-cli>=.*\"/\"fujin-cli>=$CORE_VERSION\"/" "$pyproject"
     done
     echo "Done!"
 
