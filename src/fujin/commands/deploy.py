@@ -375,11 +375,13 @@ class Deploy(BaseCommand):
 
                 # Use base64 encoding to safely transfer content with special chars
                 encoded_env = base64.b64encode(resolved_env.encode()).decode()
+                # chown may fail on first deploy if app_user doesn't exist yet
+                # (installer creates it), so use || true to make it non-fatal
                 write_env_cmd = (
                     f"mkdir -p {install_dir_q} && "
                     f"echo {shlex.quote(encoded_env)} | base64 -d > {remote_env_path_q} && "
                     f"chmod 640 {remote_env_path_q} && "
-                    f"chown {self.selected_host.user}:{self.config.app_user} {remote_env_path_q}"
+                    f"(chown {self.selected_host.user}:{self.config.app_user} {remote_env_path_q} || true)"
                 )
 
                 if self.restart_on_env_change:
