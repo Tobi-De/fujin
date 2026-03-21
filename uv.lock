@@ -15,6 +15,7 @@ members = [
     "fujin-secrets-1password",
     "fujin-secrets-bitwarden",
     "fujin-secrets-doppler",
+    "fujin-secrets-env",
 ]
 
 [[package]]
@@ -345,7 +346,7 @@ wheels = [
 
 [[package]]
 name = "fujin-cli"
-version = "0.22.2"
+version = "0.23.0"
 source = { editable = "." }
 dependencies = [
     { name = "cappa" },
@@ -401,7 +402,7 @@ docs = [
 
 [[package]]
 name = "fujin-secrets-1password"
-version = "0.22.2"
+version = "0.23.0"
 source = { editable = "plugins/fujin-secrets-1password" }
 dependencies = [
     { name = "fujin-cli" },
@@ -416,7 +417,7 @@ requires-dist = [
 
 [[package]]
 name = "fujin-secrets-bitwarden"
-version = "0.22.2"
+version = "0.23.0"
 source = { editable = "plugins/fujin-secrets-bitwarden" }
 dependencies = [
     { name = "fujin-cli" },
@@ -431,8 +432,23 @@ requires-dist = [
 
 [[package]]
 name = "fujin-secrets-doppler"
-version = "0.22.2"
+version = "0.23.0"
 source = { editable = "plugins/fujin-secrets-doppler" }
+dependencies = [
+    { name = "fujin-cli" },
+    { name = "python-dotenv" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fujin-cli", editable = "." },
+    { name = "python-dotenv", specifier = ">=1.0.1" },
+]
+
+[[package]]
+name = "fujin-secrets-env"
+version = "0.23.0"
+source = { editable = "plugins/fujin-secrets-env" }
 dependencies = [
     { name = "fujin-cli" },
     { name = "python-dotenv" },

@@ -35,6 +35,7 @@ jobs:
           - bitwarden
           - 1password
           - doppler
+          - env
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -169,6 +170,8 @@ jobs:
             artifact: wheels-plugin-1password
           - name: fujin-secrets-doppler
             artifact: wheels-plugin-doppler
+          - name: fujin-secrets-env
+            artifact: wheels-plugin-env
     steps:
       - name: Download artifacts for ${{ matrix.package.name }}
         uses: actions/download-artifact@v4
