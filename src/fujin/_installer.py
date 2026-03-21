@@ -118,9 +118,15 @@ def install(
         logger.debug("User %s already exists", config.app_user)
     except KeyError:
         logger.debug("Creating system user: %s", config.app_user)
-        run(
-            f"useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}",
-        )
+        # Check if group already exists (e.g., from a previous partial install)
+        try:
+            grp.getgrnam(config.app_user)
+            # Group exists, use it instead of creating a new one
+            useradd_cmd = f"useradd --system --no-create-home --shell /usr/sbin/nologin --no-user-group -g {config.app_user} {config.app_user}"
+        except KeyError:
+            # No existing group, let useradd create one
+            useradd_cmd = f"useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}"
+        run(useradd_cmd, check=True)
 
     app_dir = Path(config.app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
