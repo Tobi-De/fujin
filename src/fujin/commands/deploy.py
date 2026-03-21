@@ -56,6 +56,13 @@ class Deploy(BaseCommand):
             help="Force a full restart instead of reload-or-restart",
         ),
     ] = False
+    restart_on_env_change: Annotated[
+        bool,
+        cappa.Arg(
+            long="--restart-on-env-change",
+            help="Force full restart if environment variables changed",
+        ),
+    ] = False
     no_rollback: Annotated[
         bool,
         cappa.Arg(
@@ -368,13 +375,31 @@ class Deploy(BaseCommand):
 
                 # Use base64 encoding to safely transfer content with special chars
                 encoded_env = base64.b64encode(resolved_env.encode()).decode()
-                conn.run(
+                write_env_cmd = (
                     f"mkdir -p {install_dir_q} && "
                     f"echo {shlex.quote(encoded_env)} | base64 -d > {remote_env_path_q} && "
                     f"chmod 640 {remote_env_path_q} && "
-                    f"chown {self.selected_host.user}:{self.config.app_user} {remote_env_path_q}",
-                    hide=True,
+                    f"chown {self.selected_host.user}:{self.config.app_user} {remote_env_path_q}"
                 )
+
+                if self.restart_on_env_change:
+                    # Wrap command to capture old hash before writing and output it after
+                    new_env_hash = hashlib.sha256(resolved_env.encode()).hexdigest()
+                    cmd = (
+                        f"OLD=$(sha256sum {remote_env_path_q} 2>/dev/null | cut -d' ' -f1 || true) && "
+                        f"{write_env_cmd} && "
+                        f'echo ":::ENV_HASH:::$OLD:::ENV_HASH:::"'
+                    )
+                    output, _ = conn.run(cmd, hide=True)
+                    # Extract hash from between markers
+                    old_env_hash = output.split(":::ENV_HASH:::")[1]
+                    if old_env_hash and old_env_hash != new_env_hash:
+                        self.output.info(
+                            "Environment variables changed, forcing full restart..."
+                        )
+                        self.full_restart = True
+                else:
+                    conn.run(write_env_cmd, hide=True)
 
                 self.output.info("Executing remote installation...")
 
