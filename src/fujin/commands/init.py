@@ -215,6 +215,8 @@ ReadWritePaths={{app_dir}}
 [Unit]
 Description={app_name} web
 After=network.target
+Wants={{setup}}
+After={{setup}}
 
 [Service]
 UMask=0002
@@ -240,6 +242,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart={{install_dir}}/.venv/bin/{app_name} setup
 
 [Install]
@@ -253,7 +256,7 @@ WantedBy=multi-user.target
             f"""
 [Unit]
 Description={app_name} worker
-Requires={{setup}}
+Wants={{setup}}
 After={{setup}}
 After=network.target
 
