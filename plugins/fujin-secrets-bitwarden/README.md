@@ -27,12 +27,14 @@ Add the following to your `fujin.toml` file:
 ```toml
 [secrets]
 adapter = "bitwarden"
+
+[secrets.options]
 password_env = "BW_PASSWORD"
 ```
 
 To unlock the Bitwarden vault, the password is required. Set the `BW_PASSWORD` environment variable in your shell. When Fujin signs in, it will always sync the vault first.
 
-Alternatively, you can set the `BW_SESSION` environment variable. If `BW_SESSION` is present, Fujin will use it directly without signing in or syncing the vault. In this case, the `password_env` configuration is not required.
+Alternatively, you can set the `BW_SESSION` environment variable. If `BW_SESSION` is present, Fujin will use it directly without signing in or syncing the vault. In this case, the `options.password_env` configuration is not required.
 
 ## Usage
 

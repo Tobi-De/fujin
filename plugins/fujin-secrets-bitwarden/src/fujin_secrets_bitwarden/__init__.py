@@ -54,13 +54,14 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
     # Authenticate with Bitwarden
     session = os.getenv("BW_SESSION")
     if not session:
-        if not secret_config.password_env:
+        password_env = secret_config.options.get("password_env")
+        if not password_env:
             raise SecretResolutionError(
-                "You need to set the password_env to use the bitwarden adapter "
+                "You need to set options.password_env to use the bitwarden adapter "
                 "or set the BW_SESSION environment variable",
                 adapter="bitwarden",
             )
-        session = _signin(secret_config.password_env)
+        session = _signin(password_env)
 
     # Resolve secrets concurrently
     resolved_secrets = {}

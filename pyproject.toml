@@ -74,10 +74,12 @@ members = [
   "plugins/fujin-secrets-bitwarden",
   "plugins/fujin-secrets-1password",
   "plugins/fujin-secrets-doppler",
+  "plugins/fujin-secrets-env",
 ]
 
 [tool.uv.sources]
 fujin-secrets-bitwarden = { workspace = true }
+fujin-secrets-env = { workspace = true }
 
 [tool.ruff]
 # Assume Python {{ python_version }}
