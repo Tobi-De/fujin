@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1] - 2026-03-21
+
+### 🐛 Bug Fixes
+
+- Use native ssh auth first when needed
+
 ## [0.22.0] - 2026-03-20
 
 ### 🚀 Features
