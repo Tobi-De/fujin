@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-03-21
+
+### 🚀 Features
+
+- Added restart-on-env-change deploy flag
+
 ## [0.24.0] - 2026-03-21
 
 ### 🚀 Features
