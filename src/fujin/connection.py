@@ -344,8 +344,34 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
     auth_methods_tried = []
     authenticated = False
 
+    # For hosts that require native SSH auth (Tailscale, etc.), authenticate via ssh first
+    if host.native_ssh_auth:
+        logger.info("Using native SSH for authentication...")
+        ssh_cmd = [
+            "ssh",
+            "-p",
+            str(host.port),
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            f"{host.user}@{host.address}",
+            "exit",
+        ]
+        result = subprocess.run(ssh_cmd)
+        if result.returncode == 0:
+            # Reconnect after successful auth - session is now authorized
+            sock.close()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(30)
+            sock.connect((host.address, host.port))
+            sock.settimeout(None)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            session = Session()
+            session.handshake(sock)
+            auth_methods_tried.append("native ssh")
+            # Continue to normal auth methods below (they should work now)
+
     # Method 1: Explicit key file (if specified)
-    if host.key_filename:
+    if not authenticated and host.key_filename:
         try:
             key_path = Path(host.key_filename).expanduser()
             logger.debug(f"Trying explicit key: {key_path}")
@@ -415,46 +441,6 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         except Exception as e:
             logger.debug(f"Password auth failed: {e}")
             auth_methods_tried.append("password (failed)")
-
-    # Method 5: Keyboard-interactive via native SSH (for Tailscale, etc.)
-    if not authenticated:
-        try:
-            available_methods = session.userauth_list(host.user)
-            if available_methods and "keyboard-interactive" in available_methods:
-                logger.info(
-                    "Trying keyboard-interactive auth via native SSH (Tailscale, etc.)..."
-                )
-                # Spawn native ssh to handle interactive auth (shows URL, waits for browser)
-                ssh_cmd = [
-                    "ssh",
-                    "-p",
-                    str(host.port),
-                    "-o",
-                    "StrictHostKeyChecking=accept-new",
-                    f"{host.user}@{host.address}",
-                    "exit",
-                ]
-                result = subprocess.run(ssh_cmd)
-                if result.returncode == 0:
-                    # Auth succeeded via native SSH, retry with ssh2-python
-                    # Need to create a new session since the old one may be in a bad state
-                    sock.close()
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(30)
-                    sock.connect((host.address, host.port))
-                    sock.settimeout(None)
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    session = Session()
-                    session.handshake(sock)
-                    # Retry agent auth (Tailscale adds credentials to agent after browser auth)
-                    session.agent_auth(host.user)
-                    authenticated = session.userauth_authenticated()
-                    if authenticated:
-                        logger.info("✓ Authenticated after keyboard-interactive flow")
-                    auth_methods_tried.append("keyboard-interactive (native ssh)")
-        except Exception as e:
-            logger.debug(f"Keyboard-interactive auth failed: {e}")
-            auth_methods_tried.append("keyboard-interactive (failed)")
 
     if not authenticated:
         sock.close()
