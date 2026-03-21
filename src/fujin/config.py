@@ -35,7 +35,7 @@ class InstallationMode(StrEnum):
 
 class SecretConfig(msgspec.Struct):
     adapter: str
-    password_env: str | None = None
+    options: dict[str, str] = msgspec.field(default_factory=dict)
 
     def __post_init__(self):
         if not re.match(r"^[a-z0-9_-]+$", self.adapter):
