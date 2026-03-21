@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import shlex
@@ -170,10 +171,9 @@ class Deploy(BaseCommand):
             # Track unresolved variables across all files
             all_unresolved = set()
 
-            # resolve and copy env file
+            # Resolve env file (uploaded separately, not bundled)
             resolved_env, unresolved = safe_format(parsed_env, **context)
             all_unresolved.update(unresolved)
-            (zipapp_dir / ".env").write_text(resolved_env)
 
             logger.debug("Validating and resolving systemd units")
             systemd_dir = zipapp_dir / "systemd"
@@ -359,6 +359,23 @@ class Deploy(BaseCommand):
                     conn.put(str(zipapp_path), remote_bundle_path_q, verify=True)
 
                 self.output.success("Bundle uploaded successfully.")
+
+                # Write .env file directly (not bundled for security)
+                remote_env_path = f"{self.config.install_dir}/.env"
+                remote_env_path_q = shlex.quote(remote_env_path)
+                install_dir_q = shlex.quote(self.config.install_dir)
+                logger.debug("Writing .env to %s", remote_env_path)
+
+                # Use base64 encoding to safely transfer content with special chars
+                encoded_env = base64.b64encode(resolved_env.encode()).decode()
+                conn.run(
+                    f"mkdir -p {install_dir_q} && "
+                    f"echo {shlex.quote(encoded_env)} | base64 -d > {remote_env_path_q} && "
+                    f"chmod 640 {remote_env_path_q} && "
+                    f"chown {self.selected_host.user}:{self.config.app_user} {remote_env_path_q}",
+                    hide=True,
+                )
+
                 self.output.info("Executing remote installation...")
 
                 rollback_ran = False
