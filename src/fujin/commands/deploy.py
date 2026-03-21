@@ -8,9 +8,10 @@ import hashlib
 import subprocess
 import tempfile
 import zipapp
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Generator
 
 import cappa
 from rich.console import Console
@@ -61,6 +62,13 @@ class Deploy(BaseCommand):
             help="Disable automatic rollback on deployment failure",
         ),
     ] = False
+    bundle_dir: Annotated[
+        Path | None,
+        cappa.Arg(
+            long="--bundle-dir",
+            help="Directory to create bundle in (preserved after deploy, fails if exists)",
+        ),
+    ] = None
 
     def __call__(self):
         logger.debug("Starting deployment for %s", self.config.app_name)
@@ -124,7 +132,7 @@ class Deploy(BaseCommand):
         if not self.config.deployed_units:
             raise DeploymentError("No systemd units found, nothing to deploy")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with self._bundle_directory() as tmpdir:
             self.output.info("Preparing deployment bundle...")
             zipapp_dir = Path(tmpdir) / "zipapp_source"
             zipapp_dir.mkdir()
@@ -424,6 +432,26 @@ class Deploy(BaseCommand):
             if domain:
                 url = f"https://{domain}"
                 self.output.info(f"Application is available at: {url}")
+
+    @contextmanager
+    def _bundle_directory(self) -> Generator[Path, None, None]:
+        """Context manager for bundle directory.
+
+        If bundle_dir is specified, uses that directory (fails if exists).
+        Otherwise, creates a temporary directory that is cleaned up on exit.
+        """
+        if self.bundle_dir:
+            if self.bundle_dir.exists():
+                raise DeploymentError(
+                    f"Bundle directory already exists: {self.bundle_dir}"
+                )
+            self.bundle_dir.mkdir(parents=True)
+            logger.debug("Using bundle directory: %s", self.bundle_dir)
+            yield self.bundle_dir
+            self.output.info(f"Bundle preserved in: {self.bundle_dir}")
+        else:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                yield Path(tmpdir)
 
     def _show_deployment_summary(self, bundle_size: int, bundle_version: str):
         console = Console()
