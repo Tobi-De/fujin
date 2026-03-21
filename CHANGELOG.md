@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.1] - 2026-03-21
+
+### 🐛 Bug Fixes
+
+- Restart on env change failing for first deployment
+
 ## [0.25.0] - 2026-03-21
 
 ### 🚀 Features
