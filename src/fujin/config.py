@@ -212,6 +212,7 @@ class HostConfig(msgspec.Struct, kw_only=True):
     port: int = 22
     _key_filename: str | None = msgspec.field(name="key_filename", default=None)
     key_passphrase_env: str | None = None
+    native_ssh_auth: bool = False  # Use native ssh for auth (for Tailscale, etc.)
 
     def __post_init__(self):
         if self._env_file and self.env_content:
