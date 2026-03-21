@@ -135,13 +135,6 @@ def install(
     install_dir = app_dir / ".install"
     install_dir.mkdir(exist_ok=True)
 
-    # Move .env file to .install/
-    env_file = bundle_dir / ".env"
-    if env_file.exists():
-        shutil.move(env_file, install_dir / ".env")
-        env_file = install_dir / ".env"
-        logger.debug("Moved .env to %s", env_file)
-
     # ==========================================================================
     # PHASE 2: INSTALLATION
     # ==========================================================================
@@ -221,7 +214,6 @@ export -f {config.app_name}
     run(f"chown -R {config.deploy_user}:{config.app_user} {install_dir}")
     # Make .install directory group-writable (deploy user can update, app user can read)
     install_dir.chmod(0o775)
-    env_file.chmod(0o640)
 
     # .venv permissions: readable/executable by group, writable by owner
     # Use chmod -R with symbolic modes to traverse once instead of 3 find commands
