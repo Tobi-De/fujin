@@ -635,11 +635,18 @@ def main() -> None:
 def _format_service_helpers(config: InstallConfig) -> str:
     """Format service management helpers with config values."""
     valid_services = " ".join(u["name"] for u in config.deployed_units)
-    return service_management_helpers.format(
+    install_dir = f"{config.app_dir}/.install"
+
+    helpers = service_management_helpers.format(
         app_name=config.app_name,
         app_user=config.app_user,
         valid_services=valid_services,
     )
+
+    if config.installation_mode == "python-package":
+        helpers += python_package_helpers.format(install_dir=install_dir)
+
+    return helpers
 
 
 service_management_helpers = """
@@ -713,6 +720,30 @@ mem() {{
     ps -u {app_user} -o pid,rss,vsz,comm --sort=-rss 2>/dev/null || echo "No processes found"
 }}
 export -f mem
+"""
+
+python_package_helpers = """
+edit() {{
+    echo "⚠️  Warning: Changes will be lost on next deploy" >&2
+    local target="${{1:-}}"
+    local site_packages
+    site_packages=$({install_dir}/.venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+
+    if [[ -z "$target" ]]; then
+        ${{EDITOR:-${{VISUAL:-vi}}}} "$site_packages"
+    else
+        local pkg_path
+        pkg_path=$({install_dir}/.venv/bin/python -c "import $target, os; print(os.path.dirname($target.__file__))" 2>/dev/null)
+        if [[ -n "$pkg_path" ]]; then
+            ${{EDITOR:-${{VISUAL:-vi}}}} "$pkg_path"
+        else
+            echo "Could not find module: $target" >&2
+            return 1
+        fi
+    fi
+    echo "Run 'restart' after editing to apply changes"
+}}
+export -f edit
 """
 
 if __name__ == "__main__":
