@@ -6,6 +6,7 @@ import shlex
 import logging
 import os
 import re
+import select
 import socket
 import subprocess
 from fujin.errors import UploadError
@@ -14,7 +15,6 @@ import termios
 import tty
 from contextlib import contextmanager
 from pathlib import Path
-from select import select
 from typing import Generator
 
 from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
@@ -132,38 +132,84 @@ class SSH2Connection:
                 old_tty_attrs = termios.tcgetattr(sys.stdin)
                 tty.setraw(sys.stdin.fileno())
 
+            stdin_fd = -1
+            try:
+                stdin_fd = sys.stdin.fileno()
+            except (OSError, AttributeError):
+                pass
+
+            sock_fd = self.sock.fileno()
+
+            poller = select.poll()
+            if stdin_fd >= 0:
+                poller.register(stdin_fd, select.POLLIN)
+            poller.register(sock_fd, select.POLLIN)
+
             while True:
-                # Determine what libssh2 needs
                 directions = self.session.block_directions()
 
-                read_fds = [sys.stdin]
-                write_fds = []
-
-                # If libssh2 wants to READ from network
-                if directions & LIBSSH2_SESSION_BLOCK_INBOUND:
-                    read_fds.append(self.sock)
-
-                # If libssh2 wants to WRITE to network
+                sock_events = select.POLLIN
                 if directions & LIBSSH2_SESSION_BLOCK_OUTBOUND:
-                    write_fds.append(self.sock)
+                    sock_events |= select.POLLOUT
+                poller.modify(sock_fd, sock_events)
 
-                # Wait until something is ready
-                r_ready, *_ = select(read_fds, write_fds, [], 1.0)
+                ready = poller.poll(1000)
 
-                if sys.stdin in r_ready:
-                    try:
-                        data = os.read(sys.stdin.fileno(), 1024)
-                        if data:
-                            # User typed something → send to SSH channel
-                            rc, _ = channel.write(data)
-                            while rc == LIBSSH2_ERROR_EAGAIN:
-                                select([], [self.sock], [], 1.0)
+                for fd, event in ready:
+                    if fd == stdin_fd and event & select.POLLIN:
+                        try:
+                            data = os.read(stdin_fd, 1024)
+                            if data:
                                 rc, _ = channel.write(data)
-                    except BlockingIOError:
-                        pass
+                                while rc == LIBSSH2_ERROR_EAGAIN:
+                                    p = select.poll()
+                                    p.register(sock_fd, select.POLLOUT)
+                                    p.poll(1000)
+                                    rc, _ = channel.write(data)
+                        except BlockingIOError:
+                            pass
 
-                if self.sock in r_ready or (directions & LIBSSH2_SESSION_BLOCK_INBOUND):
-                    # Read stdout
+                    if fd == sock_fd and event & (
+                        select.POLLIN | select.POLLERR | select.POLLHUP
+                    ):
+                        # Read stdout
+                        while True:
+                            size, data = channel.read()
+                            if size == LIBSSH2_ERROR_EAGAIN:
+                                break
+                            if size > 0:
+                                text = stdout_decoder.decode(data)
+                                if not hide or hide == "err":
+                                    sys.stdout.write(text)
+                                    sys.stdout.flush()
+                                stdout_buffer.append(text)
+
+                                if "sudo" in text and watchers and pass_response:
+                                    for pattern in watchers:
+                                        if pattern.search(text):
+                                            logger.debug(
+                                                "Password pattern matched, sending response"
+                                            )
+                                            channel.write(pass_response.encode())
+                            else:
+                                break
+
+                        # Read stderr
+                        while True:
+                            size, data = channel.read_stderr()
+                            if size == LIBSSH2_ERROR_EAGAIN:
+                                break
+                            if size > 0:
+                                text = stderr_decoder.decode(data)
+                                if not hide or hide == "out":
+                                    sys.stderr.write(text)
+                                    sys.stderr.flush()
+                                stderr_buffer.append(text)
+                            else:
+                                break
+
+                # Also drain channel if libssh2 has buffered data pending
+                if directions & LIBSSH2_SESSION_BLOCK_INBOUND:
                     while True:
                         size, data = channel.read()
                         if size == LIBSSH2_ERROR_EAGAIN:
@@ -185,7 +231,6 @@ class SSH2Connection:
                         else:
                             break
 
-                    # Read stderr
                     while True:
                         size, data = channel.read_stderr()
                         if size == LIBSSH2_ERROR_EAGAIN:

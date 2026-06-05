@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import shlex
@@ -94,7 +93,26 @@ class Deploy(BaseCommand):
         try:
             logger.debug("Build command: %s", self.config.build_command)
             self.output.info(f"Building application ...")
-            subprocess.run(self.config.build_command, check=True, shell=True)
+            subprocess.run(
+                self.config.build_command,
+                check=True,
+                shell=True,
+                timeout=self.config.build_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            self.output.error(
+                f"Build command timed out after {self.config.build_timeout}s"
+            )
+            self.output.info(
+                f"Command: {self.config.build_command}\n\n"
+                "Troubleshooting:\n"
+                "  - The build is taking too long; increase build_timeout in fujin.toml\n"
+                "  - Check for infinite loops or hung subprocesses in your build\n"
+                "  - Try running the build command manually to see its progress"
+            )
+            raise BuildError(
+                "Build timed out", command=self.config.build_command
+            ) from None
         except subprocess.CalledProcessError as e:
             self.output.error(f"Build command failed with exit code {e.returncode}")
             self.output.info(
@@ -373,35 +391,35 @@ class Deploy(BaseCommand):
                 install_dir_q = shlex.quote(self.config.install_dir)
                 logger.debug("Writing .env to %s", remote_env_path)
 
-                # Use base64 encoding to safely transfer content with special chars
-                encoded_env = base64.b64encode(resolved_env.encode()).decode()
-                # chown may fail on first deploy if app_user doesn't exist yet
-                # (installer creates it), so use || true to make it non-fatal
-                write_env_cmd = (
-                    f"mkdir -p {install_dir_q} && "
-                    f"echo {shlex.quote(encoded_env)} | base64 -d > {remote_env_path_q} && "
-                    f"chmod 640 {remote_env_path_q} && "
-                    f"(chown {self.selected_host.user}:{self.config.app_user} {remote_env_path_q} || true)"
-                )
+                # Ensure the install directory exists
+                conn.run(f"mkdir -p {install_dir_q}", hide=True)
 
                 if self.restart_on_env_change:
-                    # Wrap command to capture old hash before writing and output it after
                     new_env_hash = hashlib.sha256(resolved_env.encode()).hexdigest()
-                    cmd = (
-                        f"OLD=$(sha256sum {remote_env_path_q} 2>/dev/null | cut -d' ' -f1 || true) && "
-                        f"{write_env_cmd} && "
-                        f'echo ":::ENV_HASH:::$OLD:::ENV_HASH:::"'
+                    old_hash_output, _ = conn.run(
+                        f"sha256sum {remote_env_path_q} 2>/dev/null | cut -d' ' -f1 || true",
+                        hide=True,
                     )
-                    output, _ = conn.run(cmd, hide=True)
-                    # Extract hash from between markers
-                    old_env_hash = output.split(":::ENV_HASH:::")[1]
+                    old_env_hash = old_hash_output.strip()
                     if old_env_hash and old_env_hash != new_env_hash:
                         self.output.info(
                             "Environment variables changed, forcing full restart..."
                         )
                         self.full_restart = True
-                else:
-                    conn.run(write_env_cmd, hide=True)
+
+                # Upload .env via SCP (avoids shell escaping issues with base64 piping)
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".env") as tmp_env:
+                    tmp_env.write(resolved_env)
+                    tmp_env.flush()
+                    conn.put(tmp_env.name, remote_env_path_q)
+
+                # chown may fail on first deploy if app_user doesn't exist yet
+                # (installer creates it), so use || true to make it non-fatal
+                conn.run(
+                    f"chmod 640 {remote_env_path_q} && "
+                    f"(chown {self.selected_host.user}:{self.config.app_user} {remote_env_path_q} || true)",
+                    hide=True,
+                )
 
                 self.output.info("Executing remote installation...")
 
