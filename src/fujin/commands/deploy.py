@@ -343,7 +343,7 @@ class Deploy(BaseCommand):
             min_rsync_size = 30 * 1024 * 1024
 
             # Upload and Execute
-            with self.connection() as conn:
+            with self._deploy_session() as conn:
                 # Check rsync availability while creating the directory (single round trip)
                 # Only check if bundle is large enough to benefit from rsync
                 if bundle_size >= min_rsync_size:
@@ -391,8 +391,13 @@ class Deploy(BaseCommand):
                 install_dir_q = shlex.quote(self.config.install_dir)
                 logger.debug("Writing .env to %s", remote_env_path)
 
-                # Ensure the install directory exists
-                conn.run(f"mkdir -p {install_dir_q}", hide=True)
+                # Ensure the install directory exists and backup existing .env
+                remote_env_backup_q = shlex.quote(f"{remote_env_path}.bak")
+                conn.run(
+                    f"mkdir -p {install_dir_q} && "
+                    f"cp {remote_env_path_q} {remote_env_backup_q} 2>/dev/null || true",
+                    hide=True,
+                )
 
                 if self.restart_on_env_change:
                     new_env_hash = hashlib.sha256(resolved_env.encode()).hexdigest()
@@ -443,6 +448,13 @@ class Deploy(BaseCommand):
                             "Services failed to start. Rollback disabled via --no-rollback."
                         ) from e
 
+                    # Restore previous .env before rollback
+                    self.output.info("Restoring previous environment...")
+                    conn.run(
+                        f"mv {remote_env_backup_q} {remote_env_path_q} 2>/dev/null || true",
+                        hide=True,
+                    )
+
                     rollback = Rollback(host=self.host, previous=True, strict=True)
                     self.output.info(
                         "Services failed to start. Rolling back to previous version."
@@ -472,7 +484,8 @@ class Deploy(BaseCommand):
                     logger.debug("Keeping %d versions", self.config.versions_to_keep)
                     conn.run(
                         f"cd {remote_bundle_dir_q} && "
-                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
+                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm"
+                        f"; rm -f {remote_env_backup_q}",
                         warn=True,
                     )
 
@@ -514,6 +527,32 @@ class Deploy(BaseCommand):
         else:
             with tempfile.TemporaryDirectory() as tmpdir:
                 yield Path(tmpdir)
+
+    @contextmanager
+    def _deploy_session(self) -> Generator[object, None, None]:
+        """Context manager that combines SSH connection + deployment lock.
+
+        Acquires the deploy lock on the remote server before yielding the
+        connection, and releases it on exit (even on error).
+        """
+        with self.connection() as conn:
+            lock_file_q = shlex.quote(f"{self.config.install_dir}/.deploy_lock")
+            _, acquired = conn.run(
+                f"(set -C; echo $$ > {lock_file_q}) 2>/dev/null",
+                warn=True,
+                hide=True,
+            )
+            if not acquired:
+                raise DeploymentError(
+                    "Another deployment is in progress.\n"
+                    "If you are sure no deploy is running, remove the lock manually:\n"
+                    f"  ssh {self.selected_host.user}@{self.selected_host.address} rm {lock_file_q}"
+                )
+
+            try:
+                yield conn
+            finally:
+                conn.run(f"rm -f {lock_file_q}", warn=True, hide=True)
 
     def _show_deployment_summary(self, bundle_size: int, bundle_version: str):
         console = Console()

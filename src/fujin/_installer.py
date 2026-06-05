@@ -350,6 +350,35 @@ export -f {config.app_name}
         if unit["template_timer_name"]:
             active_units.append(unit["template_timer_name"])
 
+    # Validate all unit files before enabling/starting (catch errors early)
+    logger.info("Validating systemd unit files...")
+    validation_issues = 0
+    for unit in config.deployed_units:
+        unit_path = SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
+        if not unit_path.exists():
+            continue
+        result = subprocess.run(
+            f"systemd-analyze verify {shlex.quote(str(unit_path))}",
+            shell=True,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or result.stderr.strip():
+            validation_issues += 1
+            logger.warning(
+                "Validation issues in %s (exit code %d):",
+                unit_path.name,
+                result.returncode,
+            )
+            for line in result.stderr.splitlines():
+                logger.warning("  %s", line)
+
+    if validation_issues:
+        logger.warning(
+            "%d unit(s) have validation warnings - review above before continuing",
+            validation_issues,
+        )
+
     units_str = " ".join(active_units)
     run(
         f"systemctl daemon-reload && systemctl enable {units_str}",

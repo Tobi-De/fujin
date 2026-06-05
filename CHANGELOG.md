@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### ⚡ Performance
+
+- Ssh and deploy units cache
+
 ## [0.25.2] - 2026-03-31
 
 ### 🚀 Features
