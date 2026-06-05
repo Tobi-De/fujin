@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [unreleased]
 
+### 🚀 Features
+
+- Improve reliability
+
 ### ⚡ Performance
 
 - Ssh and deploy units cache

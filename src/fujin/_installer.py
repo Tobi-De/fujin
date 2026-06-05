@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -62,6 +62,7 @@ class InstallConfig:
     caddy_config_path: str
     app_bin: str
     deployed_units: list[DeployedUnit]
+    hooks: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def uv_path(self) -> str:
@@ -100,6 +101,22 @@ def _setup_logging(verbose: int) -> None:
     handler.setFormatter(_InstallerFormatter())
     logger.addHandler(handler)
     logger.setLevel(level)
+
+
+def _run_hooks(config: InstallConfig, phase: str) -> None:
+    commands = config.hooks.get(phase, [])
+    if not commands:
+        return
+
+    logger.info("Running %s hooks...", phase)
+    install_dir = f"{config.app_dir}/.install"
+    for cmd in commands:
+        logger.info("  [%s] %s", phase, cmd)
+        full_cmd = (
+            f"sudo -u {config.app_user} bash -c "
+            f"'source {install_dir}/.appenv 2>/dev/null ; {cmd}'"
+        )
+        run(full_cmd, check=True, timeout=300)
 
 
 def install(
@@ -225,6 +242,11 @@ export -f {config.app_name}
     # Ensure app_dir itself is group-writable so app can create files
     run(f"chown {config.deploy_user}:{config.app_user} {app_dir}")
     app_dir.chmod(0o775)
+
+    # ==========================================================================
+    # PHASE 2.5: POST-INSTALL HOOKS
+    # ==========================================================================
+    _run_hooks(config, "post_install")
 
     # ==========================================================================
     # PHASE 3: CONFIGURING SYSTEMD SERVICES
@@ -453,6 +475,11 @@ export -f {config.app_name}
         sys.exit(EXIT_SERVICE_START_FAILED)
 
     # ==========================================================================
+    # PHASE 3.5: POST-START HOOKS
+    # ==========================================================================
+    _run_hooks(config, "post_start")
+
+    # ==========================================================================
     # PHASE 4: CADDY CONFIGURATION
     # ==========================================================================
     # Configure Caddy after services are running successfully
@@ -508,6 +535,8 @@ export -f {config.app_name}
                 )
             else:
                 logger.debug("Caddy configuration updated and reloaded")
+
+    (install_dir / ".hooks.json").write_text(json.dumps(config.hooks))
 
     logger.info("Install completed successfully.")
 

@@ -45,6 +45,13 @@ class SecretConfig(msgspec.Struct):
             )
 
 
+class HooksConfig(msgspec.Struct):
+    pre_install: list[str] = msgspec.field(default_factory=list)
+    post_install: list[str] = msgspec.field(default_factory=list)
+    post_start: list[str] = msgspec.field(default_factory=list)
+    pre_rollback: list[str] = msgspec.field(default_factory=list)
+
+
 class Config(msgspec.Struct, kw_only=True, dict=True):
     app_name: str = msgspec.field(name="app")
     app_user: str | None = None  # User to run the app as (defaults to app_name)
@@ -69,6 +76,11 @@ class Config(msgspec.Struct, kw_only=True, dict=True):
     secret_config: SecretConfig | None = msgspec.field(
         name="secrets",
         default_factory=lambda: SecretConfig(adapter="system"),
+    )
+
+    hooks_config: HooksConfig | None = msgspec.field(
+        name="hooks",
+        default=None,
     )
 
     def __post_init__(self):
