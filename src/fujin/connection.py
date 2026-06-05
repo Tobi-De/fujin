@@ -145,6 +145,41 @@ class SSH2Connection:
                 poller.register(stdin_fd, select.POLLIN)
             poller.register(sock_fd, select.POLLIN)
 
+            def drain_channel() -> None:
+                while True:
+                    size, data = channel.read()
+                    if size == LIBSSH2_ERROR_EAGAIN:
+                        break
+                    if size > 0:
+                        text = stdout_decoder.decode(data)
+                        if not hide or hide == "err":
+                            sys.stdout.write(text)
+                            sys.stdout.flush()
+                        stdout_buffer.append(text)
+
+                        if "sudo" in text and watchers and pass_response:
+                            for pattern in watchers:
+                                if pattern.search(text):
+                                    logger.debug(
+                                        "Password pattern matched, sending response"
+                                    )
+                                    channel.write(pass_response.encode())
+                    else:
+                        break
+
+                while True:
+                    size, data = channel.read_stderr()
+                    if size == LIBSSH2_ERROR_EAGAIN:
+                        break
+                    if size > 0:
+                        text = stderr_decoder.decode(data)
+                        if not hide or hide == "out":
+                            sys.stderr.write(text)
+                            sys.stderr.flush()
+                        stderr_buffer.append(text)
+                    else:
+                        break
+
             while True:
                 directions = self.session.block_directions()
 
@@ -172,77 +207,10 @@ class SSH2Connection:
                     if fd == sock_fd and event & (
                         select.POLLIN | select.POLLERR | select.POLLHUP
                     ):
-                        # Read stdout
-                        while True:
-                            size, data = channel.read()
-                            if size == LIBSSH2_ERROR_EAGAIN:
-                                break
-                            if size > 0:
-                                text = stdout_decoder.decode(data)
-                                if not hide or hide == "err":
-                                    sys.stdout.write(text)
-                                    sys.stdout.flush()
-                                stdout_buffer.append(text)
+                        drain_channel()
 
-                                if "sudo" in text and watchers and pass_response:
-                                    for pattern in watchers:
-                                        if pattern.search(text):
-                                            logger.debug(
-                                                "Password pattern matched, sending response"
-                                            )
-                                            channel.write(pass_response.encode())
-                            else:
-                                break
-
-                        # Read stderr
-                        while True:
-                            size, data = channel.read_stderr()
-                            if size == LIBSSH2_ERROR_EAGAIN:
-                                break
-                            if size > 0:
-                                text = stderr_decoder.decode(data)
-                                if not hide or hide == "out":
-                                    sys.stderr.write(text)
-                                    sys.stderr.flush()
-                                stderr_buffer.append(text)
-                            else:
-                                break
-
-                # Also drain channel if libssh2 has buffered data pending
                 if directions & LIBSSH2_SESSION_BLOCK_INBOUND:
-                    while True:
-                        size, data = channel.read()
-                        if size == LIBSSH2_ERROR_EAGAIN:
-                            break
-                        if size > 0:
-                            text = stdout_decoder.decode(data)
-                            if not hide or hide == "err":
-                                sys.stdout.write(text)
-                                sys.stdout.flush()
-                            stdout_buffer.append(text)
-
-                            if "sudo" in text and watchers and pass_response:
-                                for pattern in watchers:
-                                    if pattern.search(text):
-                                        logger.debug(
-                                            "Password pattern matched, sending response"
-                                        )
-                                        channel.write(pass_response.encode())
-                        else:
-                            break
-
-                    while True:
-                        size, data = channel.read_stderr()
-                        if size == LIBSSH2_ERROR_EAGAIN:
-                            break
-                        if size > 0:
-                            text = stderr_decoder.decode(data)
-                            if not hide or hide == "out":
-                                sys.stderr.write(text)
-                                sys.stderr.flush()
-                            stderr_buffer.append(text)
-                        else:
-                            break
+                    drain_channel()
 
                 if channel.eof():
                     break
