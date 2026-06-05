@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shlex
 from dataclasses import dataclass
 from typing import Annotated
@@ -95,30 +94,6 @@ class Rollback(BaseCommand):
                 )
                 if not confirm:
                     return
-
-            # Run pre-rollback hooks (reverse migrations etc.)
-            hooks_json_path = shlex.quote(f"{self.config.install_dir}/.hooks.json")
-            hooks_raw, _ = conn.run(
-                f"cat {hooks_json_path} 2>/dev/null",
-                warn=True,
-                hide=True,
-            )
-            if hooks_raw and hooks_raw.strip():
-                try:
-                    hooks = json.loads(hooks_raw)
-                    pre_rollback_cmds = hooks.get("pre_rollback", [])
-                    if pre_rollback_cmds:
-                        self.output.info("Running pre-rollback hooks...")
-                        install_dir = self.config.install_dir
-                        for cmd in pre_rollback_cmds:
-                            self.output.info(f"  [pre-rollback] {cmd}")
-                            full_cmd = (
-                                f"sudo -u {self.config.app_user} bash -c "
-                                f"'source {install_dir}/.appenv 2>/dev/null ; {cmd}'"
-                            )
-                            conn.run(full_cmd)
-                except json.JSONDecodeError:
-                    pass
 
             # Uninstall current
             if current_version:

@@ -24,6 +24,7 @@ from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin.commands.rollback import Rollback
 from fujin.config import get_git_short_hash
+from fujin.connection import SSH2Connection
 from fujin.errors import (
     BuildError,
     CommandError,
@@ -299,7 +300,6 @@ class Deploy(BaseCommand):
                     "pre_install",
                     "post_install",
                     "post_start",
-                    "pre_rollback",
                 ):
                     commands = getattr(self.config.hooks_config, phase)
                     resolved_commands = []
@@ -404,14 +404,16 @@ class Deploy(BaseCommand):
 
                 self.output.success("Bundle uploaded successfully.")
 
+                self.output.info("Executing remote installation...")
+
                 # Write .env file directly (not bundled for security)
                 remote_env_path = f"{self.config.install_dir}/.env"
                 remote_env_path_q = shlex.quote(remote_env_path)
                 install_dir_q = shlex.quote(self.config.install_dir)
+                remote_env_backup_q = shlex.quote(f"{remote_env_path}.bak")
                 logger.debug("Writing .env to %s", remote_env_path)
 
-                # Ensure the install directory exists and backup existing .env
-                remote_env_backup_q = shlex.quote(f"{remote_env_path}.bak")
+                # Backup existing .env (ensure install dir exists first)
                 conn.run(
                     f"mkdir -p {install_dir_q} && "
                     f"cp {remote_env_path_q} {remote_env_backup_q} 2>/dev/null || true",
@@ -445,20 +447,24 @@ class Deploy(BaseCommand):
                     hide=True,
                 )
 
-                self.output.info("Executing remote installation...")
-
                 # Run pre-install hooks (as deploy user, with .env sourced)
                 pre_install_commands = resolved_hooks.get("pre_install", [])
                 if pre_install_commands:
                     self.output.info("Running pre-install hooks...")
-                    install_dir = self.config.install_dir
-                    for cmd in pre_install_commands:
-                        self.output.info(f"  [pre-install] {cmd}")
-                        full_cmd = (
-                            f"set -a; source {install_dir}/.env 2>/dev/null; set +a; "
-                            f"{cmd}"
+                    try:
+                        for cmd in pre_install_commands:
+                            self.output.info(f"  [pre-install] {cmd}")
+                            full_cmd = (
+                                f"set -a; source {install_dir_q}/.env 2>/dev/null; set +a; "
+                                f"{cmd}"
+                            )
+                            conn.run(full_cmd, pty=True)
+                    except CommandError:
+                        conn.run(
+                            f"mv {remote_env_backup_q} {remote_env_path_q} 2>/dev/null || true",
+                            hide=True,
                         )
-                        conn.run(full_cmd, pty=True)
+                        raise
 
                 rollback_ran = False
                 rollback_succeeded = False
@@ -471,11 +477,13 @@ class Deploy(BaseCommand):
                     conn.run(install_cmd, pty=True)
                 except CommandError as e:
                     if e.code != installer.EXIT_SERVICE_START_FAILED:
+                        conn.run(f"rm -f {remote_env_backup_q}", warn=True, hide=True)
                         raise DeploymentError(
                             f"Installation failed with exit code {e.code}"
                         ) from e
 
                     if self.no_rollback:
+                        conn.run(f"rm -f {remote_env_backup_q}", warn=True, hide=True)
                         raise DeploymentError(
                             "Services failed to start. Rollback disabled via --no-rollback."
                         ) from e
@@ -516,10 +524,12 @@ class Deploy(BaseCommand):
                     logger.debug("Keeping %d versions", self.config.versions_to_keep)
                     conn.run(
                         f"cd {remote_bundle_dir_q} && "
-                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm"
-                        f"; rm -f {remote_env_backup_q}",
+                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
                         warn=True,
                     )
+
+                if not rollback_ran:
+                    conn.run(f"rm -f {remote_env_backup_q}", warn=True, hide=True)
 
                 # Get git commit hash if available
                 log_operation(
@@ -561,14 +571,16 @@ class Deploy(BaseCommand):
                 yield Path(tmpdir)
 
     @contextmanager
-    def _deploy_session(self) -> Generator[object, None, None]:
+    def _deploy_session(self) -> Generator[SSH2Connection, None, None]:
         """Context manager that combines SSH connection + deployment lock.
 
         Acquires the deploy lock on the remote server before yielding the
         connection, and releases it on exit (even on error).
         """
         with self.connection() as conn:
+            install_dir_q = shlex.quote(self.config.install_dir)
             lock_file_q = shlex.quote(f"{self.config.install_dir}/.deploy_lock")
+            conn.run(f"mkdir -p {install_dir_q}", hide=True)
             _, acquired = conn.run(
                 f"(set -C; echo $$ > {lock_file_q}) 2>/dev/null",
                 warn=True,

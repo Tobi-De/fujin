@@ -49,7 +49,6 @@ class HooksConfig(msgspec.Struct):
     pre_install: list[str] = msgspec.field(default_factory=list)
     post_install: list[str] = msgspec.field(default_factory=list)
     post_start: list[str] = msgspec.field(default_factory=list)
-    pre_rollback: list[str] = msgspec.field(default_factory=list)
 
 
 class Config(msgspec.Struct, kw_only=True, dict=True):

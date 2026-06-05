@@ -103,7 +103,7 @@ def _setup_logging(verbose: int) -> None:
     logger.setLevel(level)
 
 
-def _run_hooks(config: InstallConfig, phase: str) -> None:
+def _run_hooks(config: InstallConfig, phase: str, *, fatal: bool = True) -> None:
     commands = config.hooks.get(phase, [])
     if not commands:
         return
@@ -112,11 +112,19 @@ def _run_hooks(config: InstallConfig, phase: str) -> None:
     install_dir = f"{config.app_dir}/.install"
     for cmd in commands:
         logger.info("  [%s] %s", phase, cmd)
-        full_cmd = (
-            f"sudo -u {config.app_user} bash -c "
-            f"'source {install_dir}/.appenv 2>/dev/null ; {cmd}'"
+        full_cmd = f"sudo -u {shlex.quote(config.app_user)} bash -c " + shlex.quote(
+            f"source {install_dir}/.appenv 2>/dev/null ; {cmd}"
         )
-        run(full_cmd, check=True, timeout=300)
+        try:
+            run(full_cmd, check=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            if fatal:
+                raise
+            logger.warning("[%s] Hook timed out: %s", phase, cmd)
+        except subprocess.CalledProcessError as e:
+            if fatal:
+                raise
+            logger.warning("[%s] Hook failed (exit %d): %s", phase, e.returncode, cmd)
 
 
 def install(
@@ -246,7 +254,7 @@ export -f {config.app_name}
     # ==========================================================================
     # PHASE 2.5: POST-INSTALL HOOKS
     # ==========================================================================
-    _run_hooks(config, "post_install")
+    _run_hooks(config, "post_install", fatal=True)
 
     # ==========================================================================
     # PHASE 3: CONFIGURING SYSTEMD SERVICES
@@ -477,7 +485,7 @@ export -f {config.app_name}
     # ==========================================================================
     # PHASE 3.5: POST-START HOOKS
     # ==========================================================================
-    _run_hooks(config, "post_start")
+    _run_hooks(config, "post_start", fatal=False)
 
     # ==========================================================================
     # PHASE 4: CADDY CONFIGURATION
@@ -535,8 +543,6 @@ export -f {config.app_name}
                 )
             else:
                 logger.debug("Caddy configuration updated and reloaded")
-
-    (install_dir / ".hooks.json").write_text(json.dumps(config.hooks))
 
     logger.info("Install completed successfully.")
 

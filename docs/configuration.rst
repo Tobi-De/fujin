@@ -186,48 +186,37 @@ Hook Phases
 ~~~~~~~~~~~
 
 **pre-install**
-    Runs before the installer, as the deploy (SSH) user. Use for infrastructure setup like installing packages or creating databases. Has access to environment variables from ``.env``.
+    Runs before the installer, as the deploy (SSH) user. Use for infrastructure setup like installing packages or creating databases. Has access to environment variables from ``.env``. **Failure is fatal** — the deploy stops and rolls back.
 
     .. code-block:: toml
         :caption: fujin.toml
 
         [hooks]
-        pre-install = [
+        pre_install = [
             "sudo apt-get install -y postgresql",
             "sudo -u postgres createdb myapp",
         ]
 
 **post-install**
-    Runs after the package is installed but before systemd services are started. Executes as ``app_user`` via ``sudo -u``, within the app's environment (``.appenv`` sourced, so the app binary is on ``PATH``). Use for database migrations.
+    Runs after the package is installed but before systemd services are started. Executes as ``app_user`` via ``sudo -u``, within the app's environment (``.appenv`` sourced, so the app binary is on ``PATH``). Use for database migrations. **Failure is fatal** — the deploy stops.
 
     .. code-block:: toml
         :caption: fujin.toml
 
         [hooks]
-        post-install = [
+        post_install = [
             "python manage.py migrate --noinput",
         ]
 
 **post-start**
-    Runs after services are confirmed running, before Caddy configuration. Executes as ``app_user`` within the app environment. Use for static file collection, cache warming, or health checks.
+    Runs after services are confirmed running, before Caddy configuration. Executes as ``app_user`` within the app environment. Use for static file collection, cache warming, or health checks. **Failure is non-fatal** — services are already running, a warning is logged but the deploy succeeds.
 
     .. code-block:: toml
         :caption: fujin.toml
 
         [hooks]
-        post-start = [
+        post_start = [
             "python manage.py collectstatic --noinput",
-        ]
-
-**pre-rollback**
-    Runs during rollback, before the current version is uninstalled. Executes as ``app_user`` within the app environment. Use for reversing database migrations.
-
-    .. code-block:: toml
-        :caption: fujin.toml
-
-        [hooks]
-        pre-rollback = [
-            "python manage.py migrate {from_version}",
         ]
 
 Available Variables
@@ -240,7 +229,6 @@ Hook commands support the same template variables as systemd unit files:
 - ``{app_user}`` - User running the app
 - ``{version}`` - Current version being deployed
 - ``{install_dir}`` - Path to ``.install`` directory
-- ``{from_version}`` - (pre-rollback only) The version being rolled back from
 
 Complete Example
 ~~~~~~~~~~~~~~~~
@@ -249,13 +237,13 @@ Complete Example
     :caption: fujin.toml
 
     [hooks]
-    pre-install = [
+    pre_install = [
         "sudo -u postgres createdb myapp",
     ]
-    post-install = [
+    post_install = [
         "python manage.py migrate --noinput",
     ]
-    post-start = [
+    post_start = [
         "python manage.py collectstatic --noinput",
         "python manage.py clearsessions",
     ]

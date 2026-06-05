@@ -182,7 +182,6 @@ def test_rollback_previous_flag_auto_selects_most_recent(minimal_config_dict):
     mock_conn.run.side_effect = [
         # Combined: cat .version; echo '---'; ls -1t .versions
         ("1.1.0\n---\ntestapp-1.1.0.pyz\ntestapp-1.0.0.pyz\ntestapp-0.9.0.pyz", True),
-        ("", True),  # cat .hooks.json (empty, no hooks)
         (None, True),  # test -f (bundle exists)
         ("", True),  # uninstall
         ("", True),  # install + cleanup
