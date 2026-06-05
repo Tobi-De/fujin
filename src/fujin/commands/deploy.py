@@ -292,6 +292,24 @@ class Deploy(BaseCommand):
                 all_unresolved.update(unresolved)
                 (zipapp_dir / "Caddyfile").write_text(resolved_caddyfile)
 
+            # Resolve hook commands
+            resolved_hooks: dict[str, list[str]] = {}
+            if self.config.hooks_config:
+                for phase in (
+                    "pre_install",
+                    "post_install",
+                    "post_start",
+                    "pre_rollback",
+                ):
+                    commands = getattr(self.config.hooks_config, phase)
+                    resolved_commands = []
+                    for cmd in commands:
+                        resolved, unresolved = safe_format(cmd, **context)
+                        all_unresolved.update(unresolved)
+                        resolved_commands.append(resolved)
+                    if resolved_commands:
+                        resolved_hooks[phase] = resolved_commands
+
             if all_unresolved:
                 self.output.warning(
                     f"Found unresolved variables in configuration files: {', '.join(sorted(all_unresolved))}\n"
@@ -313,6 +331,7 @@ class Deploy(BaseCommand):
                 "caddy_config_path": self.config.caddy_config_path,
                 "app_bin": self.config.app_name,  # Just the binary name, not full path
                 "deployed_units": deployed_units_data,
+                "hooks": resolved_hooks,
             }
 
             # Write config without indent for smaller size
@@ -427,6 +446,19 @@ class Deploy(BaseCommand):
                 )
 
                 self.output.info("Executing remote installation...")
+
+                # Run pre-install hooks (as deploy user, with .env sourced)
+                pre_install_commands = resolved_hooks.get("pre_install", [])
+                if pre_install_commands:
+                    self.output.info("Running pre-install hooks...")
+                    install_dir = self.config.install_dir
+                    for cmd in pre_install_commands:
+                        self.output.info(f"  [pre-install] {cmd}")
+                        full_cmd = (
+                            f"set -a; source {install_dir}/.env 2>/dev/null; set +a; "
+                            f"{cmd}"
+                        )
+                        conn.run(full_cmd, pty=True)
 
                 rollback_ran = False
                 rollback_succeeded = False
