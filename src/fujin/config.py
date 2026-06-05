@@ -1,5 +1,5 @@
 from __future__ import annotations
-from functools import cache
+from functools import cache, cached_property
 
 import os
 import subprocess
@@ -45,13 +45,14 @@ class SecretConfig(msgspec.Struct):
             )
 
 
-class Config(msgspec.Struct, kw_only=True):
+class Config(msgspec.Struct, kw_only=True, dict=True):
     app_name: str = msgspec.field(name="app")
     app_user: str | None = None  # User to run the app as (defaults to app_name)
     version: str = msgspec.field(default_factory=lambda: read_version_from_pyproject())
     versions_to_keep: int | None = 5
     python_version: str | None = None
     build_command: str
+    build_timeout: int = 300
     installation_mode: InstallationMode
     distfile: str
     aliases: dict[str, str] = msgspec.field(default_factory=dict)
@@ -187,7 +188,7 @@ class Config(msgspec.Struct, kw_only=True):
     def caddy_config_path(self) -> str:
         return f"{self.caddy_config_dir}/{self.app_name}.caddy"
 
-    @property
+    @cached_property
     def deployed_units(self) -> list[DeployedUnit]:
         return discover_deployed_units(
             self.local_config_dir, self.app_name, self.replicas
