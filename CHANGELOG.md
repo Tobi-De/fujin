@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.1] - 2026-06-09
+
+### 🐛 Bug Fixes
+
+- *(deploy)* Skip reload-or-restart for Type=oneshot services
+
 ## [0.26.0] - 2026-06-05
 
 ### 🚀 Features
