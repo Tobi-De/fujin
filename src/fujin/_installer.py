@@ -373,8 +373,15 @@ export -f {config.app_name}
 
     logger.info("Restarting services...")
     active_units = []
+    oneshot_units = _get_oneshot_units(config.deployed_units)
+    if oneshot_units:
+        logger.info(
+            "Skipping restart of Type=oneshot units: %s",
+            ", ".join(sorted(oneshot_units)),
+        )
     for unit in config.deployed_units:
-        active_units.extend(unit["service_instances"])
+        if unit["template_service_name"] not in oneshot_units:
+            active_units.extend(unit["service_instances"])
         if unit["template_socket_name"]:
             active_units.append(unit["template_socket_name"])
         if unit["template_timer_name"]:
@@ -409,16 +416,20 @@ export -f {config.app_name}
             validation_issues,
         )
 
-    units_str = " ".join(active_units)
-    run(
-        f"systemctl daemon-reload && systemctl enable {units_str}",
-        check=True,
-    )
+    if not active_units:
+        run("systemctl daemon-reload")
+        restart_result = run("true")
+    else:
+        units_str = " ".join(active_units)
+        run(
+            f"systemctl daemon-reload && systemctl enable {units_str}",
+            check=True,
+        )
 
-    restart_cmd = "restart" if full_restart else "reload-or-restart"
-    restart_result = run(
-        f"systemctl {restart_cmd} {units_str}",
-    )
+        restart_cmd = "restart" if full_restart else "reload-or-restart"
+        restart_result = run(
+            f"systemctl {restart_cmd} {units_str}",
+        )
 
     # Check if services are actually running (not just restart command succeeded)
     # Only check services with no timer or socket - they should run immediately
@@ -426,6 +437,7 @@ export -f {config.app_name}
         unit["service_instances"]
         for unit in config.deployed_units
         if not (unit["template_socket_name"] or unit["template_timer_name"])
+        and unit["template_service_name"] not in oneshot_units
     ]
     units_to_check = list(chain.from_iterable(units_to_check))
 
@@ -605,6 +617,21 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
         run(f"userdel {config.app_user}")
 
     logger.info("Uninstall completed.")
+
+
+def _get_oneshot_units(deployed_units: list[DeployedUnit]) -> set[str]:
+    """Identify units with Type=oneshot that should be skipped during restart.
+
+    Oneshot services have no long-running process to reload or restart — they
+    complete and exit. Restarting them during deploy is unnecessary and can
+    cause spurious failures that trigger rollbacks.
+    """
+    oneshot = set()
+    for unit in deployed_units:
+        unit_path = SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
+        if unit_path.exists() and "Type=oneshot" in unit_path.read_text():
+            oneshot.add(unit["template_service_name"])
+    return oneshot
 
 
 def run(
