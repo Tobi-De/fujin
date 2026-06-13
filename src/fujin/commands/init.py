@@ -172,10 +172,19 @@ class Init(BaseCommand):
             "# Main command - adjust to match your application\n", exec_start_pre_lines
         )
 
-        # Customize ExecStart for gunicorn
+        # Customize ExecStart for gunicorn and add reload with migrations
         service_content = service_content.replace(
             "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
             f"ExecStart={{install_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
+        )
+        exec_reload_lines = (
+            f"ExecReload={{install_dir}}/.venv/bin/{app_name} migrate\n"
+            f"ExecReload={{install_dir}}/.venv/bin/{app_name} collectstatic --no-input\n"
+            f"ExecReload=/bin/kill -s HUP $MAINPID\n"
+        )
+        service_content = service_content.replace(
+            "ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/",
+            f"{exec_reload_lines}ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/",
         )
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
@@ -222,7 +231,9 @@ After={{setup}}
 UMask=0002
 RuntimeDirectory={app_name}
 RuntimeDirectoryMode=0755
+ExecStartPre={{install_dir}}/.venv/bin/{app_name} setup
 ExecStart={{install_dir}}/.venv/bin/{app_name} prodserver --uds /run/{app_name}/web.sock
+ExecReload={{install_dir}}/.venv/bin/{app_name} setup
 ExecReload=/bin/kill -s HUP $MAINPID
 KillMode=mixed
 TimeoutStopSec=5
