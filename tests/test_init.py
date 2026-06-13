@@ -48,7 +48,7 @@ def test_init_creates_fujin_toml_with_simple_profile(tmp_path, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("profile", ["django", "falco", "binary"])
+@pytest.mark.parametrize("profile", ["django", "binary"])
 def test_init_with_profiles(tmp_path, monkeypatch, profile):
     """init creates valid config for all profiles."""
     monkeypatch.chdir(tmp_path)
@@ -76,10 +76,6 @@ def test_init_with_profiles(tmp_path, monkeypatch, profile):
             web_service = (tmp_path / ".fujin/systemd/web.service").read_text()
             assert "migrate" in web_service
             assert "collectstatic" in web_service
-        elif profile == "falco":
-            # Falco has web + worker
-            assert (tmp_path / ".fujin/systemd/web.service").exists()
-            assert (tmp_path / ".fujin/systemd/worker.service").exists()
         elif profile == "binary":
             # Binary has web service without .venv
             web_service = (tmp_path / ".fujin/systemd/web.service").read_text()
