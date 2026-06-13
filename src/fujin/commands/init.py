@@ -24,7 +24,7 @@ class Init(BaseCommand):
     profile: Annotated[
         str,
         cappa.Arg(
-            choices=["simple", "falco", "binary", "django"],
+            choices=["simple", "binary", "django"],
             short="-p",
             long="--profile",
             help="Configuration profile to use",
@@ -54,7 +54,6 @@ class Init(BaseCommand):
         profile_generators = {
             "simple": self._generate_simple,
             "django": self._generate_django,
-            "falco": self._generate_falco,
             "binary": self._generate_binary,
         }
 
@@ -192,95 +191,6 @@ class Init(BaseCommand):
         self._create_caddyfile(
             fujin_dir, app_name, "localhost:8000", static_path="{app_dir}/staticfiles/"
         )
-
-    def _generate_falco(self, app_name: str, fujin_dir: Path):
-        """Generate Falco profile: web + worker services."""
-        systemd_dir = fujin_dir / "systemd"
-        dropin_dir = systemd_dir / "common.d"
-        dropin_dir.mkdir(parents=True, exist_ok=True)
-
-        dropin = dropin_dir / "base.conf"
-        dropin.write_text(
-            """
-[Service]
-User={{app_user}}
-WorkingDirectory={{app_dir}}
-EnvironmentFile={{install_dir}}/.env
-Restart=on-failure
-RestartSec=5s
-
-# Security Hardening
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths={{app_dir}}
-        """
-        )
-
-        web_service = systemd_dir / "web.service"
-        web_service.write_text(
-            f"""
-[Unit]
-Description={app_name} web
-After=network.target
-Wants={{setup}}
-After={{setup}}
-
-[Service]
-UMask=0002
-RuntimeDirectory={app_name}
-RuntimeDirectoryMode=0755
-ExecStartPre={{install_dir}}/.venv/bin/{app_name} setup
-ExecStart={{install_dir}}/.venv/bin/{app_name} prodserver --uds /run/{app_name}/web.sock
-ExecReload={{install_dir}}/.venv/bin/{app_name} setup
-ExecReload=/bin/kill -s HUP $MAINPID
-KillMode=mixed
-TimeoutStopSec=5
-
-[Install]
-WantedBy=multi-user.target
-"""
-        )
-        self.output.success(f"  Created {web_service}")
-
-        setup_service = systemd_dir / "setup.service"
-        setup_service.write_text(
-            f"""
-[Unit]
-Description={app_name} setup
-After=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart={{install_dir}}/.venv/bin/{app_name} setup
-
-[Install]
-WantedBy=multi-user.target
-"""
-        )
-        self.output.success(f"  Created {setup_service}")
-
-        worker_service = systemd_dir / "worker.service"
-        worker_service.write_text(
-            f"""
-[Unit]
-Description={app_name} worker
-Wants={{setup}}
-After={{setup}}
-After=network.target
-
-[Service]
-ExecStart={{install_dir}}/.venv/bin/{app_name} db_worker
-
-[Install]
-WantedBy=multi-user.target
-"""
-        )
-        self.output.success(f"  Created {worker_service}")
-
-        self._create_caddyfile(fujin_dir, app_name, f"unix//run/{app_name}/web.sock")
 
     def _generate_binary(self, app_name: str, fujin_dir: Path):
         """Generate binary profile: single binary deployment."""
