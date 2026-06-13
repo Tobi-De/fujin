@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### ⚙️ Miscellaneous Tasks
+
+- Remove falco preset from init command
+
 ## [0.26.1] - 2026-06-09
 
 ### 🐛 Bug Fixes
