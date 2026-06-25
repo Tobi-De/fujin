@@ -25,7 +25,7 @@ def test_down_aborted_when_user_declines(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.down.Confirm") as mock_confirm,
         patch.object(Down, "output", MagicMock()),
     ):
@@ -78,7 +78,7 @@ def test_down_successful_teardown_with_bundle(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.down.Confirm") as mock_confirm,
         patch("fujin.commands.down.log_operation"),
         patch.object(Down, "output", MagicMock()),
@@ -110,7 +110,7 @@ def test_down_uses_config_version_when_version_file_missing(minimal_config_dict)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.down.Confirm") as mock_confirm,
         patch("fujin.commands.down.log_operation"),
         patch.object(Down, "output", MagicMock()),
@@ -146,7 +146,7 @@ def test_down_fails_when_uninstall_fails_without_force(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.down.Confirm") as mock_confirm,
         patch.object(Down, "output", MagicMock()),
     ):
@@ -177,7 +177,7 @@ def test_down_continues_with_force_when_uninstall_fails(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.down.Confirm") as mock_confirm,
         patch("fujin.commands.down.log_operation"),
         patch.object(Down, "output", MagicMock()),
@@ -215,7 +215,7 @@ def test_down_with_full_flag_uninstalls_caddy(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Down, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.down.Confirm") as mock_confirm,
         patch("fujin.commands.down.log_operation"),
         patch("fujin.commands.down.caddy") as mock_caddy,

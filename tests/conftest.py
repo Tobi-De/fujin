@@ -56,7 +56,7 @@ def mock_connection():
     mock_conn = MagicMock()
     mock_conn.run.return_value = ("", True)
 
-    with patch.object(BaseCommand, "connection") as mock_connection_ctx:
+    with patch("fujin.connection.connection") as mock_connection_ctx:
         mock_connection_ctx.return_value.__enter__.return_value = mock_conn
         mock_connection_ctx.return_value.__exit__.return_value = None
         yield mock_conn

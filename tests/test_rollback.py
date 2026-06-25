@@ -32,7 +32,7 @@ def test_rollback_aborts_on_keyboard_interrupt(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Rollback, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.rollback.IntPrompt") as mock_prompt,
         patch("fujin.commands.rollback.Console"),
         patch.object(Rollback, "output", MagicMock()),
@@ -62,7 +62,7 @@ def test_rollback_aborts_when_user_declines_confirmation(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Rollback, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.rollback.IntPrompt") as mock_prompt,
         patch("fujin.commands.rollback.Console"),
         patch("fujin.commands.rollback.Confirm") as mock_confirm,
@@ -88,7 +88,7 @@ def test_rollback_strict_fails_when_no_targets_available(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Rollback, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch.object(Rollback, "output", MagicMock()),
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
@@ -112,7 +112,7 @@ def test_rollback_strict_fails_when_only_current_version_exists(minimal_config_d
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Rollback, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch.object(Rollback, "output", MagicMock()),
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
@@ -134,7 +134,7 @@ def test_rollback_shows_info_when_no_targets_available(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Rollback, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch.object(Rollback, "output", MagicMock()) as mock_output,
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
@@ -159,7 +159,7 @@ def test_rollback_shows_info_when_only_current_version_exists(minimal_config_dic
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Rollback, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch.object(Rollback, "output", MagicMock()) as mock_output,
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
@@ -189,7 +189,7 @@ def test_rollback_previous_flag_auto_selects_most_recent(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Rollback, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.rollback.IntPrompt") as mock_prompt,
         patch("fujin.commands.rollback.Confirm") as mock_confirm,
         patch("fujin.commands.rollback.log_operation"),

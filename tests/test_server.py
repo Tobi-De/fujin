@@ -309,8 +309,9 @@ def test_upgrade_command_all_success(minimal_config, mock_connection):
 
     with (
         patch("fujin.config.Config.read", return_value=minimal_config),
-        patch.object(
-            Server, "connection", return_value=MagicMock(__enter__=lambda x: mock_conn)
+        patch(
+            "fujin.connection.connection",
+            return_value=MagicMock(__enter__=lambda x: mock_conn),
         ),
         patch.object(Server, "output", MagicMock()) as mock_output,
     ):
@@ -352,8 +353,9 @@ def test_upgrade_command_partial_failure(minimal_config, mock_connection):
 
     with (
         patch("fujin.config.Config.read", return_value=minimal_config),
-        patch.object(
-            Server, "connection", return_value=MagicMock(__enter__=lambda x: mock_conn)
+        patch(
+            "fujin.connection.connection",
+            return_value=MagicMock(__enter__=lambda x: mock_conn),
         ),
         patch.object(Server, "output", MagicMock()) as mock_output,
     ):
@@ -383,8 +385,9 @@ def test_upgrade_command_components_not_installed(minimal_config, mock_connectio
 
     with (
         patch("fujin.config.Config.read", return_value=minimal_config),
-        patch.object(
-            Server, "connection", return_value=MagicMock(__enter__=lambda x: mock_conn)
+        patch(
+            "fujin.connection.connection",
+            return_value=MagicMock(__enter__=lambda x: mock_conn),
         ),
         patch.object(Server, "output", MagicMock()) as mock_output,
     ):

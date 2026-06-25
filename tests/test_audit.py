@@ -22,7 +22,7 @@ def test_audit_with_no_logs_shows_message():
         patch("fujin.commands.audit.read_logs", return_value=[]),
         patch("fujin.commands.audit.Console") as mock_console_class,
         patch.object(Audit, "config", mock_config),
-        patch.object(Audit, "connection") as mock_conn_ctx,
+        patch("fujin.connection.connection") as mock_conn_ctx,
     ):
         mock_conn = Mock()
         mock_conn_ctx.return_value.__enter__.return_value = mock_conn
@@ -129,7 +129,7 @@ def test_audit_displays_operations(record, expected_patterns):
         patch("fujin.commands.audit.read_logs", return_value=[record]),
         patch("fujin.commands.audit.Console") as mock_console_class,
         patch.object(Audit, "config", mock_config),
-        patch.object(Audit, "connection") as mock_conn_ctx,
+        patch("fujin.connection.connection") as mock_conn_ctx,
     ):
         mock_conn = Mock()
         mock_conn_ctx.return_value.__enter__.return_value = mock_conn
@@ -188,7 +188,7 @@ def test_audit_groups_by_host():
         patch("fujin.commands.audit.read_logs", return_value=records),
         patch("fujin.commands.audit.Console") as mock_console_class,
         patch.object(Audit, "config", mock_config),
-        patch.object(Audit, "connection") as mock_conn_ctx,
+        patch("fujin.connection.connection") as mock_conn_ctx,
     ):
         mock_conn = Mock()
         mock_conn_ctx.return_value.__enter__.return_value = mock_conn
@@ -219,7 +219,7 @@ def test_audit_limit_parameter(limit, expected):
     with (
         patch("fujin.commands.audit.read_logs", return_value=[]) as mock_read_logs,
         patch.object(Audit, "config", mock_config),
-        patch.object(Audit, "connection") as mock_conn_ctx,
+        patch("fujin.connection.connection") as mock_conn_ctx,
     ):
         mock_conn = Mock()
         mock_conn_ctx.return_value.__enter__.return_value = mock_conn
@@ -301,7 +301,7 @@ def test_audit_handles_edge_cases(record, expected_behavior):
         patch("fujin.commands.audit.read_logs", return_value=[record]),
         patch("fujin.commands.audit.Console") as mock_console_class,
         patch.object(Audit, "config", mock_config),
-        patch.object(Audit, "connection") as mock_conn_ctx,
+        patch("fujin.connection.connection") as mock_conn_ctx,
     ):
         mock_conn = Mock()
         mock_conn_ctx.return_value.__enter__.return_value = mock_conn

@@ -24,6 +24,7 @@ from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin.commands.rollback import Rollback
 from fujin.config import get_git_short_hash
+from fujin import connection
 from fujin.connection import SSH2Connection
 from fujin.errors import (
     BuildError,
@@ -577,12 +578,11 @@ class Deploy(BaseCommand):
         Acquires the deploy lock on the remote server before yielding the
         connection, and releases it on exit (even on error).
         """
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host, compress=False) as conn:
             install_dir_q = shlex.quote(self.config.install_dir)
             lock_file_q = shlex.quote(f"{self.config.install_dir}/.deploy_lock")
-            conn.run(f"mkdir -p {install_dir_q}", hide=True)
             _, acquired = conn.run(
-                f"(set -C; echo $$ > {lock_file_q}) 2>/dev/null",
+                f"mkdir -p {install_dir_q} && (set -C; echo $$ > {lock_file_q}) 2>/dev/null",
                 warn=True,
                 hide=True,
             )

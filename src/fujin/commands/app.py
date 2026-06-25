@@ -12,6 +12,7 @@ from rich.table import Table
 
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
+from fujin import connection
 from fujin.discovery import DeployedUnit
 
 
@@ -54,7 +55,7 @@ class App(BaseCommand):
             if timer_name:
                 names.append(timer_name)
 
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             shlex.quote(self.config.app_dir)
             fujin_dir = shlex.quote(self.config.install_dir)
             remote_version, _ = conn.run(
@@ -177,7 +178,7 @@ class App(BaseCommand):
             self.output.output(f"[bold]Replicas:[/bold] {deployed_unit.replicas}")
 
         # Get status from server
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             # Get detailed status for each instance
             self.output.output("\n[bold]Status:[/bold]")
             for unit_name in deployed_unit.service_instances():
@@ -257,7 +258,7 @@ class App(BaseCommand):
         self,
         command: Annotated[str, cappa.Arg(help="Command to execute")],
     ):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             cmd = f"cd {self.config.app_dir} && source .install/.appenv && {self.config.app_bin} {command}"
             conn.run(
                 f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
@@ -307,7 +308,7 @@ class App(BaseCommand):
         self._run_service_command("stop", names)
 
     def _run_service_command(self, command: str, names: list[str] | None):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             # Use instances for start/stop/restart (operates on running services)
             units = self._get_runtime_units(names)
             if not units:
@@ -385,7 +386,7 @@ class App(BaseCommand):
         """
         Show last 50 lines for web process (default)
         """
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             # Use instances for logs (shows logs from running services)
             units = self._get_runtime_units(names)
 
@@ -425,7 +426,7 @@ class App(BaseCommand):
             self.output.output(self._get_available_options())
             return
 
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             if name == "caddy" and self.config.caddyfile_exists:
                 self.output.output(f"[cyan]# {self.config.caddy_config_path}[/cyan]")
                 print()
@@ -657,7 +658,7 @@ class App(BaseCommand):
             self.output.info(f"\nService already at {count} replica(s)")
 
     def _scale_on_server(self, service: str, old_count: int, new_count: int):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             app_name = self.config.app_name
 
             if new_count > old_count:

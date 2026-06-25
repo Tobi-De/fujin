@@ -10,6 +10,7 @@ from rich.prompt import Confirm, IntPrompt
 
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
+from fujin import connection
 
 
 @cappa.command(
@@ -35,7 +36,7 @@ class Rollback(BaseCommand):
     ] = False
 
     def __call__(self):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             shlex.quote(self.config.app_dir)
             fujin_dir = shlex.quote(self.config.install_dir)
             result, _ = conn.run(
