@@ -203,15 +203,15 @@ export -f {config.app_name}
             logger.debug("Virtual environment already exists")
 
         logger.debug("Installing package: %s", config.distfile_name)
-        dist_install = f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} {config.uv_path} pip install {distfile_path}"
+        # Combine distfile + requirements into a single uv invocation.
+        # --no-deps applies to the distfile; -r installs deps from requirements.
+        install_cmd = (
+            f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} "
+            f"{config.uv_path} pip install {distfile_path} --no-deps"
+        )
         if config.requirements:
-            requirements_path = bundle_dir / "requirements.txt"
-            logger.debug("Installing with requirements file")
-            run(
-                f"{dist_install} --no-deps && {config.uv_path} pip install -r {requirements_path} ",
-            )
-        else:
-            run(dist_install)
+            install_cmd += f" -r {bundle_dir / 'requirements.txt'}"
+        run(install_cmd)
 
     else:
         logger.debug("Installation mode: binary")
@@ -387,34 +387,28 @@ export -f {config.app_name}
         if unit["template_timer_name"]:
             active_units.append(unit["template_timer_name"])
 
-    # Validate all unit files before enabling/starting (catch errors early)
-    logger.info("Validating systemd unit files...")
-    validation_issues = 0
-    for unit in config.deployed_units:
-        unit_path = SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
-        if not unit_path.exists():
-            continue
+    # Validate all unit files before enabling/starting (catch errors early).
+    # systemd-analyze accepts multiple paths and reports which files have issues.
+    unit_paths = [
+        SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
+        for unit in config.deployed_units
+        if (SYSTEMD_SYSTEM_DIR / unit["template_service_name"]).exists()
+    ]
+    if unit_paths:
+        logger.info("Validating systemd unit files...")
+        paths_arg = " ".join(shlex.quote(str(p)) for p in unit_paths)
         result = subprocess.run(
-            f"systemd-analyze verify {shlex.quote(str(unit_path))}",
+            f"systemd-analyze verify {paths_arg}",
             shell=True,
             capture_output=True,
             text=True,
         )
         if result.returncode != 0 or result.stderr.strip():
-            validation_issues += 1
             logger.warning(
-                "Validation issues in %s (exit code %d):",
-                unit_path.name,
-                result.returncode,
+                "Validation issues detected (exit code %d):", result.returncode
             )
             for line in result.stderr.splitlines():
                 logger.warning("  %s", line)
-
-    if validation_issues:
-        logger.warning(
-            "%d unit(s) have validation warnings - review above before continuing",
-            validation_issues,
-        )
 
     if not active_units:
         run("systemctl daemon-reload")
