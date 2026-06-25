@@ -228,7 +228,8 @@ Hook commands support the same template variables as systemd unit files:
 - ``{app_dir}`` - Full path to application directory (``/opt/fujin/{app_name}``)
 - ``{app_user}`` - User running the app
 - ``{version}`` - Current version being deployed
-- ``{install_dir}`` - Path to ``.install`` directory
+- ``{shared_dir}`` - Persistent shared directory (``/opt/fujin/{app_name}/shared``)
+- ``{user}`` - The SSH deploy user
 
 Complete Example
 ~~~~~~~~~~~~~~~~

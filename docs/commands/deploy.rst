@@ -39,7 +39,7 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
    - Installer script (``_installer/__main__.py``)
    - Installation metadata (``config.json``)
 
-4. **Upload Bundle**: The zipapp is uploaded to a staging file (``.staging.pyz``) in ``{app_dir}/.install/.versions/``, then hardlinked to the versioned filename (``{app_name}-{version}.pyz``).
+4. **Upload Bundle**: The zipapp is uploaded to ``/tmp/fujin-{app_name}-{version}.pyz`` via SCP (with optional rsync for large bundles).
 
    - For bundles **≥1MB**: Fujin uses **rsync** if available on both local and remote machines. Rsync performs delta transfers, only uploading changed bytes—significantly faster for subsequent deployments where most content (dependencies) remains unchanged.
    - For bundles **<1MB** or when rsync is unavailable: Fujin uses **SCP** with SHA256 checksum verification.
@@ -49,17 +49,14 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
 5. **Execute Installer**: The remote Python interpreter runs the zipapp (``python3 installer.pyz install``), which:
 
    - Creates the app user if needed
-   - Sets up the ``.install/`` directory structure
-   - Installs the application (creates virtualenv for Python packages, copies binary for binary mode)
-   - Creates ``.appenv`` shell environment setup
-   - Installs systemd units and dropin configurations
-   - Cleans up stale units and dropins
-   - Enables and restarts services
+   - Extracts the bundle into ``releases/{version}/``
+   - Creates a virtual environment and installs dependencies
+   - Runs ``post_install`` hooks (migrations, collectstatic, etc.)
+   - Atomically swaps the ``current`` symlink to activate the new release
+   - Prunes old releases (keeps ``versions_to_keep`` most recent)
    - Configures and reloads Caddy (when enabled)
 
-6. **Auto-Rollback on Failure**: If services fail to start after installation, Fujin automatically offers to roll back to the previous version. If you confirm (or use ``--no-input``), the previous bundle is re-executed and the failed bundle is removed.
-
-7. **Prune Old Bundles**: Old zipapp bundles are removed from ``.install/.versions/`` according to ``versions_to_keep`` configuration.
+6. **Cleanup**: The temporary bundle file is removed from ``/tmp/``.
 
 8. **Record Deployment**: Deployment metadata (version, timestamp, git commit) is appended to the audit log.
 
@@ -80,32 +77,40 @@ Directory Structure
         .. code-block:: shell
 
             /opt/fujin/{app_name}/
-            ├── .install/                         # Deployment infrastructure
-            │   ├── .env                          # Environment variables file (640)
-            │   ├── .appenv                       # Application-specific environment setup
-            │   ├── .version                      # Current deployed version
-            │   ├── .venv/                        # Virtual environment (Python from shared dir)
-            │   └── .versions/                    # Stored deployment bundles
-            │       ├── app-1.2.3.pyz
-            │       └── app-1.2.2.pyz
-            ├── db.sqlite3                        # App runtime data (owned by app user)
-            └── uploads/                          # App runtime data (owned by app user)
+            ├── current -> releases/1.2.3/        # Symlink to active release
+            ├── releases/
+            │   ├── 1.2.2/                        # Previous release (kept for rollback)
+            │   │   ├── .venv/
+            │   │   ├── .appenv
+            │   │   └── .version
+            │   └── 1.2.3/                        # Current release
+            │       ├── .venv/
+            │       ├── .appenv
+            │       └── .version
+            ├── shared/                           # Persistent data
+            │   └── .env                          # Environment variables (640)
+            ├── db.sqlite3                        # App runtime data
+            └── uploads/                          # App runtime data
 
     .. tab-item:: binary
 
         .. code-block:: shell
 
             /opt/fujin/{app_name}/
-            ├── .install/                         # Deployment infrastructure
-            │   ├── .env                          # Environment variables file (640)
-            │   ├── .appenv                       # Application-specific environment setup
-            │   ├── .version                      # Current deployed version
-            │   ├── app_binary                    # Installed binary (755)
-            │   └── .versions/                    # Stored deployment bundles
-            │       ├── app-1.2.3.pyz
-            │       └── app-1.2.2.pyz
-            ├── data/                             # App runtime data (owned by app user)
-            └── cache/                            # App runtime data (owned by app user)
+            ├── current -> releases/1.2.3/        # Symlink to active release
+            ├── releases/
+            │   ├── 1.2.2/
+            │   │   ├── app_binary
+            │   │   ├── .appenv
+            │   │   └── .version
+            │   └── 1.2.3/
+            │       ├── app_binary
+            │       ├── .appenv
+            │       └── .version
+            ├── shared/                           # Persistent data
+            │   └── .env                          # Environment variables (640)
+            ├── data/
+            └── cache/
 
 Shared Python Directory
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -139,7 +144,7 @@ Fujin uses a multi-user security model with three components:
 
    - Member of ``fujin`` group
    - Can deploy and manage applications
-   - Owns ``.install/`` directory (deployment infrastructure)
+   - Owns app directory and release files
 
 3. **App user** (e.g., ``bookstore``): Runs services
 
@@ -148,10 +153,10 @@ Fujin uses a multi-user security model with three components:
    - Can write to database files and logs within app directory
    - Used automatically for ``fujin server exec --appenv`` and ``fujin app`` commands
 
-The ``.install/`` subdirectory isolates deployment infrastructure from application runtime data. This means:
+The ``releases/`` directory stores self-contained versioned releases, while ``shared/`` holds persistent data (``.env``, databases, uploads). This means:
 
-- Deployment operations (like ``chown``) only affect ``.install/``, not app data
-- App runtime files (databases, caches, uploads) remain owned by the app user
+- Deployment operations (like ``chown``) only affect the release being installed, not runtime data
+- App runtime files remain owned by the app user across deploys
 - No risk of permission conflicts between deployment and runtime operations
 
 .. note::
@@ -181,10 +186,14 @@ Example permissions:
     /opt/fujin/                      root:fujin       drwxrwxr-x (775)
       ├── .python/                   root:fujin       drwxrwxr-x (775)
       └── bookstore/                 tobi:bookstore   drwxrwxr-x (775)
-          ├── .install/              tobi:bookstore   drwxrwx--- (770)
-          │   ├── .env               tobi:bookstore   -rw-r----- (640)
-          │   └── .venv/             tobi:bookstore   drwxr-xr-x (755)
-          └── db.sqlite3             bookstore:...    -rw-r--r-- (664)
+          ├── current -> releases/1.2.3/
+          ├── releases/
+          │   └── 1.2.3/
+          │       ├── .env            tobi:bookstore   -rw-r----- (640) (via shared/)
+          │       └── .venv/          tobi:bookstore   drwxr-xr-x (755)
+          ├── shared/
+          │   └── .env                tobi:bookstore   -rw-r----- (640)
+          └── db.sqlite3              bookstore:...    -rw-r--r-- (664)
 
 Security Benefits
 ~~~~~~~~~~~~~~~~~

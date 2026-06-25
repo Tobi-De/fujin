@@ -170,7 +170,7 @@ class Deploy(BaseCommand):
                 "app_user": self.config.app_user,
                 "version": version,
                 "app_dir": self.config.app_dir,
-                "install_dir": self.config.install_dir,
+                "shared_dir": self.config.shared_dir,
                 "user": self.selected_host.user,
             }
 
@@ -323,6 +323,7 @@ class Deploy(BaseCommand):
                 "app_user": self.config.app_user,
                 "deploy_user": self.selected_host.user,
                 "app_dir": self.config.app_dir,
+                "shared_dir": self.config.shared_dir,
                 "version": bundle_version,
                 "installation_mode": self.config.installation_mode.value,
                 "python_version": self.config.python_version,
@@ -330,9 +331,10 @@ class Deploy(BaseCommand):
                 "distfile_name": distfile_path.name,
                 "webserver_enabled": self.config.caddyfile_exists,
                 "caddy_config_path": self.config.caddy_config_path,
-                "app_bin": self.config.app_name,  # Just the binary name, not full path
+                "app_bin": self.config.app_name,
                 "deployed_units": deployed_units_data,
                 "hooks": resolved_hooks,
+                "versions_to_keep": self.config.versions_to_keep or 3,
             }
 
             # Write config without indent for smaller size
@@ -350,53 +352,35 @@ class Deploy(BaseCommand):
             bundle_size = zipapp_path.stat().st_size
             self._show_deployment_summary(bundle_size, bundle_version)
 
-            remote_bundle_dir = Path(self.config.install_dir) / ".versions"
             remote_bundle_path = (
-                f"{remote_bundle_dir}/{self.config.app_name}-{bundle_version}.pyz"
+                f"/tmp/fujin-{self.config.app_name}-{bundle_version}.pyz"
             )
+            remote_bundle_path_q = shlex.quote(remote_bundle_path)
 
-            # Quote remote paths for shell usage (safe insertion into remote commands)
-            remote_bundle_dir_q = shlex.quote(str(remote_bundle_dir))
-            remote_bundle_path_q = shlex.quote(str(remote_bundle_path))
-
-            # Minimum size threshold for rsync (30MB) - below this, overhead isn't worth it
+            # Minimum size threshold for rsync (30MB) — below this, overhead isn't worth it
             min_rsync_size = 30 * 1024 * 1024
 
             # Upload and Execute
             with self._deploy_session() as conn:
-                # Check rsync availability while creating the directory (single round trip)
-                # Only check if bundle is large enough to benefit from rsync
+                # Check rsync availability (single round trip)
+                use_rsync = False
                 if bundle_size >= min_rsync_size:
-                    output, _ = conn.run(
-                        f"mkdir -p {remote_bundle_dir_q} > /dev/null && command -v rsync",
-                        warn=True,
-                        hide=True,
-                    )
+                    output, _ = conn.run("command -v rsync", warn=True, hide=True)
                     use_rsync = bool(output.strip())
-                else:
-                    conn.run(f"mkdir -p {remote_bundle_dir_q}", hide=True)
-                    use_rsync = False
 
                 self.output.info("Uploading deployment bundle...")
-                # rsync uses staging file for delta transfer benefits from prior deploys
                 if use_rsync:
-                    staging_path = f"{remote_bundle_dir}/.staging.pyz"
+                    staging_path = "/tmp/.fujin-staging.pyz"
                     staging_path_q = shlex.quote(staging_path)
-                    logger.debug("Using rsync for upload")
+                    logger.debug("Using rsync for delta upload")
                     try:
                         conn.rsync_upload(str(zipapp_path), staging_path_q)
-                        # Copy staging to final path (preserves staging for next deploy's delta)
                         conn.run(
                             f"cp -f {staging_path_q} {remote_bundle_path_q}",
                             hide=True,
                         )
-                    except FileNotFoundError:
-                        self.output.warning(
-                            "rsync not found locally, falling back to SCP"
-                        )
-                        use_rsync = False
-                    except UploadError as e:
-                        self.output.warning(f"rsync failed: {e}, falling back to SCP")
+                    except (FileNotFoundError, UploadError) as e:
+                        self.output.warning(f"rsync failed ({e}), falling back to SCP")
                         use_rsync = False
 
                 if not use_rsync:
@@ -407,16 +391,16 @@ class Deploy(BaseCommand):
 
                 self.output.info("Executing remote installation...")
 
-                # Write .env file directly (not bundled for security)
-                remote_env_path = f"{self.config.install_dir}/.env"
+                # Write .env file to shared/ (persistent across releases)
+                remote_env_path = f"{self.config.shared_dir}/.env"
                 remote_env_path_q = shlex.quote(remote_env_path)
-                install_dir_q = shlex.quote(self.config.install_dir)
+                shared_dir_q = shlex.quote(self.config.shared_dir)
                 remote_env_backup_q = shlex.quote(f"{remote_env_path}.bak")
                 logger.debug("Writing .env to %s", remote_env_path)
 
-                # Backup existing .env (ensure install dir exists first)
+                # Backup existing .env (ensure shared dir exists first)
                 conn.run(
-                    f"mkdir -p {install_dir_q} && "
+                    f"mkdir -p {shared_dir_q} && "
                     f"cp {remote_env_path_q} {remote_env_backup_q} 2>/dev/null || true",
                     hide=True,
                 )
@@ -456,7 +440,7 @@ class Deploy(BaseCommand):
                         for cmd in pre_install_commands:
                             self.output.info(f"  [pre-install] {cmd}")
                             full_cmd = (
-                                f"set -a; source {install_dir_q}/.env 2>/dev/null; set +a; "
+                                f"set -a; source {shared_dir_q}/.env 2>/dev/null; set +a; "
                                 f"{cmd}"
                             )
                             conn.run(full_cmd, pty=True)
@@ -520,16 +504,8 @@ class Deploy(BaseCommand):
                         self.output.info("Removing failed deployment bundle...")
                         conn.run(f"rm -f {remote_bundle_path_q}", warn=True)
 
-                if self.config.versions_to_keep and not rollback_ran:
-                    self.output.info("Pruning old versions...")
-                    logger.debug("Keeping %d versions", self.config.versions_to_keep)
-                    conn.run(
-                        f"cd {remote_bundle_dir_q} && "
-                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
-                        warn=True,
-                    )
-
                 if not rollback_ran:
+                    conn.run(f"rm -f {remote_bundle_path_q}", warn=True, hide=True)
                     conn.run(f"rm -f {remote_env_backup_q}", warn=True, hide=True)
 
                 # Get git commit hash if available
@@ -579,10 +555,10 @@ class Deploy(BaseCommand):
         connection, and releases it on exit (even on error).
         """
         with connection.connection(host=self.selected_host, compress=False) as conn:
-            install_dir_q = shlex.quote(self.config.install_dir)
-            lock_file_q = shlex.quote(f"{self.config.install_dir}/.deploy_lock")
+            app_dir_q = shlex.quote(self.config.app_dir)
+            lock_file_q = shlex.quote(f"{self.config.app_dir}/.deploy_lock")
             _, acquired = conn.run(
-                f"mkdir -p {install_dir_q} && (set -C; echo $$ > {lock_file_q}) 2>/dev/null",
+                f"mkdir -p {app_dir_q} && (set -C; echo $$ > {lock_file_q}) 2>/dev/null",
                 warn=True,
                 hide=True,
             )

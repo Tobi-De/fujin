@@ -37,27 +37,23 @@ class Rollback(BaseCommand):
 
     def __call__(self):
         with connection.connection(host=self.selected_host) as conn:
-            shlex.quote(self.config.app_dir)
-            fujin_dir = shlex.quote(self.config.install_dir)
+            app_dir_q = shlex.quote(self.config.app_dir)
+            releases_dir_q = shlex.quote(f"{self.config.app_dir}/releases")
+
+            # Read current version from symlink target
             result, _ = conn.run(
-                f"cat {fujin_dir}/.version 2>/dev/null; echo '---'; ls -1t {fujin_dir}/.versions",
+                f"readlink {app_dir_q}/current 2>/dev/null | xargs basename || echo ''; "
+                f"echo '---'; ls -1t {releases_dir_q} 2>/dev/null || true",
                 warn=True,
                 hide=True,
             )
 
             parts = result.split("---\n", 1)
             current_version = parts[0].strip()
-            filenames = parts[1].strip().splitlines() if len(parts) > 1 else []
+            dirnames = parts[1].strip().splitlines() if len(parts) > 1 else []
 
-            versions = []
-            prefix = f"{self.config.app_name}-"
-            for fname in filenames:
-                if fname.startswith(prefix) and fname.endswith(".pyz"):
-                    v = fname[len(prefix) : -4]
-                    versions.append(v)
-
-            # Filter out current version from choices
-            available_versions = [v for v in versions if v != current_version]
+            # All directory names in releases/ are version identifiers
+            available_versions = [d for d in dirnames if d and d != current_version]
 
             if not available_versions:
                 msg = "No previous versions available for rollback"
@@ -96,47 +92,37 @@ class Rollback(BaseCommand):
                 if not confirm:
                     return
 
-            # Uninstall current
-            if current_version:
-                self.output.info(f"Uninstalling current version {current_version}...")
-                current_bundle = f"{fujin_dir}/.versions/{self.config.app_name}-{current_version}.pyz"
-                _, exists = conn.run(f"test -f {current_bundle}", warn=True, hide=True)
-
-                if exists:
-                    verbose_flag = (
-                        f" --verbose {self.verbose}" if self.verbose > 0 else ""
-                    )
-                    uninstall_cmd = (
-                        f"sudo python3 {current_bundle} uninstall{verbose_flag}"
-                    )
-                    _, ok = conn.run(uninstall_cmd, warn=True)
-                    if not ok:
-                        self.output.warning(
-                            f"Warning: uninstall failed for version {current_version}."
-                        )
-                else:
-                    self.output.warning(
-                        f"Bundle for current version {current_version} not found. Skipping uninstall."
-                    )
-
-            # Install target
-            self.output.info(f"Installing version {version}...")
-            target_bundle = (
-                f"{fujin_dir}/.versions/{self.config.app_name}-{version}.pyz"
+            # Swap symlink to the selected release
+            release_dir_q = shlex.quote(f"{self.config.app_dir}/releases/{version}")
+            _, release_exists = conn.run(
+                f"test -d {release_dir_q}", warn=True, hide=True
             )
-            verbose_flag = f" --verbose {self.verbose}" if self.verbose > 0 else ""
-            install_cmd = f"sudo python3 {target_bundle} install{verbose_flag} || (echo 'install failed' >&2; exit 1)"
 
-            # delete all versions after new target
-            cleanup_cmd = (
-                f"cd {fujin_dir}/.versions && ls -1t | "
-                f"awk '/{self.config.app_name}-{version}\\.pyz/{{exit}} {{print}}' | "
-                "xargs -r rm"
+            if not release_exists:
+                self.output.error(
+                    f"Release directory for version {version} not found. "
+                    "It may have been pruned. Re-deploy the desired version instead."
+                )
+                return
+
+            self.output.info(f"Switching to release {version}...")
+            conn.run(
+                f"ln -sfn {release_dir_q} {app_dir_q}/.current.tmp && "
+                f"mv {app_dir_q}/.current.tmp {app_dir_q}/current",
             )
-            full_cmd = install_cmd + (
-                f" && echo '==> Cleaning up newer versions...' && {cleanup_cmd}"
+            conn.run(
+                f"systemctl daemon-reload && "
+                f"systemctl restart {self.config.app_name}-*.service",
+                pty=True,
             )
-            conn.run(full_cmd, pty=True)
+
+            # Remove releases newer than the target (they were deployed after it)
+            conn.run(
+                f"cd {releases_dir_q} && ls -1t | "
+                f"awk '/{version}/{{exit}} {{print}}' | "
+                "xargs -r rm -rf",
+                warn=True,
+            )
 
             log_operation(
                 connection=conn,

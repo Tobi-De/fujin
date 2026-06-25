@@ -15,14 +15,14 @@ After=network.target
 Type=simple
 User={{app_user}}
 WorkingDirectory={{app_dir}}
-EnvironmentFile={{install_dir}}/.env
+EnvironmentFile={{app_dir}}/shared/.env
 RuntimeDirectory={{app_name}}
 RuntimeDirectoryMode=0755
 # Create files as group-writable
 UMask=0002
 
 # Main command - adjust to match your application
-ExecStart={{install_dir}}/.venv/bin/python -m myapp.{name}
+ExecStart={{app_dir}}/current/.venv/bin/python -m myapp.{name}
 
 # Restart policy
 Restart=on-failure
@@ -57,12 +57,12 @@ Description={{app_name}} {name} task
 Type=oneshot
 User={{app_user}}
 WorkingDirectory={{app_dir}}
-EnvironmentFile={{install_dir}}/.env
+EnvironmentFile={{app_dir}}/shared/.env
 # Create files as group-writable
 UMask=0002
 
 # Main command - this runs when triggered by the timer
-ExecStart={{install_dir}}/.venv/bin/python -m myapp.{name}
+ExecStart={{app_dir}}/current/.venv/bin/python -m myapp.{name}
 
 # Resource limits (uncomment to enable)
 # MemoryMax=512M

@@ -130,9 +130,8 @@ class Config(msgspec.Struct, kw_only=True, dict=True):
 
     @property
     def app_bin(self) -> str:
-        if self.installation_mode == InstallationMode.PY_PACKAGE:
-            return f".install/.venv/bin/{self.app_name}"
-        return f".install/{self.app_name}"
+        """Application binary name (bare name, PATH set by .appenv)."""
+        return self.app_name
 
     @property
     def local_version(self) -> str:
@@ -144,9 +143,18 @@ class Config(msgspec.Struct, kw_only=True, dict=True):
         return f"{self.apps_dir}/{self.app_name}"
 
     @property
-    def install_dir(self) -> str:
-        """Get .install subdirectory path (deployment infrastructure)."""
-        return f"{self.app_dir}/.install"
+    def shared_dir(self) -> str:
+        """Shared directory for persistent data (.env, media, databases)."""
+        return f"{self.app_dir}/shared"
+
+    @property
+    def releases_dir(self) -> str:
+        """Directory containing versioned release directories."""
+        return f"{self.app_dir}/releases"
+
+    def release_dir(self, version: str) -> str:
+        """Path to a specific release directory."""
+        return f"{self.releases_dir}/{version}"
 
     def get_distfile_path(self, version: str | None = None) -> Path:
         version = version or self.version

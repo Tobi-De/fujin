@@ -10,38 +10,38 @@ The ``fujin rollback`` command rolls back your application to a previous version
 Overview
 --------
 
-When a deployment goes wrong, ``fujin rollback`` quickly reverts to a previous version. The command is fully interactive - it lists all available versions from the ``.versions/`` directory, prompts you to select which version to roll back to, and handles the complete rollback process.
+When a deployment goes wrong, ``fujin rollback`` quickly reverts to a previous version. The command is fully interactive - it lists all available versions from the ``releases/`` directory, prompts you to select which version to roll back to, and handles the complete rollback process.
 
-Fujin keeps deployment bundles in ``~/.fujin/{app_name}/.versions/`` as Python zipapps (``.pyz`` files). Each bundle is a self-contained executable containing everything needed to run that version: the application code, dependencies, environment variables, systemd units, and install/uninstall scripts.
+Fujin stores each deployed version as a self-contained directory in ``/opt/fujin/{app_name}/releases/``. Each release contains the full virtual environment, application code, and configuration. A ``current`` symlink points to the active release — rolling back simply swaps this symlink and restarts services.
 
 How it works
 ------------
 
 Here's what happens when you run ``fujin rollback``:
 
-1. **List available versions**: Scans the ``.versions/`` directory and lists available versions in reverse chronological order (most recent first).
+1. **List available versions**: Scans the ``releases/`` directory and lists available versions in reverse chronological order (most recent first).
 
 2. **Prompt for selection**: Asks you to select which version to roll back to, with the most recent version as the default.
 
 3. **Confirm rollback**: Shows the current version and target version, and asks for confirmation before proceeding.
 
-4. **Uninstall current version**: If a bundle exists for the current version, runs its uninstall script to cleanly remove the current deployment.
+4. **Swap symlink**: Atomically updates the ``current`` symlink to point to the selected release directory.
 
-5. **Install target version**: Extracts and runs the install script from the selected version's bundle.
+5. **Restart services**: Reloads systemd and restarts all application services, which now pick up the new symlink target.
 
-6. **Clean up newer versions**: Automatically deletes all versions newer than the selected target version to prevent accidentally re-deploying a broken version.
+6. **Clean up newer releases**: Automatically deletes all releases newer than the selected target version to prevent accidentally re-deploying a broken version.
 
 7. **Log operation**: Records the rollback operation to the audit log with from/to version information.
 
-Below is an example of the versions directory structure:
+Below is an example of the releases directory structure:
 
 .. code-block:: text
 
-   ~/.fujin/{app_name}/.versions/
-   ├── app-1.2.3.pyz
-   ├── app-1.2.2.pyz
-   ├── app-1.2.1.pyz
-   └── app-1.2.0.pyz
+   /opt/fujin/{app_name}/releases/
+   ├── 1.2.3/
+   ├── 1.2.2/
+   ├── 1.2.1/
+   └── 1.2.0/
 
 .. warning::
 

@@ -340,7 +340,7 @@ class Server(BaseCommand):
         with connection.connection(host=self.selected_host) as conn:
             if not appenv:
                 return conn.run(command, pty=True)
-            cmd = f"cd {self.config.app_dir} && source .install/.appenv && {command}"
+            cmd = f"cd {self.config.app_dir} && source current/.appenv && {command}"
             conn.run(
                 f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
                 pty=True,

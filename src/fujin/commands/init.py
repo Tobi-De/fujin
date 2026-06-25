@@ -143,8 +143,8 @@ class Init(BaseCommand):
         service_content = NEW_SERVICE_TEMPLATE.format(name="web")
         # Customize ExecStart for gunicorn
         service_content = service_content.replace(
-            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{install_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
+            "ExecStart={app_dir}/current/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/current/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
         )
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
@@ -163,8 +163,8 @@ class Init(BaseCommand):
         # Add ExecStartPre for migrations and collectstatic
         exec_start_pre_lines = (
             f"# Run migrations and collect static files before starting\n"
-            f"ExecStartPre={{install_dir}}/.venv/bin/{app_name} migrate\n"
-            f"ExecStartPre={{install_dir}}/.venv/bin/{app_name} collectstatic --no-input\n"
+            f"ExecStartPre={{app_dir}}/current/.venv/bin/{app_name} migrate\n"
+            f"ExecStartPre={{app_dir}}/current/.venv/bin/{app_name} collectstatic --no-input\n"
             f"ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/ {{app_dir}}/staticfiles/'\n"
         )
         service_content = service_content.replace(
@@ -173,12 +173,12 @@ class Init(BaseCommand):
 
         # Customize ExecStart for gunicorn and add reload with migrations
         service_content = service_content.replace(
-            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{install_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
+            "ExecStart={app_dir}/current/.venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/current/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
         )
         exec_reload_lines = (
-            f"ExecReload={{install_dir}}/.venv/bin/{app_name} migrate\n"
-            f"ExecReload={{install_dir}}/.venv/bin/{app_name} collectstatic --no-input\n"
+            f"ExecReload={{app_dir}}/current/.venv/bin/{app_name} migrate\n"
+            f"ExecReload={{app_dir}}/current/.venv/bin/{app_name} collectstatic --no-input\n"
             f"ExecReload=/bin/kill -s HUP $MAINPID\n"
         )
         service_content = service_content.replace(
@@ -209,7 +209,7 @@ class Init(BaseCommand):
 
         # Customize ExecStart for binary (no .venv)
         service_content = service_content.replace(
-            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
+            "ExecStart={app_dir}/current/.venv/bin/python -m myapp.web",
             f"ExecStart={{app_dir}}/{app_name} prodserver",
         )
         web_service.write_text(service_content)
