@@ -10,6 +10,7 @@ from rich.prompt import Confirm
 from fujin import caddy
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
+from fujin import connection
 
 
 @cappa.command(
@@ -48,7 +49,7 @@ class Down(BaseCommand):
         if not confirm:
             return
 
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             self.output.info("Tearing down project...")
 
             app_dir = shlex.quote(self.config.app_dir)

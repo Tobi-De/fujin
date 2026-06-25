@@ -11,6 +11,7 @@ from rich.markup import escape
 
 from fujin.audit import read_logs
 from fujin.commands import BaseCommand
+from fujin import connection
 
 
 @cappa.command(
@@ -28,7 +29,7 @@ class Audit(BaseCommand):
     ] = 20
 
     def __call__(self):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             records = read_logs(
                 connection=conn,
                 app_name=self.config.app_name,

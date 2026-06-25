@@ -20,6 +20,7 @@ from typing import Generator
 from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
 from ssh2.exceptions import SCPProtocolError
 from ssh2.session import (
+    LIBSSH2_FLAG_COMPRESS,
     LIBSSH2_SESSION_BLOCK_INBOUND,
     LIBSSH2_SESSION_BLOCK_OUTBOUND,
     Session,
@@ -188,18 +189,17 @@ class SSH2Connection:
                     sock_events |= select.POLLOUT
                 poller.modify(sock_fd, sock_events)
 
-                ready = poller.poll(1000)
+                ready = poller.poll(250)
 
                 for fd, event in ready:
                     if fd == stdin_fd and event & select.POLLIN:
                         try:
-                            data = os.read(stdin_fd, 1024)
+                            data = os.read(stdin_fd, 8192)
                             if data:
                                 rc, _ = channel.write(data)
                                 while rc == LIBSSH2_ERROR_EAGAIN:
-                                    p = select.poll()
-                                    p.register(sock_fd, select.POLLOUT)
-                                    p.poll(1000)
+                                    poller.modify(sock_fd, select.POLLOUT)
+                                    poller.poll(100)
                                     rc, _ = channel.write(data)
                         except BlockingIOError:
                             pass
@@ -283,9 +283,9 @@ class SSH2Connection:
 
         try:
             with open(local, "rb") as local_fh:
-                # Read in 128KB chunks
+                # Read in 512KB chunks for better throughput
                 while True:
-                    data = local_fh.read(131072)
+                    data = local_fh.read(524288)
                     if not data:
                         break
                     channel.write(data)
@@ -333,7 +333,9 @@ class SSH2Connection:
 
 
 @contextmanager
-def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
+def connection(
+    host: HostConfig, *, compress: bool = True
+) -> Generator[SSH2Connection, None, None]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         logger.info(f"Connecting to {host.address}:{host.port}...")
@@ -342,10 +344,17 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
         sock.settimeout(None)
         # disable Nagle's algorithm for lower latency
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # keepalive to prevent NAT/firewall from dropping long-running connections
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
     except socket.error as e:
         raise ConnectionError(f"Failed to connect to {host.address}:{host.port}") from e
 
     session = Session()
+    if compress:
+        session.flag(LIBSSH2_FLAG_COMPRESS, True)
     try:
         logger.info("Starting SSH session...")
         session.handshake(sock)
@@ -378,7 +387,13 @@ def connection(host: HostConfig) -> Generator[SSH2Connection, None, None]:
             sock.connect((host.address, host.port))
             sock.settimeout(None)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
             session = Session()
+            if compress:
+                session.flag(LIBSSH2_FLAG_COMPRESS, True)
             session.handshake(sock)
             auth_methods_tried.append("native ssh")
             # Continue to normal auth methods below (they should work now)

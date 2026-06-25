@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Annotated, Generator
+from typing import Annotated
 
 import cappa
 
 from fujin.config import Config, HostConfig
-from fujin.connection import SSH2Connection
-from fujin.connection import connection as host_connection
 
 _logging_configured = False
 
@@ -73,11 +70,6 @@ class BaseCommand:
     @cached_property
     def output(self) -> MessageFormatter:
         return MessageFormatter(cappa.Output())
-
-    @contextmanager
-    def connection(self) -> Generator[SSH2Connection, None, None]:
-        with host_connection(host=self.selected_host) as conn:
-            yield conn
 
 
 class MessageFormatter:

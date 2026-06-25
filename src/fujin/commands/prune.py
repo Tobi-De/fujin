@@ -5,6 +5,7 @@ import cappa
 from rich.prompt import Confirm
 
 from fujin.commands import BaseCommand
+from fujin import connection
 
 
 @cappa.command(
@@ -30,7 +31,7 @@ class Prune(BaseCommand):
             raise cappa.Exit("The minimum value for the --keep option is 1", code=1)
 
         versions_dir = f"{self.config.install_dir}/.versions"
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             _, success = conn.run(f"test -d {versions_dir}", warn=True, hide=True)
             if not success:
                 self.output.info("No versions directory found. Nothing to prune.")

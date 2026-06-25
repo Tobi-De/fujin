@@ -15,6 +15,7 @@ from rich.table import Table
 from fujin import caddy
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
+from fujin import connection
 from fujin.errors import SSHKeyError
 
 
@@ -32,7 +33,7 @@ class Server(BaseCommand):
 
     @cappa.command(help="Display information about the host system")
     def status(self):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             _, result_ok = conn.run("command -v fastfetch", warn=True, hide=True)
             if result_ok:
                 conn.run("fastfetch", pty=True)
@@ -41,7 +42,7 @@ class Server(BaseCommand):
 
     @cappa.command(help="Setup uv, web proxy, and install necessary dependencies")
     def bootstrap(self):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             self.output.info("Bootstrapping server...")
 
             self._upgrade_system(conn, packages="sqlite3 curl rsync")
@@ -91,7 +92,7 @@ class Server(BaseCommand):
         help="Upgrade server components (Caddy, uv, Python, system packages)"
     )
     def upgrade(self):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             self.output.info("Upgrading server components...")
             all_success = True
             self._upgrade_system(conn)
@@ -204,7 +205,7 @@ class Server(BaseCommand):
             bool, cappa.Arg(long="--with-password")
         ] = False,  # no short arg to force explicitness
     ):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             commands = [
                 f"sudo adduser --disabled-password --gecos '' {name}",
                 f"sudo mkdir -p /home/{name}/.ssh",
@@ -336,7 +337,7 @@ class Server(BaseCommand):
             ),
         ] = False,
     ):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             if not appenv:
                 return conn.run(command, pty=True)
             cmd = f"cd {self.config.app_dir} && source .install/.appenv && {command}"
@@ -353,7 +354,7 @@ class Server(BaseCommand):
             cappa.Arg(long="--user", help="List keys for a specific user"),
         ] = None,
     ):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             cat = "sudo cat" if user else "cat"
             path = (
                 f"/home/{user}/.ssh/authorized_keys"
@@ -401,7 +402,7 @@ class Server(BaseCommand):
             cappa.Arg(long="--user", help="Add key for a specific user"),
         ] = None,
     ):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             comment = f"{name} (fujin@{date.today().isoformat()})"
             temp_key = f"/tmp/fujin_key_{secrets.token_hex(8)}"
 
@@ -460,7 +461,7 @@ class Server(BaseCommand):
             cappa.Arg(long="--force", short="-f", help="Skip confirmation prompt"),
         ] = False,
     ):
-        with self.connection() as conn:
+        with connection.connection(host=self.selected_host) as conn:
             cat = "sudo cat" if user else "cat"
             path = (
                 f"/home/{user}/.ssh/authorized_keys"

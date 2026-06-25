@@ -72,7 +72,7 @@ def test_prune_no_versions_scenarios(
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Prune, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch.object(Prune, "output", MagicMock()) as mock_output,
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
@@ -108,7 +108,7 @@ def test_prune_deletes_old_versions_when_user_confirms(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Prune, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.prune.Confirm") as mock_confirm,
         patch.object(Prune, "output", MagicMock()) as mock_output,
     ):
@@ -149,7 +149,7 @@ def test_prune_aborts_when_user_declines(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Prune, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.prune.Confirm") as mock_confirm,
         patch.object(Prune, "output", MagicMock()) as mock_output,
     ):
@@ -187,7 +187,7 @@ def test_prune_with_keep_1_deletes_all_but_newest(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Prune, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.prune.Confirm") as mock_confirm,
         patch.object(Prune, "output", MagicMock()),
     ):
@@ -222,7 +222,7 @@ def test_prune_with_keep_5_keeps_all_if_only_3_versions(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Prune, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch.object(Prune, "output", MagicMock()) as mock_output,
     ):
         mock_connection.return_value.__enter__.return_value = mock_conn
@@ -265,7 +265,7 @@ def test_prune_ignores_non_bundle_files(minimal_config_dict):
 
     with (
         patch("fujin.config.Config.read", return_value=config),
-        patch.object(Prune, "connection") as mock_connection,
+        patch("fujin.connection.connection") as mock_connection,
         patch("fujin.commands.prune.Confirm") as mock_confirm,
         patch.object(Prune, "output", MagicMock()),
     ):
