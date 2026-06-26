@@ -53,6 +53,7 @@ class InstallConfig:
     app_user: str
     deploy_user: str
     app_dir: str
+    shared_dir: str
     version: str
     installation_mode: Literal["python-package", "binary"]
     python_version: str | None
@@ -63,6 +64,7 @@ class InstallConfig:
     app_bin: str
     deployed_units: list[DeployedUnit]
     hooks: dict[str, list[str]] = field(default_factory=dict)
+    versions_to_keep: int = 3
 
     @property
     def uv_path(self) -> str:
@@ -103,17 +105,18 @@ def _setup_logging(verbose: int) -> None:
     logger.setLevel(level)
 
 
-def _run_hooks(config: InstallConfig, phase: str, *, fatal: bool = True) -> None:
+def _run_hooks(
+    config: InstallConfig, phase: str, source_dir: str, *, fatal: bool = True
+) -> None:
     commands = config.hooks.get(phase, [])
     if not commands:
         return
 
     logger.info("Running %s hooks...", phase)
-    install_dir = f"{config.app_dir}/.install"
     for cmd in commands:
         logger.info("  [%s] %s", phase, cmd)
         full_cmd = f"sudo -u {shlex.quote(config.app_user)} bash -c " + shlex.quote(
-            f"source {install_dir}/.appenv 2>/dev/null ; {cmd}"
+            f"source {source_dir}/.appenv 2>/dev/null ; {cmd}"
         )
         try:
             run(full_cmd, check=True, timeout=300)
@@ -130,8 +133,12 @@ def _run_hooks(config: InstallConfig, phase: str, *, fatal: bool = True) -> None
 def install(
     config: InstallConfig, bundle_dir: Path, *, full_restart: bool = False
 ) -> None:
-    """Install the application.
-    Assumes it's running from a directory with extracted bundle files.
+    """Install the application using release-based atomic deployment.
+
+    The new version is built in a self-contained release directory.
+    On success, a 'current' symlink is atomically swapped to activate it.
+    On failure, the release directory is cleaned up and the old version
+    keeps running untouched.
     """
 
     # ==========================================================================
@@ -143,41 +150,42 @@ def install(
         logger.debug("User %s already exists", config.app_user)
     except KeyError:
         logger.debug("Creating system user: %s", config.app_user)
-        # Check if group already exists (e.g., from a previous partial install)
         try:
             grp.getgrnam(config.app_user)
-            # Group exists, use it instead of creating a new one
             useradd_cmd = f"useradd --system --no-create-home --shell /usr/sbin/nologin --no-user-group -g {config.app_user} {config.app_user}"
         except KeyError:
-            # No existing group, let useradd create one
             useradd_cmd = f"useradd --system --no-create-home --shell /usr/sbin/nologin {config.app_user}"
         run(useradd_cmd, check=True)
 
     app_dir = Path(config.app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
-    logger.debug("Created app directory: %s", app_dir)
+    shared_dir = Path(config.shared_dir)
+    shared_dir.mkdir(exist_ok=True)
 
-    install_dir = app_dir / ".install"
-    install_dir.mkdir(exist_ok=True)
+    release_dir = Path(config.app_dir) / "releases" / config.version
+    if release_dir.exists():
+        logger.info("Cleaning up previous partial release: %s", release_dir)
+        shutil.rmtree(release_dir)
+    release_dir.mkdir(parents=True)
 
     # ==========================================================================
     # PHASE 2: INSTALLATION
     # ==========================================================================
-    logger.info("Installing application...")
+    logger.info("Installing application into %s ...", release_dir)
+    install_dir = release_dir
     os.chdir(install_dir)
 
     # record app version
     (install_dir / ".version").write_text(config.version)
-    logger.debug("Recorded version: %s", config.version)
 
     service_helpers = _format_service_helpers(config)
+    uv_python_install_dir = "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python"
+
     if config.installation_mode == "python-package":
         logger.debug("Installation mode: python-package")
 
-        uv_python_install_dir = "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python"
-
         (install_dir / ".appenv").write_text(f"""set -a
-source {install_dir}/.env
+source {shared_dir}/.env
 set +a
 export {uv_python_install_dir}
 export PATH="{install_dir}/.venv/bin:$PATH"
@@ -203,8 +211,6 @@ export -f {config.app_name}
             logger.debug("Virtual environment already exists")
 
         logger.debug("Installing package: %s", config.distfile_name)
-        # Combine distfile + requirements into a single uv invocation.
-        # --no-deps applies to the distfile; -r installs deps from requirements.
         install_cmd = (
             f"UV_COMPILE_BYTECODE=1 {uv_python_install_dir} "
             f"{config.uv_path} pip install {distfile_path} --no-deps"
@@ -216,7 +222,7 @@ export -f {config.app_name}
     else:
         logger.debug("Installation mode: binary")
         (install_dir / ".appenv").write_text(f"""set -a
-source {install_dir}/.env
+source {shared_dir}/.env
 set +a
 export PATH="{install_dir}:$PATH"
 
@@ -235,26 +241,26 @@ export -f {config.app_name}
 
     logger.info("Setting file ownership and permissions...")
     logger.debug("Setting ownership to %s:%s", config.deploy_user, config.app_user)
-    # Only chown the .install directory - leave app runtime data untouched
     run(f"chown -R {config.deploy_user}:{config.app_user} {install_dir}")
-    # Make .install directory group-writable (deploy user can update, app user can read)
     install_dir.chmod(0o775)
 
-    # .venv permissions: readable/executable by group, writable by owner
-    # Use chmod -R with symbolic modes to traverse once instead of 3 find commands
     if (install_dir / ".venv").exists():
         logger.debug("Setting venv permissions")
         run(
             f"chmod -R u+rwX,go+rX {install_dir}/.venv && chmod -R u+x {install_dir}/.venv/bin"
         )
-    # Ensure app_dir itself is group-writable so app can create files
     run(f"chown {config.deploy_user}:{config.app_user} {app_dir}")
     app_dir.chmod(0o775)
 
     # ==========================================================================
     # PHASE 2.5: POST-INSTALL HOOKS
     # ==========================================================================
-    _run_hooks(config, "post_install", fatal=True)
+    try:
+        _run_hooks(config, "post_install", str(release_dir), fatal=True)
+    except Exception:
+        logger.error("Post-install hooks failed, cleaning up release...")
+        shutil.rmtree(release_dir)
+        raise
 
     # ==========================================================================
     # PHASE 3: CONFIGURING SYSTEMD SERVICES
@@ -276,18 +282,15 @@ export -f {config.app_name}
     ]
     logger.debug("Found %d existing unit files", len(installed_units))
 
-    # Clean up stale units - batch operations for efficiency
     stale_units = [u for u in installed_units if u not in valid_units]
     if stale_units:
         logger.debug("Removing %d stale units", len(stale_units))
-        # Separate template units (can't use --now) from regular units
         template_stale = [u for u in stale_units if u.endswith("@.service")]
         regular_stale = [u for u in stale_units if not u.endswith("@.service")]
         if regular_stale:
             run(f"systemctl disable --now --quiet {' '.join(regular_stale)}")
         if template_stale:
             run(f"systemctl disable --quiet {' '.join(template_stale)}")
-        # Reset failed state for all stale units at once
         run(f"systemctl reset-failed {' '.join(stale_units)}", capture_output=True)
 
     for search_dir in [SYSTEMD_SYSTEM_DIR, SYSTEMD_WANTS_DIR]:
@@ -325,7 +328,7 @@ export -f {config.app_name}
             timer_deployed_path.write_text(timer_content)
             logger.debug("Wrote %s", timer_deployed_path.name)
 
-    # Deploy common dropins (apply to all services)
+    # Deploy common dropins
     common_dir = systemd_dir / "common.d"
     if common_dir.exists():
         common_dropins = list(common_dir.glob("*.conf"))
@@ -339,21 +342,17 @@ export -f {config.app_name}
                 dropin_dest = dropin_dir / dropin_path.name
                 dropin_dest.write_text(dropin_content)
                 logger.debug(
-                    "Wrote common dropin %s to %s",
-                    dropin_path.name,
-                    dropin_dir.name,
+                    "Wrote common dropin %s to %s", dropin_path.name, dropin_dir.name
                 )
 
     # Deploy service-specific dropins
     for service_dropin_dir_path in systemd_dir.glob("*.service.d"):
         service_file_name = service_dropin_dir_path.name.removesuffix(".d")
-
         matching_unit = None
         for unit in config.deployed_units:
             if unit["service_file"] == service_file_name:
                 matching_unit = unit
                 break
-
         if matching_unit:
             deployed_dropin_dir = (
                 SYSTEMD_SYSTEM_DIR / f"{matching_unit['template_service_name']}.d"
@@ -371,24 +370,7 @@ export -f {config.app_name}
                 dropin_dest.write_text(dropin_content)
                 logger.debug("Wrote dropin %s", dropin_path.name)
 
-    logger.info("Restarting services...")
-    active_units = []
-    oneshot_units = _get_oneshot_units(config.deployed_units)
-    if oneshot_units:
-        logger.info(
-            "Skipping restart of Type=oneshot units: %s",
-            ", ".join(sorted(oneshot_units)),
-        )
-    for unit in config.deployed_units:
-        if unit["template_service_name"] not in oneshot_units:
-            active_units.extend(unit["service_instances"])
-        if unit["template_socket_name"]:
-            active_units.append(unit["template_socket_name"])
-        if unit["template_timer_name"]:
-            active_units.append(unit["template_timer_name"])
-
-    # Validate all unit files before enabling/starting (catch errors early).
-    # systemd-analyze accepts multiple paths and reports which files have issues.
+    # Validate all unit files before enabling/starting.
     unit_paths = [
         SYSTEMD_SYSTEM_DIR / unit["template_service_name"]
         for unit in config.deployed_units
@@ -410,6 +392,26 @@ export -f {config.app_name}
             for line in result.stderr.splitlines():
                 logger.warning("  %s", line)
 
+    # ==========================================================================
+    # PHASE 4: ATOMIC SWAP + RESTART
+    # ==========================================================================
+
+    logger.info("Activating new release...")
+    active_units = []
+    oneshot_units = _get_oneshot_units(config.deployed_units)
+    if oneshot_units:
+        logger.info(
+            "Skipping restart of Type=oneshot units: %s",
+            ", ".join(sorted(oneshot_units)),
+        )
+    for unit in config.deployed_units:
+        if unit["template_service_name"] not in oneshot_units:
+            active_units.extend(unit["service_instances"])
+        if unit["template_socket_name"]:
+            active_units.append(unit["template_socket_name"])
+        if unit["template_timer_name"]:
+            active_units.append(unit["template_timer_name"])
+
     if not active_units:
         run("systemctl daemon-reload")
         restart_result = run("true")
@@ -419,14 +421,19 @@ export -f {config.app_name}
             f"systemctl daemon-reload && systemctl enable {units_str}",
             check=True,
         )
+        # Atomic symlink swap: create temp symlink, then rename over current.
+        # os.rename() is atomic on the same filesystem.
+        current_link = app_dir / "current"
+        tmp_link = app_dir / ".current.tmp"
+        tmp_link.unlink(missing_ok=True)
+        tmp_link.symlink_to(release_dir)
+        tmp_link.rename(current_link)
+        logger.info("Switched current -> releases/%s", config.version)
 
         restart_cmd = "restart" if full_restart else "reload-or-restart"
-        restart_result = run(
-            f"systemctl {restart_cmd} {units_str}",
-        )
+        restart_result = run(f"systemctl {restart_cmd} {units_str}")
 
-    # Check if services are actually running (not just restart command succeeded)
-    # Only check services with no timer or socket - they should run immediately
+    # Health check for services that should be running immediately
     units_to_check = [
         unit["service_instances"]
         for unit in config.deployed_units
@@ -435,16 +442,11 @@ export -f {config.app_name}
     ]
     units_to_check = list(chain.from_iterable(units_to_check))
 
-    # Poll for service status with short intervals instead of fixed sleep
-    # Services that crash immediately may appear "active" briefly before systemd detects failure
-    # Use is-failed instead of is-active to correctly handle oneshot services,
-    # which transition to "inactive" after successful completion.
     failed_units = []
     if units_to_check:
         max_attempts = 10
         poll_interval = 0.3
         for attempt in range(max_attempts):
-            # Batch check all units at once - systemctl is-failed returns one status per line
             status_result = run(
                 f"systemctl is-failed {' '.join(units_to_check)}",
                 capture_output=True,
@@ -457,7 +459,6 @@ export -f {config.app_name}
             ]
             if not failed_units:
                 break
-            # If we still have failures, wait a bit and retry (services may be starting)
             if attempt < max_attempts - 1:
                 time.sleep(poll_interval)
 
@@ -468,81 +469,71 @@ export -f {config.app_name}
             print("=" * 60)
             logger.error("%s failed to start", unit)
             print("=" * 60)
-            # This checks for syntax errors or missing dependencies defined in the unit file
             unit_path = SYSTEMD_SYSTEM_DIR / unit
             if unit_path.exists():
                 logger.error("Checking systemd unit configuration...")
-                # Always show output for failed services - don't suppress
                 subprocess.run(
                     f"systemd-analyze verify {shlex.quote(str(unit_path))}",
                     shell=True,
                 )
             else:
                 logger.error("Unit file not found at %s", unit_path)
-
-            # Show last 30 lines of logs for this unit
             logger.error("Recent logs:")
-            subprocess.run(
-                f"journalctl -u {unit} -n 30 --no-pager",
-                shell=True,
-            )
+            subprocess.run(f"journalctl -u {unit} -n 30 --no-pager", shell=True)
         sys.exit(EXIT_SERVICE_START_FAILED)
 
     # ==========================================================================
-    # PHASE 3.5: POST-START HOOKS
+    # PHASE 5: POST-START HOOKS + CADDY
     # ==========================================================================
-    _run_hooks(config, "post_start", fatal=False)
+    _run_hooks(config, "post_start", str(app_dir / "current"), fatal=False)
 
-    # ==========================================================================
-    # PHASE 4: CADDY CONFIGURATION
-    # ==========================================================================
-    # Configure Caddy after services are running successfully
+    # Prune old releases (keep last N, ordered by modification time)
+    releases_dir_path = Path(config.app_dir) / "releases"
+    all_releases = sorted(
+        [d for d in releases_dir_path.iterdir() if d.is_dir()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if len(all_releases) > config.versions_to_keep:
+        for old_dir in all_releases[: -config.versions_to_keep]:
+            if old_dir.name != config.version:  # don't prune what we just installed
+                logger.info("Pruning old release: %s", old_dir.name)
+                shutil.rmtree(old_dir)
+
+    # Caddy configuration
     if config.webserver_enabled:
         caddyfile_path = bundle_dir / "Caddyfile"
         if caddyfile_path.exists():
             logger.info("Configuring Caddy...")
-
             caddy_config_path = Path(config.caddy_config_path)
-
-            # Backup existing config if it exists
             old_config_content = None
             if caddy_config_path.exists():
                 old_config_content = caddy_config_path.read_text()
-
-            # Copy new config
             shutil.copy2(caddyfile_path, caddy_config_path)
             uid = pwd.getpwnam("caddy").pw_uid
             gid = grp.getgrnam("caddy").gr_gid
             os.chown(caddy_config_path, uid, gid)
-
             logger.debug("Reloading Caddy")
             try:
                 reload_result = run(
-                    "systemctl reload caddy",
-                    timeout=20,
-                    capture_output=True,
+                    "systemctl reload caddy", timeout=20, capture_output=True
                 )
                 reload_failed = reload_result.returncode != 0
             except subprocess.TimeoutExpired:
                 reload_failed = True
                 logger.warning("Caddy reload timeout")
-
             if reload_failed:
                 logger.warning("Caddy reload failed")
-                # Always show Caddy logs on failure - don't suppress
                 logger.warning("Recent Caddy logs:")
                 subprocess.run(
-                    "journalctl -u caddy.service -n 15 --no-pager",
-                    shell=True,
+                    "journalctl -u caddy.service -n 15 --no-pager", shell=True
                 )
-
                 if old_config_content:
                     logger.warning("Restoring previous Caddy configuration")
                     caddy_config_path.write_text(old_config_content)
                 else:
                     logger.warning("Removing invalid Caddy configuration")
                     caddy_config_path.unlink(missing_ok=True)
-
                 logger.warning(
                     "App is running but Caddy configuration failed. "
                     "Fix your Caddyfile and redeploy."
@@ -596,6 +587,12 @@ def uninstall(config: InstallConfig, bundle_dir: Path) -> None:
         Path(config.caddy_config_path).unlink(missing_ok=True)
         logger.debug("Reloading Caddy")
         run("systemctl reload caddy")
+
+    # Remove app directory (releases, shared, current symlink)
+    app_dir = Path(config.app_dir)
+    logger.info("Removing app directory: %s", app_dir)
+    if app_dir.exists():
+        shutil.rmtree(app_dir)
 
     logger.info("Deleting app user...")
     try:
@@ -720,7 +717,7 @@ def main() -> None:
 def _format_service_helpers(config: InstallConfig) -> str:
     """Format service management helpers with config values."""
     valid_services = " ".join(u["name"] for u in config.deployed_units)
-    install_dir = f"{config.app_dir}/.install"
+    current_dir = f"{config.app_dir}/current"
 
     helpers = service_management_helpers.format(
         app_name=config.app_name,
@@ -729,7 +726,7 @@ def _format_service_helpers(config: InstallConfig) -> str:
     )
 
     if config.installation_mode == "python-package":
-        helpers += python_package_helpers.format(install_dir=install_dir)
+        helpers += python_package_helpers.format(current_dir=current_dir)
 
     return helpers
 
@@ -812,13 +809,13 @@ edit() {{
     echo "⚠️  Warning: Changes will be lost on next deploy" >&2
     local target="${{1:-}}"
     local site_packages
-    site_packages=$({install_dir}/.venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+    site_packages=$({current_dir}/.venv/bin/python -c "import site; print(site.getsitepackages()[0])")
 
     if [[ -z "$target" ]]; then
         ${{EDITOR:-${{VISUAL:-vi}}}} "$site_packages"
     else
         local pkg_path
-        pkg_path=$({install_dir}/.venv/bin/python -c "import $target, os; print(os.path.dirname($target.__file__))" 2>/dev/null)
+        pkg_path=$({current_dir}/.venv/bin/python -c "import $target, os; print(os.path.dirname($target.__file__))" 2>/dev/null)
         if [[ -n "$pkg_path" ]]; then
             ${{EDITOR:-${{VISUAL:-vi}}}} "$pkg_path"
         else

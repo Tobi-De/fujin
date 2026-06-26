@@ -26,13 +26,6 @@ class Down(BaseCommand):
             help="Stop and uninstall proxy as part of teardown",
         ),
     ] = False
-    force: Annotated[
-        bool,
-        cappa.Arg(
-            long="--force",
-            help="Continue teardown even if uninstall script fails",
-        ),
-    ] = False
 
     def __call__(self):
         msg = (
@@ -52,30 +45,28 @@ class Down(BaseCommand):
         with connection.connection(host=self.selected_host) as conn:
             self.output.info("Tearing down project...")
 
-            app_dir = shlex.quote(self.config.app_dir)
-            install_dir = shlex.quote(self.config.install_dir)
-            res, ok = conn.run(f"cat {install_dir}/.version", warn=True, hide=True)
+            app_dir_q = shlex.quote(self.config.app_dir)
+            current_dir = shlex.quote(f"{self.config.app_dir}/current")
+            res, ok = conn.run(f"cat {current_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
-            bundle_path = (
-                f"{install_dir}/.versions/{self.config.app_name}-{version}.pyz"
+
+            # Stop and remove systemd units, Caddy config, then remove app directory
+            conn.run(
+                f"systemctl stop {self.config.app_name}-*.service 2>/dev/null; "
+                f"systemctl disable {self.config.app_name}-* 2>/dev/null; "
+                f"rm -f /etc/systemd/system/{self.config.app_name}-*; "
+                f"systemctl daemon-reload; "
+                f"rm -f /etc/caddy/conf.d/{self.config.app_name}.caddy; "
+                f"systemctl reload caddy 2>/dev/null; "
+                f"rm -rf {app_dir_q}",
+                warn=True,
+                pty=True,
             )
 
-            _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
-
-            uninstall_ok = False
-            if bundle_exists:
-                verbose_flag = f" --verbose {self.verbose}" if self.verbose > 0 else ""
-                uninstall_cmd = f"sudo python3 {bundle_path} uninstall{verbose_flag} && sudo rm -rf {app_dir}"
-                _, uninstall_ok = conn.run(uninstall_cmd, warn=True, pty=True)
-
-            if not uninstall_ok:
-                if not self.force:
-                    raise cappa.Exit("Teardown failed", code=1)
-
-                self.output.warning(
-                    "Teardown encountered errors but continuing due to --force"
-                )
-                conn.run(f"sudo rm -rf {app_dir}", warn=True, pty=True)
+            # Remove app user
+            conn.run(
+                f"userdel -r {self.config.app_user} 2>/dev/null || true", warn=True
+            )
 
             if self.full:
                 conn.run(

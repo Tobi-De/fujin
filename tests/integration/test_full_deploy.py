@@ -78,9 +78,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/myapp
+ExecStart={app_dir}/current/myapp
 WorkingDirectory={app_dir}
-EnvironmentFile=-{install_dir}/.env
+EnvironmentFile=-{app_dir}/shared/.env
 Restart=always
 
 [Install]
@@ -177,9 +177,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/.venv/bin/python3 -m http.server 8000
+ExecStart={app_dir}/current/.venv/bin/python3 -m http.server 8000
 WorkingDirectory={app_dir}
-EnvironmentFile=-{install_dir}/.env
+EnvironmentFile=-{app_dir}/shared/.env
 Restart=always
 
 [Install]
@@ -192,9 +192,9 @@ Description=Worker
 
 [Service]
 Type=simple
-ExecStart={install_dir}/.venv/bin/python3 -c 'import time; print("worker running"); time.sleep(99999)'
+ExecStart={app_dir}/current/.venv/bin/python3 -c 'import time; print("worker running"); time.sleep(99999)'
 WorkingDirectory={app_dir}
-EnvironmentFile=-{install_dir}/.env
+EnvironmentFile=-{app_dir}/shared/.env
 Restart=always
 
 [Install]
@@ -235,7 +235,7 @@ WantedBy=multi-user.target
     # Verify .env was deployed
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/testapp/.install/.env",
+        "cat /opt/fujin/testapp/shared/.env",
     )
     assert success and "DEBUG=true" in stdout, f".env not deployed correctly: {stdout}"
 
@@ -262,9 +262,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/webapp
+ExecStart={app_dir}/current/webapp
 WorkingDirectory={app_dir}
-EnvironmentFile=-{install_dir}/.env
+EnvironmentFile=-{app_dir}/shared/.env
 Restart=always
 
 [Install]
@@ -344,9 +344,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/rollapp
+ExecStart={app_dir}/current/rollapp
 WorkingDirectory={app_dir}
-EnvironmentFile=-{install_dir}/.env
+EnvironmentFile=-{app_dir}/shared/.env
 Restart=always
 
 [Install]
@@ -390,7 +390,7 @@ WantedBy=multi-user.target
     # Verify v1.0.0 is running
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/rollapp/.install/.version",
+        "cat /opt/fujin/rollapp/current/.version",
     )
     assert success and stdout == "1.0.0", f"Expected version 1.0.0, got: '{stdout}'"
 
@@ -403,7 +403,7 @@ WantedBy=multi-user.target
     # Verify v2.0.0 is running
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/rollapp/.install/.version",
+        "cat /opt/fujin/rollapp/current/.version",
     )
     assert success and stdout == "2.0.0", f"Expected version 2.0.0, got: '{stdout}'"
 
@@ -420,7 +420,7 @@ WantedBy=multi-user.target
     # Verify v1.0.0 is running again
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/rollapp/.install/.version",
+        "cat /opt/fujin/rollapp/current/.version",
     )
     assert success and stdout == "1.0.0", (
         f"Expected version 1.0.0 after rollback, got: '{stdout}'"
@@ -462,9 +462,9 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/downapp
+ExecStart={app_dir}/current/downapp
 WorkingDirectory={app_dir}
-EnvironmentFile=-{install_dir}/.env
+EnvironmentFile=-{app_dir}/shared/.env
 Restart=always
 
 [Install]
@@ -553,9 +553,9 @@ Description=Secret app
 
 [Service]
 Type=simple
-ExecStart={install_dir}/secretapp
+ExecStart={app_dir}/current/secretapp
 WorkingDirectory={app_dir}
-EnvironmentFile={install_dir}/.env
+EnvironmentFile={app_dir}/shared/.env
 Restart=always
 
 [Install]
@@ -599,7 +599,7 @@ STATIC_VALUE=no-secret-here
 
     # Verify .env file was deployed with resolved secrets
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/secretapp/.install/.env"
+        vps_container["name"], "cat /opt/fujin/secretapp/shared/.env"
     )
     assert success, f"Could not read .env file: {stdout}"
 
@@ -634,7 +634,7 @@ Description=Sequential deploy test
 
 [Service]
 Type=simple
-ExecStart={install_dir}/seqapp
+ExecStart={app_dir}/current/seqapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -677,7 +677,7 @@ WantedBy=multi-user.target
 
     # Verify v1.0.0 is deployed
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/seqapp/.install/.version"
+        vps_container["name"], "cat /opt/fujin/seqapp/current/.version"
     )
     assert success and stdout.strip() == "1.0.0"
 
@@ -691,13 +691,13 @@ WantedBy=multi-user.target
 
     # Verify v1.1.0 is now deployed
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/seqapp/.install/.version"
+        vps_container["name"], "cat /opt/fujin/seqapp/current/.version"
     )
     assert success and stdout.strip() == "1.1.0"
 
     # Verify bundle history exists (both versions available)
     stdout, success = exec_in_container(
-        vps_container["name"], "ls /opt/fujin/seqapp/.install/.versions/"
+        vps_container["name"], "ls /opt/fujin/seqapp/current/.versions/"
     )
     assert success
     assert "seqapp-1.0.0.pyz" in stdout, f"v1.0.0 bundle should exist: {stdout}"
@@ -713,13 +713,13 @@ WantedBy=multi-user.target
 
     # Verify v1.2.0 is now deployed
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/seqapp/.install/.version"
+        vps_container["name"], "cat /opt/fujin/seqapp/current/.version"
     )
     assert success and stdout.strip() == "1.2.0"
 
     # All three versions should be available for rollback
     stdout, success = exec_in_container(
-        vps_container["name"], "ls /opt/fujin/seqapp/.install/.versions/"
+        vps_container["name"], "ls /opt/fujin/seqapp/current/.versions/"
     )
     assert success
     assert "seqapp-1.0.0.pyz" in stdout
@@ -746,7 +746,7 @@ Description=Data persistence test
 
 [Service]
 Type=simple
-ExecStart={install_dir}/dataapp
+ExecStart={app_dir}/current/dataapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -817,7 +817,7 @@ WantedBy=multi-user.target
 
     # Verify new version is deployed
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/dataapp/.install/.version"
+        vps_container["name"], "cat /opt/fujin/dataapp/current/.version"
     )
     assert success and stdout.strip() == "1.1.0"
 
@@ -868,7 +868,7 @@ Description=Fail app test
 
 [Service]
 Type=simple
-ExecStart={install_dir}/failapp
+ExecStart={app_dir}/current/failapp
 WorkingDirectory={app_dir}
 Restart=no
 
@@ -886,7 +886,7 @@ WantedBy=multi-user.target
     # Verify v1.0.0 is running
     wait_for_service(vps_container["name"], "failapp-web.service")
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/failapp/.install/.version"
+        vps_container["name"], "cat /opt/fujin/failapp/current/.version"
     )
     assert success and stdout == "1.0.0"
 
@@ -902,7 +902,7 @@ WantedBy=multi-user.target
     wait_for_service(vps_container["name"], "failapp-web.service")
 
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/failapp/.install/.version"
+        vps_container["name"], "cat /opt/fujin/failapp/current/.version"
     )
     assert success and stdout == "1.0.0", (
         f"Expected v1.0.0 after auto-rollback, got: {stdout}"
@@ -929,7 +929,7 @@ Description=Rollback test app
 
 [Service]
 Type=simple
-ExecStart={install_dir}/rollbackapp
+ExecStart={app_dir}/current/rollbackapp
 WorkingDirectory={app_dir}
 Restart=no
 
@@ -985,7 +985,7 @@ WantedBy=multi-user.target
 
     # Version should still show 2.0.0 (failed deploy, no rollback)
     stdout, success = exec_in_container(
-        vps_container["name"], "cat /opt/fujin/rollbackapp/.install/.version"
+        vps_container["name"], "cat /opt/fujin/rollbackapp/current/.version"
     )
     assert success and stdout == "2.0.0", (
         f"Expected v2.0.0 (no rollback), got: {stdout}"

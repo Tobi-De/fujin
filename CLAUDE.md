@@ -203,18 +203,20 @@ Templates use `{variable}` placeholders for Python string formatting and `{{vari
    - Copy Caddyfile if exists
    - Create `config.json` with deployment metadata
 4. **Create zipapp**: Bundle everything with `_installer/__main__.py` into `.pyz` file
-5. **Upload**: SCP zipapp to `/opt/fujin/{app_name}/.versions/{app_name}-{version}.pyz`
+5. **Upload**: SCP zipapp to `/tmp/fujin-{app_name}-{version}.pyz`
 6. **Verify**: SHA256 checksum verification
 7. **Execute**: Run `python3 installer.pyz install` on server
 8. **Prune**: Remove old versions (keeps `versions_to_keep` most recent)
 
 **Installer actions** (`_installer/__main__.py`):
 - Create app user if needed
-- Set up `/opt/fujin/{app_name}` directory
-- Install Python package (via uv) or copy binary
-- Create `.appenv` shell script for environment setup
-- Install systemd units and dropins
+- Set up `/opt/fujin/{app_name}` directory structure (releases/, shared/, .versions/)
+- Install Python package (via uv) or copy binary into `releases/{version}/`
+- Create `.appenv` shell script for environment setup (sources shared/.env)
+- Install systemd units and dropins (units reference `current/` symlink)
 - Enable and start services
+- Atomically swap `current` symlink to new release
+- Prune old releases (keeps last 3)
 - Configure Caddy if enabled
 
 ### Testing
@@ -328,8 +330,8 @@ UMask=0002  # Create files/sockets as group-writable
 
 **File Ownership:**
 - `/opt/fujin/{app_name}`: owned by `{deploy_user}:{app_user}`, mode `775`
-- `.install/` directory: owned by `{deploy_user}:{app_user}`, mode `775`
-- `.install/.env`: mode `640` (readable by group, not world)
+- `shared/` directory: owned by `{deploy_user}:{app_user}`, mode `775`
+- `shared/.env`: mode `640` (readable by group, not world)
 
 ### Why These Settings?
 

@@ -51,7 +51,7 @@ After={app_name}-web.socket
 
 [Service]
 Type=simple
-ExecStart={install_dir}/socketapp
+ExecStart={app_dir}/current/socketapp
 WorkingDirectory={app_dir}
 StandardInput=socket
 
@@ -131,7 +131,7 @@ Description=Cleanup task
 
 [Service]
 Type=oneshot
-ExecStart={install_dir}/timerapp
+ExecStart={app_dir}/current/timerapp
 WorkingDirectory={app_dir}
 """)
 
@@ -230,7 +230,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/staleapp
+ExecStart={app_dir}/current/staleapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -244,7 +244,7 @@ Description=Worker
 
 [Service]
 Type=simple
-ExecStart={install_dir}/staleapp
+ExecStart={app_dir}/current/staleapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -306,7 +306,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/dropinapp
+ExecStart={app_dir}/current/dropinapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -431,7 +431,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/dropinclean
+ExecStart={app_dir}/current/dropinclean
 WorkingDirectory={app_dir}
 Restart=always
 

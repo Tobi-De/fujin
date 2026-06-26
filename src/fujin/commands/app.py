@@ -57,7 +57,7 @@ class App(BaseCommand):
 
         with connection.connection(host=self.selected_host) as conn:
             shlex.quote(self.config.app_dir)
-            fujin_dir = shlex.quote(self.config.install_dir)
+            fujin_dir = shlex.quote(f"{self.config.app_dir}/current")
             remote_version, _ = conn.run(
                 f"cat {fujin_dir}/.version 2>/dev/null || echo N/A",
                 warn=True,
@@ -248,7 +248,7 @@ class App(BaseCommand):
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
         full_remote_cmd = (
-            f"cd {self.config.app_dir} && source .install/.appenv && {command}"
+            f"cd {self.config.app_dir} && source current/.appenv && {command}"
         )
         ssh_cmd.extend([ssh_target, full_remote_cmd])
         subprocess.run(ssh_cmd)
@@ -259,7 +259,7 @@ class App(BaseCommand):
         command: Annotated[str, cappa.Arg(help="Command to execute")],
     ):
         with connection.connection(host=self.selected_host) as conn:
-            cmd = f"cd {self.config.app_dir} && source .install/.appenv && {self.config.app_bin} {command}"
+            cmd = f"cd {self.config.app_dir} && source current/.appenv && {self.config.app_bin} {command}"
             conn.run(
                 f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
                 pty=True,
@@ -435,7 +435,7 @@ class App(BaseCommand):
                 return
 
             if name == "env":
-                fujin_dir = shlex.quote(self.config.install_dir)
+                fujin_dir = shlex.quote(self.config.shared_dir)
                 env_path = f"{fujin_dir}/.env"
                 self.output.output(f"[cyan]# {env_path}[/cyan]")
                 print()
