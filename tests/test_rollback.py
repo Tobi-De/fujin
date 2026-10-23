@@ -57,6 +57,7 @@ def make_manifest(version, dist, *, files=None):
 class FakeConn:
     def __init__(self, responses=None):
         self.calls = []
+        self.gets: list[tuple[str, str]] = []
         self.responses = responses or []
 
     def run(self, cmd, **kw):
@@ -66,15 +67,27 @@ class FakeConn:
                 return out, ok
         return "", True
 
+    def get(self, remote, local, verify=False):
+        """Fake SCP download: answers from the same marker registry."""
+        self.gets.append((remote, local))
+        for marker, (out, ok) in self.responses:
+            if marker in remote:
+                if not ok:
+                    raise FileNotFoundError(remote)
+                with open(local, "w") as fh:
+                    fh.write(out)
+                return
+        raise FileNotFoundError(remote)
+
 
 def manifest_response(digest, version, dist, files=None):
     data = json.dumps(manifest_to_dict(make_manifest(version, dist, files=files)))
-    return (f"cat /opt/fujin/testapp/releases/{digest}/manifest.json", (data, True))
+    return (f"/opt/fujin/testapp/releases/{digest}/manifest.json", (data, True))
 
 
 def unit_response(digest, unit_name, content):
     return (
-        f"cat /opt/fujin/testapp/releases/{digest}/systemd/{unit_name}",
+        f"/opt/fujin/testapp/releases/{digest}/{unit_name}",
         (content, True),
     )
 
@@ -513,7 +526,7 @@ def test_socket_and_timer_dropins_collected_as_dropins(monkeypatch, minimal_conf
             manifest_response("a-digest", "1.0.0", "dist-aaa", files=files),
             ("ls -1t releases/", ("b-digest\na-digest\n", True)),
             *[
-                unit_response("a-digest", n[len("systemd/") :], c)
+                unit_response("a-digest", n, c)
                 for n, c in sorted(
                     files.items(),
                     key=lambda kv: (".d/" in kv[0], kv[0]),

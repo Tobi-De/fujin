@@ -517,15 +517,21 @@ def test_read_current_manifest(conn):
             },
         }
     )
-    conn.run.return_value = (manifest_data, True)
+
+    def fake_get(remote, local, verify=False):
+        with open(local, "wb") as fh:
+            fh.write(manifest_data.encode())
+
+    conn.get.side_effect = fake_get
     manifest = serverops.read_current_manifest(conn, "/opt/fujin/myapp")
     assert manifest is not None
     assert "systemd/myapp-web.service" in manifest.entries
-    assert "/opt/fujin/myapp/current/manifest.json" in conn.run.call_args[0][0]
+    remote = conn.get.call_args[0][0]
+    assert remote == "/opt/fujin/myapp/current/manifest.json"
 
 
 def test_read_current_manifest_missing(conn):
-    conn.run.return_value = ("", False)
+    conn.get.side_effect = FileNotFoundError("nope")
     assert serverops.read_current_manifest(conn, "/opt/fujin/myapp") is None
 
 

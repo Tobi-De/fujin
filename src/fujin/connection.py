@@ -8,6 +8,7 @@ import os
 import re
 import select
 import socket
+import time
 import subprocess
 from fujin.errors import UploadError
 import sys
@@ -67,6 +68,7 @@ class SSH2Connection:
         warn: bool = False,
         pty: bool = False,
         hide: bool = False,
+        idle_timeout: float = 300,
     ) -> tuple[str, bool]:
         """Executes a command on the remote host.
 
@@ -75,6 +77,9 @@ class SSH2Connection:
             warn: If True, don't raise an exception on non-zero exit status
             pty: If True, allocate a pseudo-terminal for the command (enables password prompts, interactive shells)
             hide: If True, suppress stdout/stderr output. Can also be 'out' or 'err' to hide selectively
+            idle_timeout: Seconds without any channel progress before the
+                command is declared wedged and an error is raised. ``None``
+                disables the deadline (interactive PTY sessions).
 
         Returns:
             A tuple of (stdout_output, success) where success is True if exit status was 0
@@ -82,6 +87,12 @@ class SSH2Connection:
         Raises:
             cappa.Exit: If the command fails and warn=False
         """
+        # Interactive sessions have no output deadline: the user may think.
+        if pty:
+            idle_timeout = None
+        idle_deadline = None
+        if idle_timeout is not None:
+            idle_deadline = time.monotonic() + idle_timeout
 
         cwd_prefix = ""
         if self.cwd:
@@ -146,12 +157,15 @@ class SSH2Connection:
                 poller.register(stdin_fd, select.POLLIN)
             poller.register(sock_fd, select.POLLIN)
 
+            progress = [0]  # real payload bytes seen; drives the idle deadline
+
             def drain_channel() -> None:
                 while True:
                     size, data = channel.read()
                     if size == LIBSSH2_ERROR_EAGAIN:
                         break
                     if size > 0:
+                        progress[0] += size
                         text = stdout_decoder.decode(data)
                         if not hide or hide == "err":
                             sys.stdout.write(text)
@@ -173,6 +187,7 @@ class SSH2Connection:
                     if size == LIBSSH2_ERROR_EAGAIN:
                         break
                     if size > 0:
+                        progress[0] += size
                         text = stderr_decoder.decode(data)
                         if not hide or hide == "out":
                             sys.stderr.write(text)
@@ -208,12 +223,29 @@ class SSH2Connection:
                         select.POLLIN | select.POLLERR | select.POLLHUP
                     ):
                         drain_channel()
+                        if idle_timeout is not None:
+                            idle_deadline = time.monotonic() + idle_timeout
 
                 if directions & LIBSSH2_SESSION_BLOCK_INBOUND:
+                    seen = progress[0]
                     drain_channel()
+                    if progress[0] != seen and idle_timeout is not None:
+                        idle_deadline = time.monotonic() + idle_timeout
 
                 if channel.eof():
                     break
+
+                if (
+                    idle_deadline is not None
+                    and time.monotonic() > idle_deadline
+                    and not channel.eof()
+                ):
+                    raise CommandError(
+                        f"Remote command made no progress for {idle_timeout}s"
+                        " and never reached EOF; the SSH channel looks wedged:"
+                        f" {command[:120]!r}",
+                        code=-1,
+                    )
 
         finally:
             if old_tty_attrs:
@@ -304,6 +336,46 @@ class SSH2Connection:
                 raise UploadError(
                     f"Upload verification failed! Local: {local_checksum}, Remote: {remote_checksum}",
                     checksum_mismatch=True,
+                )
+
+    def get(self, remote: str, local: str, verify: bool = False) -> None:
+        """Downloads a remote file to the local path using system ``scp``.
+
+        Large file reads must NOT go through the embedded session — neither
+        ``run("cat …")`` (exec-channel reads can trickle forever) nor
+        ``scp_recv2`` (the libssh2 session stalls mid-transfer on sustained
+        reads). System scp is the same transport the rsync path already
+        uses and has proven solid.
+
+        Password-auth hosts are not supported here (BatchMode); callers fall
+        back to ``run("cat")`` for small files.
+        """
+        remote_path = remote
+        if not remote.startswith("/") and self.cwd:
+            remote_path = f"{self.cwd}/{remote}"
+
+        cmd = ["scp", "-q", "-o", "BatchMode=yes", "-P", str(self.host.port)]
+        if self.host.key_filename:
+            cmd.extend(["-i", str(Path(self.host.key_filename).expanduser().resolve())])
+        cmd.extend([f"{self.host.user}@{self.host.address}:{remote_path}", local])
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise UploadError(
+                f"SCP download failed for {remote_path} (exit {result.returncode}):\n"
+                f"{result.stderr.strip()}"
+            )
+
+        if verify:
+            remote_q = shlex.quote(remote_path)
+            out, ok = self.run(f"sha256sum {remote_q} | awk '{{print $1}}'", hide=True)
+            if not ok:
+                raise UploadError(f"Could not checksum {remote_path} on server")
+            with open(local, "rb") as f:
+                local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
+            if local_checksum != out.strip():
+                raise UploadError(
+                    f"Download verification failed! Local: {local_checksum},"
+                    f" Remote: {out.strip()}"
                 )
 
     def rsync_upload(self, local: str, remote: str) -> None:

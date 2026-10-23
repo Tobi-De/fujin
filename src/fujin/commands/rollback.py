@@ -28,16 +28,6 @@ def _q(path: str) -> str:
     return shlex.quote(path)
 
 
-def _read_remote_file(conn, path: str, *, fatal: str | None = None) -> str | None:
-    """Read a remote file; ``fatal`` makes failure abort with that message."""
-    out, ok = conn.run(f"cat {_q(path)}", warn=True, hide=True)
-    if not ok:
-        if fatal:
-            raise cappa.Exit(fatal, code=1)
-        return None
-    return out
-
-
 @overload
 def _read_remote_file(conn, path: str, *, fatal: None = None) -> str | None: ...
 
@@ -47,13 +37,27 @@ def _read_remote_file(conn, path: str, *, fatal: str) -> str: ...
 
 
 def _read_remote_file(conn, path: str, *, fatal: str | None = None) -> str | None:
-    """Read a remote file; ``fatal`` makes failure abort with that message."""
-    out, ok = conn.run(f"cat {_q(path)}", warn=True, hide=True)
-    if not ok:
-        if fatal:
-            raise cappa.Exit(fatal, code=1)
-        return None
-    return out
+    """Read a remote file; ``fatal`` makes failure abort with that message.
+
+    Uses SCP (not ``cat``): release manifests can be hundreds of KB and big
+    exec-channel reads can trickle forever (see SSH2Connection.get).
+    """
+    import os
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        try:
+            conn.get(path, tmp_path)
+        except Exception:
+            if fatal:
+                raise cappa.Exit(fatal, code=1) from None
+            return None
+        with open(tmp_path, "rb") as fh:
+            return fh.read().decode("utf-8", errors="replace")
+    finally:
+        os.unlink(tmp_path)
 
 
 def _unit_rel_name(path: str) -> str:
