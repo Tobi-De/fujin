@@ -339,30 +339,36 @@ class SSH2Connection:
                 )
 
     def get(self, remote: str, local: str, verify: bool = False) -> None:
-        """Downloads a remote file to the local path using system ``scp``.
+        """Downloads a remote file to the local path via system ``ssh cat``.
 
         Large file reads must NOT go through the embedded session — neither
-        ``run("cat …")`` (exec-channel reads can trickle forever) nor
-        ``scp_recv2`` (the libssh2 session stalls mid-transfer on sustained
-        reads). System scp is the same transport the rsync path already
-        uses and has proven solid.
+        ``run("cat …")`` (exec-channel reads can trickle forever) nor scp
+        (needs an sftp subsystem or a remote scp binary, neither of which
+        exists on every target). System ssh is the transport the rsync path
+        already uses; its exec channel is proven solid.
 
-        Password-auth hosts are not supported here (BatchMode); callers fall
-        back to ``run("cat")`` for small files.
+        Password-auth hosts are not supported here (BatchMode); callers read
+        small files via ``run()`` instead.
         """
         remote_path = remote
         if not remote.startswith("/") and self.cwd:
             remote_path = f"{self.cwd}/{remote}"
 
-        cmd = ["scp", "-q", "-o", "BatchMode=yes", "-P", str(self.host.port)]
+        cmd = ["ssh", "-o", "BatchMode=yes", "-p", str(self.host.port)]
         if self.host.key_filename:
             cmd.extend(["-i", str(Path(self.host.key_filename).expanduser().resolve())])
-        cmd.extend([f"{self.host.user}@{self.host.address}:{remote_path}", local])
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        cmd.extend([f"{self.host.user}@{self.host.address}", "cat", "--", remote_path])
+        with open(local, "wb") as out_fh:
+            result = subprocess.run(
+                cmd, stdout=out_fh, stderr=subprocess.PIPE, timeout=120
+            )
         if result.returncode != 0:
+            import os as _os
+
+            _os.unlink(local)
             raise UploadError(
-                f"SCP download failed for {remote_path} (exit {result.returncode}):\n"
-                f"{result.stderr.strip()}"
+                f"Download failed for {remote_path} (exit {result.returncode}):\n"
+                f"{result.stderr.decode(errors='replace').strip()}"
             )
 
         if verify:
