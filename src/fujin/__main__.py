@@ -7,6 +7,7 @@ import cappa
 import fujin
 from fujin.commands.app import App
 from fujin.commands.audit import Audit
+from fujin.commands.cache import Cache
 from fujin.commands.deploy import Deploy
 from fujin.commands.down import Down
 from fujin.commands.init import Init
@@ -34,6 +35,7 @@ class Fujin:
         | App
         | Server
         | Audit
+        | Cache
         | Rollback
         | Prune
         | Down
