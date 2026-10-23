@@ -132,7 +132,7 @@ def test_service_lifecycle(deployed_app, vps_container, monkeypatch):
         "systemctl show mgmtapp-web.service --property=MainPID --value",
     )
     new_pid = stdout.strip()
-    assert new_pid != initial_pid, f"PID should change after restart"
+    assert new_pid != initial_pid, "PID should change after restart"
     assert new_pid != "0", "Service should have valid PID"
 
     # Part 2: Test stop and start

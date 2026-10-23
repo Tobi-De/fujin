@@ -14,6 +14,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - *(ops)* Release-tree paths and SSH channel detach across runtime commands
 
+### 📚 Documentation
+
+- Add fujin cache page to commands reference
+
 ### ⚙️ Miscellaneous Tasks
 
 - Revert uv.lock format churn from local uv runs

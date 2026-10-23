@@ -821,7 +821,7 @@ WantedBy=multi-user.target
 
     def create_config(version: str):
         distfile = dist_dir / f"dataapp-{version}"
-        distfile.write_text(f"#!/bin/bash\nsleep infinity\n")
+        distfile.write_text("#!/bin/bash\nsleep infinity\n")
         distfile.chmod(0o755)
         return msgspec.convert(
             {
