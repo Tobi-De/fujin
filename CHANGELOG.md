@@ -14,6 +14,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - *(ops)* Release-tree paths and SSH channel detach across runtime commands
 
+### ⚙️ Miscellaneous Tasks
+
+- Revert uv.lock format churn from local uv runs
+
 ## [0.27.1] - 2026-06-25
 
 ### 🐛 Bug Fixes
