@@ -1,0 +1,15 @@
+# Caddyfile for bookstore
+# Learn more: https://caddyserver.com/docs/caddyfile
+
+net.oluwatobi.dev {
+
+    # Serve static files
+    handle_path /static/* {
+        root * /opt/fujin/bookstore/shared/staticfiles
+        file_server
+    }
+
+    # Proxy to web service
+    reverse_proxy unix//run/bookstore/bookstore.sock
+}
+

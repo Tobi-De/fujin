@@ -275,31 +275,31 @@ def install_code_into_staging(
     installation_mode: str,
     python_version: str | None,
     requirements: str | None,
-    dist_local_path: str,
+    dist_tree_path: str,
     *,
     app_name: str,
 ) -> None:
     """Install the application code into *staging*, never into a live venv.
 
-    - ``python-package``: upload the distfile, build ``uv venv`` at
-      ``{staging}/venv`` and ``uv pip install`` it there. The transient
-      distfile is removed afterwards so the committed tree stays manifest-clean.
-    - ``binary``: upload the distfile to ``{staging}/bin/{app_name}``,
-      chmod 755.
+    - ``python-package``: the dist file is already part of the staging tree
+      (rsynced to ``{staging}/{dist_tree_path}``); ``uv venv`` builds at
+      ``{staging}/venv`` and ``uv pip install`` installs it there. The staged
+      dist file stays in the tree as a ``code`` entry (it IS the code).
+    - ``binary``: the dist file is staged as ``{staging}/bin/{app_name}``
+      (rsynced); this only ensures the directory exists and the file is 755.
 
     ``requirements`` is a local requirements.txt path, uploaded to
     ``{staging}/requirements.txt`` (it is committed as an asset entry).
     """
     staging_q = shlex.quote(staging_dir)
+    dist_in_tree = f"{staging_q}/{shlex.quote(dist_tree_path)}"
 
     if installation_mode == "python-package":
         if not python_version:
             raise ServerOpsError("python mode requires a python_version")
-        distfile_remote = f"{staging_dir}/.distfile"
-        conn.put(dist_local_path, distfile_remote)
         _, ok = conn.run(
             f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} "
-            f"uv venv -p {shlex.quote(python_version)} --managed-python "
+            f"uv venv --relocatable -p {shlex.quote(python_version)} --managed-python "
             f"{staging_q}/{_PYTHON_ROOT}",
             warn=True,
         )
@@ -308,7 +308,7 @@ def install_code_into_staging(
         pip_cmd = (
             f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} UV_COMPILE_BYTECODE=1 "
             f"uv pip install --python {staging_q}/{_PYTHON_ROOT}/bin/python "
-            f"{staging_q}/.distfile --no-deps"
+            f"{dist_in_tree} --no-deps"
         )
         if requirements:
             conn.put(requirements, f"{staging_dir}/requirements.txt")
@@ -327,16 +327,13 @@ def install_code_into_staging(
         )
         if not ok:
             raise ServerOpsError(f"Failed to set venv permissions in {staging_dir}")
-        conn.run(f"rm -f {staging_q}/.distfile", warn=True, hide=True)
         return
 
     if installation_mode == "binary":
         conn.run(f"mkdir -p {staging_q}/{_BINARY_ROOT}", warn=True, hide=True)
-        conn.put(dist_local_path, f"{staging_dir}/{_BINARY_ROOT}/{app_name}")
-        conn.run(
-            f"chmod 755 {staging_q}/{_BINARY_ROOT}/{shlex.quote(app_name)}",
-            warn=True,
-        )
+        _, ok = conn.run(f"chmod 755 {dist_in_tree}", warn=True)
+        if not ok:
+            raise ServerOpsError(f"Failed to chmod dist file in {staging_dir}")
         return
 
     raise ServerOpsError(f"Unknown installation mode: {installation_mode}")
@@ -387,6 +384,28 @@ def hash_server_built(
         return json.loads(out.strip())
     except (json.JSONDecodeError, ValueError) as exc:
         raise ServerOpsError(f"Undecodable hash output: {exc}") from exc
+
+
+def normalize_staging_ownership(conn: Any, staging_dir: str, app_user: str) -> None:
+    """Force the staged tree into the deploy permission model.
+
+    rsync's ``--chmod=D755`` normalizes nested dirs to plain 0755, which
+    strips the setgid bit that would give created files the app group — files
+    would land in the deploy user's group and the app user could not read its
+    own ``.env``. Make the group assignment explicit instead of hoping the
+    filesystem did it: group everything ``{app_user}``, make everything
+    group-traversable/readable, and set setgid on every directory so late
+    writes (hooks, runtime) keep inheriting the group.
+    """
+    staging_q = shlex.quote(staging_dir)
+    _, ok = conn.run(
+        f"sudo chgrp -R {shlex.quote(app_user)} {staging_q} && "
+        f"sudo chmod -R g+rX {staging_q} && "
+        f"sudo find {staging_q} -type d -exec chmod g+s {{}} +",
+        warn=True,
+    )
+    if not ok:
+        raise ServerOpsError(f"Failed to normalize ownership of {staging_dir}")
 
 
 # =============================================================================

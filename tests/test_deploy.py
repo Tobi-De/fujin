@@ -11,6 +11,7 @@ that flow.
 from __future__ import annotations
 
 import json
+import sys
 from unittest.mock import MagicMock
 
 import fujin.commands.deploy as deploy_mod
@@ -89,6 +90,7 @@ class FakeConn:
         self.calls: list[tuple[str, dict]] = []
         self.responses = responses or []
         self.events = events
+        self.uploads: list[tuple[str, str]] = []
 
     def run(self, cmd, **kw):
         self.calls.append((cmd, kw))
@@ -98,6 +100,11 @@ class FakeConn:
             if marker in cmd:
                 return out, ok
         return "", True
+
+    def put(self, local, remote, verify=False):
+        self.uploads.append((local, remote))
+        if self.events is not None:
+            self.events.append(("put", local, remote))
 
     def append_response(self, marker, out, ok=True):
         self.responses.append((marker, (out, ok)))
@@ -110,7 +117,16 @@ def invoke(cmd) -> int:
         return 0
     except SystemExit as exc:
         code = exc.code
+        if code not in (0, None):
+            import traceback
+
+            traceback.print_exception(exc, file=sys.stderr)
         return 0 if code is None else code
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        raise
 
 
 def setup_deploy(
@@ -610,6 +626,30 @@ def test_env_bytes_written_to_staging_before_transfer(
     # Config strips env_content before deployment.
     assert captured["env_at_transfer"] == b"SECRET_TOKEN=1"
     assert spies["rsync"].call_args.kwargs["exclude"] == {"built.json"}
+
+
+def test_merged_manifest_uploaded_via_scp_not_command_string(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Blocker regression: the final (server-merged) manifest can be hundreds
+    of KB of venv entries; sending it inside a shell command string hung the
+    SSH channel forever. It must ride via conn.put instead."""
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
+    )
+    assert invoke(cmd) == 0
+    manifest_uploads = [
+        remote
+        for (_local, remote) in spies["conn"].uploads
+        if remote.endswith("manifest.json")
+    ]
+    # exactly one upload, into the remote staging dir, via put (never a shell command)
+    assert len(manifest_uploads) == 1
+    assert "/releases/.staging-" in manifest_uploads[0]
+    assert not any(
+        cmd.find("manifest.json") != -1 and "echo" in cmd
+        for cmd, _kw in spies["conn"].calls
+    )
 
 
 def test_scp_fallback_stages_env_and_skips_bookkeeping(

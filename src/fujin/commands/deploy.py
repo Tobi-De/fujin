@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-import base64
+import faulthandler
 import logging
 import os
 import shlex
+import signal
+import sys
+import tempfile
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -37,12 +40,6 @@ def _q(*paths: str) -> str:
     return " ".join(shlex.quote(p) for p in paths)
 
 
-def _b64_write_cmd(content: bytes, path: str) -> str:
-    """Remote command writing ``content`` to ``path`` via base64 (no sudo)."""
-    encoded = base64.b64encode(content).decode()
-    return f"printf '%s' {encoded} | base64 -d > {_q(path)}"
-
-
 def _read_remote_file(conn, path: str) -> str | None:
     out, ok = conn.run(f"cat {_q(path)}", warn=True, hide=True)
     return out if ok else None
@@ -64,6 +61,15 @@ def _service_unit_names(manifest: m.Manifest) -> list[str]:
         if manifest.entries[path].kind is m.EntryKind.UNIT
         and _unit_rel_name(path).endswith(".service")
     ]
+
+
+def _socket_timer_unit_names(manifest: m.Manifest) -> set[str]:
+    return {
+        _unit_rel_name(path)
+        for path in manifest.entries
+        if manifest.entries[path].kind is m.EntryKind.UNIT
+        and _unit_rel_name(path).endswith((".socket", ".timer"))
+    }
 
 
 def collect_local_units(
@@ -255,6 +261,10 @@ class Deploy(BaseCommand):
     ] = False
 
     def __call__(self):
+
+        faulthandler.dump_traceback_later(150, exit=True)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+
         config = self.config
         host = self.selected_host
         app_dir = config.app_dir
@@ -418,14 +428,23 @@ class Deploy(BaseCommand):
 
             self.output.info("Installing application code on the server...")
             tree_requirements = staging_dir / build.REQUIREMENTS_TREE_PATH
+            dist_tree_path = next(
+                path
+                for path in sorted(result.files)
+                if path.startswith(build.BIN_DIR + "/")
+            )
             serverops.install_code_into_staging(
                 conn,
                 remote_staging,
                 config.installation_mode.value,
                 config.python_version,
                 (str(tree_requirements) if tree_requirements.is_file() else None),
-                str(result.dist_path),
+                dist_tree_path,
                 app_name=config.app_name,
+            )
+
+            serverops.normalize_staging_ownership(
+                conn, remote_staging, config.app_user or config.app_name
             )
 
             server_built = serverops.hash_server_built(
@@ -520,14 +539,21 @@ class Deploy(BaseCommand):
         self, conn, remote_staging: str, final_manifest: m.Manifest
     ) -> None:
         """Overwrite ``manifest.json`` in staging with the merged (server +
-        client) manifest, before verify + commit."""
-        cmd = _b64_write_cmd(
-            m.canonical_manifest_bytes(final_manifest),
-            f"{remote_staging}/{m.MANIFEST_FILENAME}",
-        )
-        _, ok = conn.run(cmd, warn=True, hide=True)
-        if not ok:
-            raise DeploymentError("Failed to write manifest.json into the staging tree")
+        client) manifest, before verify + commit.
+
+        Transferred via SCP: the merged manifest can be hundreds of KB
+        (thousands of ``venv/**`` entries), which exceeds what can safely
+        travel inside a shell command string (a manifest sent that way hung
+        the SSH channel forever).
+        """
+        manifest_bytes = m.canonical_manifest_bytes(final_manifest)
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(manifest_bytes)
+            tmp_path = tmp.name
+        try:
+            conn.put(tmp_path, f"{remote_staging}/{m.MANIFEST_FILENAME}")
+        finally:
+            os.unlink(tmp_path)
 
     # =======================================================================================
     # Restart set / convergence / readiness
@@ -560,8 +586,27 @@ class Deploy(BaseCommand):
             self.output.info("No unit needs a restart for this deploy.")
             return
         verb = "restart" if self.full_restart else "reload-or-restart"
+        # systemctl enable does not accept globs (restart does) and hard-fails
+        # on units without an [Install] section: enable only concrete
+        # non-template units, non-fatal (boot survival is best-effort here);
+        # template instances are enabled by the convergence step right after.
+        enable_specs = sorted(
+            name
+            for name in set(_service_unit_names(final_manifest))
+            | _socket_timer_unit_names(final_manifest)
+            if not name.endswith("@.service") and name not in oneshots
+        )
+        if enable_specs:
+            _, enable_ok = conn.run(
+                f"sudo systemctl enable {_q(*enable_specs)}", warn=True
+            )
+            if not enable_ok:
+                self.output.warning(
+                    "Could not enable some units (missing [Install] section?); "
+                    "they will not start on boot."
+                )
         _, ok = conn.run(
-            f"sudo systemctl enable {_q(*specs)} && sudo systemctl {verb} {_q(*specs)}",
+            f"sudo systemctl {verb} {_q(*specs)}",
             warn=True,
         )
         if not ok:

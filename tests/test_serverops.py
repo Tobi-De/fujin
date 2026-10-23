@@ -200,27 +200,31 @@ def test_install_code_python(conn, tmp_path):
         "python-package",
         "3.11",
         str(req),
-        str(dist),
+        "bin/myapp-1.0-py3-none-any.whl",
         app_name="myapp",
     )
+    # dist is part of the rsynced staging tree; only requirements is uploaded
     uploaded = {c.args[0]: c.args[1] for c in conn.put.call_args_list}
-    assert uploaded[str(dist)] == "/opt/fujin/myapp/releases/.staging-1/.distfile"
-    assert uploaded[str(req)] == "/opt/fujin/myapp/releases/.staging-1/requirements.txt"
+    assert uploaded == {
+        str(req): "/opt/fujin/myapp/releases/.staging-1/requirements.txt"
+    }
 
     cmds = [c[0][0] for c in conn.run.call_args_list]
     assert any(
-        "uv venv -p 3.11 --managed-python" in c and "staging-1/venv" in c for c in cmds
+        "uv venv --relocatable -p 3.11 --managed-python" in c and "staging-1/venv" in c
+        for c in cmds
     )
     assert any(
         "uv pip install --python" in c
         and "--no-deps" in c
+        and "staging-1/bin/myapp-1.0-py3-none-any.whl" in c
         and "-r /opt/fujin/myapp/releases/.staging-1/requirements.txt" in c
         and "UV_COMPILE_BYTECODE=1" in c
         and "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python" in c
         for c in cmds
     )
-    # transient distfile removed
-    assert any("rm -f" in c and ".distfile" in c for c in cmds)
+    # no transient distfile upload/cleanup exists anymore
+    assert not any(".distfile" in c for c in cmds)
 
 
 def test_install_code_python_venv_never_live(conn):
@@ -230,7 +234,7 @@ def test_install_code_python_venv_never_live(conn):
         "python-package",
         "3.12",
         None,
-        "dist.whl",
+        "bin/dist.whl",
         app_name="myapp",
     )
     for c in conn.run.call_args_list:
@@ -247,15 +251,13 @@ def test_install_code_binary(conn, tmp_path):
         "binary",
         None,
         None,
-        str(dist),
+        "bin/myapp",
         app_name="myapp",
     )
-    assert conn.put.call_args[0] == (
-        str(dist),
-        "/opt/fujin/myapp/releases/.staging-7/bin/myapp",
-    )
+    # dist ships via the rsynced staging tree; no per-file upload anymore
+    assert conn.put.call_args_list == []
     assert any(
-        "chmod 755" in c[0][0] and "bin/myapp" in c[0][0]
+        "chmod 755" in c[0][0] and "staging-7/bin/myapp" in c[0][0]
         for c in conn.run.call_args_list
     )
 
@@ -268,15 +270,13 @@ def test_install_code_unknown_mode(conn):
             "docker",
             None,
             None,
-            "d",
+            "bin/d",
             app_name="x",
         )
 
 
 def test_install_code_failure_raises(conn, tmp_path):
     conn.run.side_effect = [("error out", False)]
-    dist = tmp_path / "myapp-1.0-py3-none-any.whl"
-    dist.write_bytes(b"wheel")
     with pytest.raises(serverops.ServerOpsError, match="venv"):
         serverops.install_code_into_staging(
             conn,
@@ -284,7 +284,7 @@ def test_install_code_failure_raises(conn, tmp_path):
             "python-package",
             "3.11",
             None,
-            str(dist),
+            "bin/myapp-1.0-py3-none-any.whl",
             app_name="x",
         )
 
