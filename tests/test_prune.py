@@ -1,4 +1,10 @@
-"""Tests for prune command."""
+"""Tests for the prune command (release-tree store).
+
+Prune deletes release digests under ``releases/`` per ``store.gc_plan``
+(keep current + previous[0] + the newest ``keep`` releases), honoring the
+state registry in ``store/state.json``. Pre-release-tree apps (no
+``store/`` directory) are left untouched.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +13,51 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from fujin import store
 from fujin.commands.prune import Prune
 from fujin.config import Config
 
 # base_config fixture from conftest.py
+
+DIGESTS = {
+    "a": "aaaaaaaa00000000000000000000000000000000000000000000000000000000",
+    "b": "bbbbbbbb00000000000000000000000000000000000000000000000000000000",
+    "c": "cccccccc00000000000000000000000000000000000000000000000000000000",
+    "d": "dddddddd00000000000000000000000000000000000000000000000000000000",
+}
+
+
+def state_bytes(current=None, previous=()) -> str:
+    """Serialized store/state.json content for a mock connection."""
+    return store.serialize_state(
+        store.State(current=current, previous=list(previous))
+    ).decode()
+
+
+def make_prune(minimal_config_dict, run_side_effects, keep, confirm=True):
+    """Wire a Prune command against a scripted mock connection."""
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    mock_conn = MagicMock()
+    mock_conn.run.side_effect = run_side_effects
+
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch("fujin.connection.connection") as mock_connection,
+        patch("fujin.commands.prune.Confirm") as mock_confirm,
+        patch.object(Prune, "output", MagicMock()) as mock_output,
+    ):
+        mock_connection.return_value.__enter__.return_value = mock_conn
+        mock_connection.return_value.__exit__.return_value = None
+        mock_confirm.ask.return_value = confirm
+        prune = Prune(keep=keep)
+        prune()
+
+    calls = [call[0][0] for call in mock_conn.run.call_args_list]
+    return calls, mock_output, mock_confirm
+
+
+def rm_cmds(calls: list[str]) -> list[str]:
+    return [cmd for cmd in calls if "rm -rf" in cmd]
 
 
 # ============================================================================
@@ -18,15 +65,16 @@ from fujin.config import Config
 # ============================================================================
 
 
-def test_prune_with_keep_less_than_1_raises_error(minimal_config_dict):
-    """prune with --keep < 1 raises error."""
+@pytest.mark.parametrize("keep", [0, 1])
+def test_prune_keep_below_2_raises_error(minimal_config_dict, keep):
+    """prune with --keep < 2 raises error (current + previous always kept)."""
     config = msgspec.convert(minimal_config_dict, type=Config)
 
     with (
         patch("fujin.config.Config.read", return_value=config),
         patch.object(Prune, "output", MagicMock()),
     ):
-        prune = Prune(keep=0)
+        prune = Prune(keep=keep)
 
         with pytest.raises(SystemExit) as exc_info:
             prune()
@@ -35,54 +83,54 @@ def test_prune_with_keep_less_than_1_raises_error(minimal_config_dict):
 
 
 # ============================================================================
-# No Versions Scenarios
+# No Releases Scenarios
 # ============================================================================
 
 
 @pytest.mark.parametrize(
     "run_side_effects,keep,expected_message",
     [
-        # No versions directory
+        # No release store (pre-release-tree app): nothing to prune
         (
             [("", False)],
             2,
-            "No versions directory found. Nothing to prune.",
+            "No release store found (pre-release-tree app). Nothing to prune.",
         ),
-        # Empty versions directory
+        # Store present but state.json missing/corrupt
         (
             [("", True), ("", True)],
             2,
-            "No versions found to prune",
+            "No release store state found. Nothing to prune.",
         ),
-        # Fewer versions than keep
+        # State present but no releases on disk
         (
-            [("", True), ("testapp-1.0.0.pyz\ntestapp-0.9.0.pyz", True)],
-            3,
-            "Only 2 versions found. Nothing to prune (keep=3).",
+            [("", True), (state_bytes(current="d"), True), ("", True)],
+            2,
+            "No releases found to prune.",
+        ),
+        # Fewer releases than keep
+        (
+            [
+                ("", True),
+                (state_bytes(current="d"), True),
+                (f"{DIGESTS['d']}\n{DIGESTS['a']}", True),
+            ],
+            5,
+            "Only 2 releases found. Nothing to prune (keep=5).",
         ),
     ],
 )
-def test_prune_no_versions_scenarios(
+def test_prune_no_releases_scenarios(
     minimal_config_dict, run_side_effects, keep, expected_message
 ):
-    """prune handles various no-versions scenarios correctly."""
-    config = msgspec.convert(minimal_config_dict, type=Config)
-    mock_conn = MagicMock()
-    mock_conn.run.side_effect = run_side_effects
+    """prune handles various no-releases scenarios correctly."""
+    calls, mock_output, _confirm = make_prune(
+        minimal_config_dict, run_side_effects, keep
+    )
 
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.connection.connection") as mock_connection,
-        patch.object(Prune, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        prune = Prune(keep=keep)
-        prune()
-
-        # Should show info message
-        mock_output.info.assert_called_with(expected_message)
+    mock_output.info.assert_called_with(expected_message)
+    assert not rm_cmds(calls)
+    assert not mock_output.success.called
 
 
 # ============================================================================
@@ -90,81 +138,58 @@ def test_prune_no_versions_scenarios(
 # ============================================================================
 
 
-def test_prune_deletes_old_versions_when_user_confirms(minimal_config_dict):
-    """prune deletes old versions when user confirms."""
-    config = msgspec.convert(minimal_config_dict, type=Config)
-    mock_conn = MagicMock()
-
-    # 4 versions, newest first (ls -1t sorts by time)
-    versions_output = (
-        "testapp-1.3.0.pyz\ntestapp-1.2.0.pyz\ntestapp-1.1.0.pyz\ntestapp-1.0.0.pyz"
+def test_prune_deletes_old_releases_when_user_confirms(minimal_config_dict):
+    """prune deletes old releases when user confirms."""
+    # releases/ listing is newest (mtime) first.
+    releases_output = f"{DIGESTS['c']}\n{DIGESTS['b']}\n{DIGESTS['a']}"
+    state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
+    calls, mock_output, _confirm = make_prune(
+        minimal_config_dict,
+        [("", True), (state, True), (releases_output, True), ("", True)],
+        keep=2,
+        confirm=True,
     )
 
-    mock_conn.run.side_effect = [
-        ("", True),  # test -d
-        (versions_output, True),  # ls -1t
-        ("", True),  # rm command
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.connection.connection") as mock_connection,
-        patch("fujin.commands.prune.Confirm") as mock_confirm,
-        patch.object(Prune, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
-
-        prune = Prune(keep=2)
-        prune()
-
-        # Verify deletion command was called
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        rm_cmd = [cmd for cmd in calls if "rm -f" in cmd][0]
-
-        # Should keep newest 2 (1.3.0, 1.2.0), delete oldest 2 (1.1.0, 1.0.0)
-        assert "testapp-1.1.0.pyz" in rm_cmd
-        assert "testapp-1.0.0.pyz" in rm_cmd
-        assert "testapp-1.3.0.pyz" not in rm_cmd
-        assert "testapp-1.2.0.pyz" not in rm_cmd
-
-        # Should show success message
-        mock_output.success.assert_called()
+    # Should keep current + previous[0], delete the rest
+    joined = "\n".join(rm_cmds(calls))
+    assert DIGESTS["a"] in joined
+    assert DIGESTS["b"] not in joined
+    assert DIGESTS["c"] not in joined
+    assert mock_output.success.called
 
 
 def test_prune_aborts_when_user_declines(minimal_config_dict):
     """prune aborts when user declines confirmation."""
-    config = msgspec.convert(minimal_config_dict, type=Config)
-    mock_conn = MagicMock()
-
-    versions_output = (
-        "testapp-1.3.0.pyz\ntestapp-1.2.0.pyz\ntestapp-1.1.0.pyz\ntestapp-1.0.0.pyz"
+    releases_output = f"{DIGESTS['c']}\n{DIGESTS['b']}\n{DIGESTS['a']}"
+    state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
+    calls, mock_output, mock_confirm = make_prune(
+        minimal_config_dict,
+        [("", True), (state, True), (releases_output, True)],
+        keep=2,
+        confirm=False,
     )
 
-    mock_conn.run.side_effect = [
-        ("", True),  # test -d
-        (versions_output, True),  # ls -1t
-    ]
+    # No rm commands, no success message
+    assert not rm_cmds(calls)
+    assert mock_confirm.ask.called
+    assert not mock_output.success.called
 
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.connection.connection") as mock_connection,
-        patch("fujin.commands.prune.Confirm") as mock_confirm,
-        patch.object(Prune, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = False  # User declines
 
-        prune = Prune(keep=2)
-        prune()
+def test_prune_defaults_to_versions_to_keep(minimal_config_dict):
+    """prune without --keep falls back to versions_to_keep from config."""
+    minimal_config_dict["versions_to_keep"] = 2
+    releases_output = f"{DIGESTS['c']}\n{DIGESTS['b']}\n{DIGESTS['a']}"
+    state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
+    calls, _mock_output, mock_confirm = make_prune(
+        minimal_config_dict,
+        [("", True), (state, True), (releases_output, True), ("", True)],
+        keep=None,
+        confirm=True,
+    )
 
-        # Should not call rm command (only 2 run calls: test -d and ls)
-        assert mock_conn.run.call_count == 2
-
-        # Should not show success message
-        assert not mock_output.success.called
+    assert mock_confirm.ask.called
+    assert DIGESTS["a"] in "\n".join(rm_cmds(calls))
+    assert DIGESTS["c"] not in "\n".join(rm_cmds(calls))
 
 
 # ============================================================================
@@ -172,118 +197,57 @@ def test_prune_aborts_when_user_declines(minimal_config_dict):
 # ============================================================================
 
 
-def test_prune_with_keep_1_deletes_all_but_newest(minimal_config_dict):
-    """prune with --keep 1 deletes all but the newest version."""
-    config = msgspec.convert(minimal_config_dict, type=Config)
-    mock_conn = MagicMock()
-
-    versions_output = "testapp-2.0.0.pyz\ntestapp-1.0.0.pyz\ntestapp-0.9.0.pyz"
-
-    mock_conn.run.side_effect = [
-        ("", True),  # test -d
-        (versions_output, True),  # ls -1t
-        ("", True),  # rm command
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.connection.connection") as mock_connection,
-        patch("fujin.commands.prune.Confirm") as mock_confirm,
-        patch.object(Prune, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
-
-        prune = Prune(keep=1)
-        prune()
-
-        # Verify deletion command
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        rm_cmd = [cmd for cmd in calls if "rm -f" in cmd][0]
-
-        # Should keep only newest (2.0.0), delete others
-        assert "testapp-1.0.0.pyz" in rm_cmd
-        assert "testapp-0.9.0.pyz" in rm_cmd
-        assert "testapp-2.0.0.pyz" not in rm_cmd
-
-
-def test_prune_with_keep_5_keeps_all_if_only_3_versions(minimal_config_dict):
-    """prune with --keep 5 keeps all versions if only 3 exist."""
-    config = msgspec.convert(minimal_config_dict, type=Config)
-    mock_conn = MagicMock()
-
-    versions_output = "testapp-1.2.0.pyz\ntestapp-1.1.0.pyz\ntestapp-1.0.0.pyz"
-
-    mock_conn.run.side_effect = [
-        ("", True),  # test -d
-        (versions_output, True),  # ls -1t
-    ]
-
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.connection.connection") as mock_connection,
-        patch.object(Prune, "output", MagicMock()) as mock_output,
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-
-        prune = Prune(keep=5)
-        prune()
-
-        # Should show info message about nothing to prune
-        mock_output.info.assert_called_with(
-            "Only 3 versions found. Nothing to prune (keep=5)."
-        )
-
-
-# ============================================================================
-# File Filtering
-# ============================================================================
-
-
-def test_prune_ignores_non_bundle_files(minimal_config_dict):
-    """prune ignores files that don't match the bundle pattern."""
-    config = msgspec.convert(minimal_config_dict, type=Config)
-    mock_conn = MagicMock()
-
-    # Mix of valid bundles and other files
-    versions_output = (
-        "testapp-1.2.0.pyz\n"
-        "testapp-1.1.0.pyz\n"
-        "testapp-1.0.0.pyz\n"
-        "README.md\n"
-        "backup.tar.gz\n"
-        "other-app-1.0.0.pyz"  # Different app name
+def test_prune_with_keep_2_deletes_all_but_current_and_previous(minimal_config_dict):
+    """prune with --keep 2 deletes everything but current + previous[0]."""
+    releases_output = f"{DIGESTS['d']}\n{DIGESTS['c']}\n{DIGESTS['b']}\n{DIGESTS['a']}"
+    state = state_bytes(current=DIGESTS["d"], previous=[DIGESTS["c"]])
+    calls, _mock_output, _confirm = make_prune(
+        minimal_config_dict,
+        [("", True), (state, True), (releases_output, True), ("", True), ("", True)],
+        keep=2,
+        confirm=True,
     )
 
-    mock_conn.run.side_effect = [
-        ("", True),  # test -d
-        (versions_output, True),  # ls -1t
-        ("", True),  # rm command
-    ]
+    joined = "\n".join(rm_cmds(calls))
+    assert DIGESTS["b"] in joined
+    assert DIGESTS["a"] in joined
+    assert DIGESTS["d"] not in joined
+    assert DIGESTS["c"] not in joined
 
-    with (
-        patch("fujin.config.Config.read", return_value=config),
-        patch("fujin.connection.connection") as mock_connection,
-        patch("fujin.commands.prune.Confirm") as mock_confirm,
-        patch.object(Prune, "output", MagicMock()),
-    ):
-        mock_connection.return_value.__enter__.return_value = mock_conn
-        mock_connection.return_value.__exit__.return_value = None
-        mock_confirm.ask.return_value = True
 
-        prune = Prune(keep=2)
-        prune()
+def test_prune_with_keep_5_keeps_all_if_only_3_releases(minimal_config_dict):
+    """prune with --keep 5 keeps all releases if only 3 exist."""
+    releases_output = f"{DIGESTS['c']}\n{DIGESTS['b']}\n{DIGESTS['a']}"
+    state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
+    calls, mock_output, _confirm = make_prune(
+        minimal_config_dict,
+        [("", True), (state, True), (releases_output, True)],
+        keep=5,
+    )
 
-        # Verify only valid bundles are deleted
-        calls = [call[0][0] for call in mock_conn.run.call_args_list]
-        rm_cmd = [cmd for cmd in calls if "rm -f" in cmd][0]
+    mock_output.info.assert_called_with(
+        "Only 3 releases found. Nothing to prune (keep=5)."
+    )
+    assert not rm_cmds(calls)
 
-        # Should delete oldest valid bundle
-        assert "testapp-1.0.0.pyz" in rm_cmd
 
-        # Should NOT delete non-bundle files or other app bundles
-        assert "README.md" not in rm_cmd
-        assert "backup.tar.gz" not in rm_cmd
-        assert "other-app-1.0.0.pyz" not in rm_cmd
+# ============================================================================
+# Listing Filter
+# ============================================================================
+
+
+def test_prune_ignores_staging_entries(minimal_config_dict):
+    """prune ignores staging directories (.staging-*) in releases/."""
+    releases_output = f".staging-4242\n{DIGESTS['c']}\n{DIGESTS['b']}\n{DIGESTS['a']}"
+    state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
+    calls, mock_output, _confirm = make_prune(
+        minimal_config_dict,
+        [("", True), (state, True), (releases_output, True), ("", True)],
+        keep=2,
+        confirm=True,
+    )
+
+    joined = "\n".join(rm_cmds(calls))
+    assert ".staging-4242" not in joined
+    assert DIGESTS["a"] in joined
+    assert mock_output.success.called
