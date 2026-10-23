@@ -313,9 +313,11 @@ def install_code_into_staging(
         if requirements:
             conn.put(requirements, f"{staging_dir}/requirements.txt")
             pip_cmd += f" -r {staging_q}/requirements.txt"
-        _, ok = conn.run(pip_cmd, warn=True)
+        _pip_out, ok = conn.run(pip_cmd, warn=True)
         if not ok:
-            raise ServerOpsError("uv pip install into staging venv failed")
+            raise ServerOpsError(
+                f"uv pip install into staging venv failed:\n{_pip_out.strip()}"
+            )
         # Group-readable/executable venv, owner-writable (installer PHASE 2
         # permission model), applied BEFORE hashing so recorded modes match.
         _, ok = conn.run(

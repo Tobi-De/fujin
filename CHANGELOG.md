@@ -18,6 +18,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Add fujin cache page to commands reference
 
+### 🎨 Styling
+
+- *(tests)* Lint autofixes in integration tests
+
 ### ⚙️ Miscellaneous Tasks
 
 - Revert uv.lock format churn from local uv runs
