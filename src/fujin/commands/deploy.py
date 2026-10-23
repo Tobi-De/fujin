@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import faulthandler
 import logging
 import os
 import shlex
@@ -261,8 +260,6 @@ class Deploy(BaseCommand):
     ] = False
 
     def __call__(self):
-
-        faulthandler.dump_traceback_later(150, exit=True)
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
         config = self.config

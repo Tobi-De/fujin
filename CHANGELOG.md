@@ -12,6 +12,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🐛 Bug Fixes
 
+- *(release-tree)* Real-deploy quirks — staged-dist install, relocatable venv, group normalize, soft enable, manifest via scp (#76 #77 #79)
 - *(serverops)* Include remote pip output in staging-install failure error
 - *(ops)* Release-tree paths and SSH channel detach across runtime commands
 
