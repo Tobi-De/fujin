@@ -386,16 +386,62 @@ def hash_server_built(
         raise ServerOpsError(f"Undecodable hash output: {exc}") from exc
 
 
+def link_unchanged(
+    conn: Any, staging_dir: str, prev_release_dir: str, paths: dict[str, int]
+) -> tuple[int, list[str]]:
+    """Pre-hardlink unchanged files into *staging* from the previous release.
+
+    ``paths`` maps staging-relative paths to the manifest mode to apply.
+    Best effort: failures are returned and the rsync that follows transfers
+    whatever is missing. Returns ``(linked_count, failed_paths)``.
+
+    This replaces rsync's ``--link-dest``: the 2024 CVE fixes break both
+    symlinked basis paths and whole-file verification of updated files
+    (RsyncProject/rsync#715, exit 23 "update discarded"), so dedup is done
+    explicitly here instead.
+    """
+    if not paths:
+        return 0, []
+
+    body = "\n".join(
+        [
+            "import json, os",
+            "staging = " + repr(staging_dir),
+            "prev = " + repr(prev_release_dir),
+            "entries = json.loads(" + repr(json.dumps(paths)) + ")",
+            "linked, failed = 0, []",
+            "for rel, mode in entries.items():",
+            "    src = os.path.join(prev, rel)",
+            "    dst = os.path.join(staging, rel)",
+            "    try:",
+            "        os.makedirs(os.path.dirname(dst), exist_ok=True)",
+            "        os.link(src, dst)",
+            "        os.chmod(dst, mode)",
+            "        linked += 1",
+            "    except OSError:",
+            "        failed.append(rel)",
+            "print(json.dumps({'linked': linked, 'failed': failed}))",
+        ]
+    )
+    out, ok = conn.run(_python_script(body), warn=True, hide=True)
+    if not ok:
+        return 0, sorted(paths)
+    try:
+        parsed = json.loads(out.strip())
+        return int(parsed["linked"]), sorted(parsed["failed"])
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
+        raise ServerOpsError(f"Undecodable link output: {exc}") from exc
+
+
 def normalize_staging_ownership(conn: Any, staging_dir: str, app_user: str) -> None:
     """Force the staged tree into the deploy permission model.
 
-    rsync's ``--chmod=D755`` normalizes nested dirs to plain 0755, which
-    strips the setgid bit that would give created files the app group — files
-    would land in the deploy user's group and the app user could not read its
-    own ``.env``. Make the group assignment explicit instead of hoping the
-    filesystem did it: group everything ``{app_user}``, make everything
-    group-traversable/readable, and set setgid on every directory so late
-    writes (hooks, runtime) keep inheriting the group.
+    Files pre-hardlinked by ``link_unchanged`` and files created by rsync can
+    otherwise land in the deploy user's group, which would leave the app user
+    unable to read its own ``.env``. Make the group assignment explicit
+    instead of hoping the filesystem did it: group everything ``{app_user}``,
+    make everything group-traversable/readable, and set setgid on every
+    directory so late writes (hooks, runtime) keep inheriting the group.
     """
     staging_q = shlex.quote(staging_dir)
     _, ok = conn.run(

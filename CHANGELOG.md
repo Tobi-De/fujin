@@ -26,6 +26,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### ⚙️ Miscellaneous Tasks
 
+- Drop debug watchdog, keep SIGTERM lock-release handler
 - Revert uv.lock format churn from local uv runs
 
 ## [0.27.1] - 2026-06-25

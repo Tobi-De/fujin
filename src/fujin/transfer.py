@@ -182,18 +182,25 @@ def rsync_to_staging(
     local_dir: str,
     staging_dir: str,
     *,
-    first_deploy: bool,
+    ignore_existing: bool = False,
     compress_zstd: bool = False,
     modes: dict[str, int] | None = None,
     exclude: set[str] | None = None,
 ) -> list[ItemizedChange]:
     """Rsync the assembled bundle tree into ``releases/.staging-*``.
 
-    Hard-links unchanged files against the live release
-    (``--link-dest=../../current``) whenever a previous release exists; first
-    deploys omit it so everything is transferred. The staging dir must
-    already exist on the remote (the caller creates it next to ``releases/``).
-    Returns the parsed itemize output.
+    With ``ignore_existing`` (deploy re-ship), files the deploy pre-hardlinked
+    on the server (unchanged vs the previous release, see
+    ``serverops.link_unchanged``) are skipped; everything else transfers in
+    full. The staging dir must already exist on the remote (the caller
+    creates it next to ``releases/``). Returns the parsed itemize output.
+
+    NOTE: we deliberately do NOT use ``--link-dest``. Rsyncs built with the
+    2024 CVE fixes refuse to open a basis file whose path contains a symlink
+    component (``O_NOFOLLOW`` hardening, RsyncProject/rsync#715) and, even
+    with a symlink-free basis, fail whole-file verification on updated files
+    (exit 23 "update discarded"). Dedup is done explicitly by
+    ``serverops.link_unchanged`` instead.
 
     ``modes`` maps staging-relative paths to permission bits; only used by
     the SCP fallback (rsync ``-p`` preserves modes otherwise).
@@ -233,11 +240,8 @@ def rsync_to_staging(
         cmd.append(f"--exclude={name}")
     if compress_zstd:
         cmd.append("--compress-choice=zstd")
-    if not first_deploy:
-        # --link-dest is resolved relative to the DESTINATION dir
-        # (releases/.staging-<pid>); the live release is at
-        # <app_dir>/current, i.e. ../../current from there.
-        cmd.append("--link-dest=../../current")
+    if ignore_existing:
+        cmd.append("--ignore-existing")
     cmd.extend(
         [
             "-e",
