@@ -241,10 +241,20 @@ def acquire_lock(conn: Any, app_dir: str, *, ttl: int = LOCK_TTL) -> str:
 
 
 def release_lock(conn: Any, app_dir: str, lock: str) -> None:
-    """Release a lock acquired by :func:`acquire_lock`."""
+    """Release a lock acquired by :func:`acquire_lock`.
+
+    Kills the holder's whole process GROUP: the holder bash is a setsid
+    group leader and its ``flock`` child inherits nothing else — killing
+    only the bash would orphan the flock holding the lock forever.
+    """
     if lock.startswith("flock:"):
         pid = lock.removeprefix("flock:")
-        conn.run(f"kill {shlex.quote(pid)} 2>/dev/null; true", warn=True, hide=True)
+        conn.run(
+            f"kill -- -{shlex.quote(pid)} 2>/dev/null;"
+            f" kill {shlex.quote(pid)} 2>/dev/null; true",
+            warn=True,
+            hide=True,
+        )
         conn.run(
             f"rm -f {shlex.quote(f'{app_dir}/{LOCK_PATH}.holder')}",
             warn=True,
@@ -616,15 +626,25 @@ def write_state(conn: Any, app_dir: str, state: State) -> None:
 
 
 def read_current_manifest(conn: Any, app_dir: str) -> m.Manifest | None:
-    """Decode the manifest of the live release; None when absent."""
-    out, ok = conn.run(
-        f"cat {shlex.quote(f'{app_dir}/current/{MANIFEST_PATH}')}",
-        warn=True,
-        hide=True,
-    )
-    if not ok:
-        return None
-    return m.decode_manifest(out)
+    """Decode the manifest of the live release; None when absent.
+
+    Uses SCP (not ``cat``): the merged manifest can be hundreds of KB and
+    big exec-channel reads can trickle forever (see SSH2Connection.get).
+    """
+    import os
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        try:
+            conn.get(f"{app_dir}/current/{MANIFEST_PATH}", tmp_path)
+        except Exception:
+            return None
+        with open(tmp_path, "rb") as fh:
+            return m.decode_manifest(fh.read())
+    finally:
+        os.unlink(tmp_path)
 
 
 # =============================================================================
