@@ -637,3 +637,38 @@ def test_set_envfile_mode_failure(conn):
     conn.run.return_value = ("", False)
     with pytest.raises(serverops.ServerOpsError):
         serverops.set_envfile_mode(conn, "/opt/fujin/myapp/releases/.staging-1")
+
+
+# =============================================================================
+# link_unchanged (explicit dedup, replaces --link-dest)
+# =============================================================================
+
+
+def test_link_unchanged_parses_result(conn):
+    conn.run.return_value = (
+        '{"linked": 2, "failed": ["assets/skip.png"]}',
+        True,
+    )
+    linked, failed = serverops.link_unchanged(
+        conn,
+        "/opt/fujin/myapp/releases/.staging-9",
+        "/opt/fujin/myapp/releases/abbacaba",
+        {"venv/x": 420, "assets/skip.png": 420},
+    )
+    assert (linked, failed) == (2, ["assets/skip.png"])
+    cmd = conn.run.call_args[0][0]
+    assert "os.link(src, dst)" in cmd
+    assert "/opt/fujin/myapp/releases/abbacaba" in cmd
+    assert "staging-9" in cmd
+    assert "assets/skip.png" in cmd  # entries embedded in the script
+
+
+def test_link_unchanged_empty_paths_never_runs(conn):
+    assert serverops.link_unchanged(conn, "/s", "/p", {}) == (0, [])
+    conn.run.assert_not_called()
+
+
+def test_link_unchanged_script_failure_all_failed(conn):
+    conn.run.return_value = ("boom", False)
+    linked, failed = serverops.link_unchanged(conn, "/s", "/p", {"a": 420, "b": 420})
+    assert (linked, failed) == (0, ["a", "b"])

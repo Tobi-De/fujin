@@ -115,7 +115,7 @@ class TestRsyncToStaging:
         local = str(tmp_path / "bundle")
 
         rsync_to_staging(
-            conn, local, "/opt/fujin/myapp/releases/.staging-42", first_deploy=True
+            conn, local, "/opt/fujin/myapp/releases/.staging-42", ignore_existing=False
         )
 
         rsync_cmd = calls[-1]["argv"]
@@ -136,37 +136,49 @@ class TestRsyncToStaging:
         conn = RecordingConn(host=make_host())
 
         rsync_to_staging(
-            conn, str(tmp_path), "/opt/fujin/a/releases/.staging-1", first_deploy=True
+            conn,
+            str(tmp_path),
+            "/opt/fujin/a/releases/.staging-1",
+            ignore_existing=False,
         )
 
         assert calls[-1]["argv"][3] == "--itemize-changes"
         assert "--compress-choice=zstd" not in calls[-1]["argv"]
 
-    def test_link_dest_present_when_not_first_deploy(self, tmp_path, monkeypatch):
+    def test_ignore_existing_when_dedup_prelinked(self, tmp_path, monkeypatch):
         monkeypatch.setattr(transfer.Path, "is_dir", lambda self: True)
         calls = fake_rsync_run(monkeypatch)
         conn = RecordingConn(host=make_host())
 
         rsync_to_staging(
-            conn, str(tmp_path), "/opt/fujin/a/releases/.staging-1", first_deploy=False
+            conn,
+            str(tmp_path),
+            "/opt/fujin/a/releases/.staging-1",
+            ignore_existing=True,
         )
 
         argv = calls[-1]["argv"]
-        assert "--link-dest=../../current" in argv
-        # link-dest must precede the source and destination
-        assert argv.index("--link-dest=../../current") < argv.index("-e")
+        assert "--ignore-existing" in argv
+        # flags must precede the source and destination
+        assert argv.index("--ignore-existing") < argv.index("-e")
+        # no --link-dest ever: the CVE-hardened receiver chokes on basis files
+        assert all(not a.startswith("--link-dest") for a in argv)
 
-    def test_link_dest_omitted_on_first_deploy(self, tmp_path, monkeypatch):
+    def test_no_ignore_existing_by_default(self, tmp_path, monkeypatch):
         monkeypatch.setattr(transfer.Path, "is_dir", lambda self: True)
         calls = fake_rsync_run(monkeypatch)
         conn = RecordingConn(host=make_host())
 
         rsync_to_staging(
-            conn, str(tmp_path), "/opt/fujin/a/releases/.staging-1", first_deploy=True
+            conn,
+            str(tmp_path),
+            "/opt/fujin/a/releases/.staging-1",
+            ignore_existing=False,
         )
 
         assert all(
-            not a.startswith("--link-dest") for a in calls[-1]["argv"]
+            not a.startswith("--ignore-existing") and not a.startswith("--link-dest")
+            for a in calls[-1]["argv"]
         )  # first deploy
 
     def test_key_option_included_when_key_filename(self, tmp_path, monkeypatch):
@@ -175,7 +187,10 @@ class TestRsyncToStaging:
         conn = RecordingConn(host=make_host(key_filename="~/.ssh/id_ed25519"))
 
         rsync_to_staging(
-            conn, str(tmp_path), "/opt/fujin/a/releases/.staging-1", first_deploy=True
+            conn,
+            str(tmp_path),
+            "/opt/fujin/a/releases/.staging-1",
+            ignore_existing=False,
         )
 
         argv = calls[-1]["argv"]
@@ -193,7 +208,7 @@ class TestRsyncToStaging:
             conn,
             str(tmp_path),
             "/opt/fujin/with space/releases/.staging-9",
-            first_deploy=True,
+            ignore_existing=False,
         )
         argv = calls[-1]["argv"]
         # spaces in remote transfer spec are passed wholesale (rsync remote
@@ -207,7 +222,7 @@ class TestRsyncToStaging:
         conn = RecordingConn(host=make_host())
 
         result = rsync_to_staging(
-            conn, str(tmp_path), "/x/releases/.staging-1", first_deploy=True
+            conn, str(tmp_path), "/x/releases/.staging-1", ignore_existing=False
         )
 
         assert result == SAMPLE_PARSED
@@ -216,7 +231,7 @@ class TestRsyncToStaging:
         monkeypatch.setattr(transfer.Path, "is_dir", lambda self: False)
         conn = RecordingConn(host=make_host())
         with pytest.raises(TransferError) as exc_info:
-            rsync_to_staging(conn, "/nowhere", "/x/.staging-1", first_deploy=True)
+            rsync_to_staging(conn, "/nowhere", "/x/.staging-1", ignore_existing=False)
         assert "missing" in exc_info.value.message
 
     def test_local_rsync_missing(self, tmp_path, monkeypatch):
@@ -224,7 +239,9 @@ class TestRsyncToStaging:
         monkeypatch.setattr(transfer, "_rsync_installed_locally", lambda: False)
         conn = RecordingConn(host=make_host())
         with pytest.raises(RsyncUnavailableError):
-            rsync_to_staging(conn, str(tmp_path), "/x/.staging-1", first_deploy=True)
+            rsync_to_staging(
+                conn, str(tmp_path), "/x/.staging-1", ignore_existing=False
+            )
 
     def test_remote_rsync_missing_actionable_error(self, tmp_path, monkeypatch):
         monkeypatch.setattr(transfer.Path, "is_dir", lambda self: True)
@@ -235,7 +252,9 @@ class TestRsyncToStaging:
         )
         calls = fake_rsync_run(monkeypatch)
         with pytest.raises(RsyncUnavailableError) as exc_info:
-            rsync_to_staging(conn, str(tmp_path), "/x/.staging-1", first_deploy=True)
+            rsync_to_staging(
+                conn, str(tmp_path), "/x/.staging-1", ignore_existing=False
+            )
         assert "apt install rsync" in exc_info.value.message
         assert calls == []  # never invoked rsync locally
 
@@ -249,7 +268,10 @@ class TestRsyncToStaging:
         conn = RecordingConn(host=make_host(password="pw"))
 
         result = rsync_to_staging(
-            conn, str(root), "/opt/fujin/myapp/releases/.staging-3", first_deploy=False
+            conn,
+            str(root),
+            "/opt/fujin/myapp/releases/.staging-3",
+            ignore_existing=False,
         )
 
         assert calls == []  # rsync never invoked
@@ -276,7 +298,7 @@ class TestRsyncToStaging:
             conn,
             str(root),
             "/opt/fujin/myapp/releases/.staging-5",
-            first_deploy=True,
+            ignore_existing=False,
             modes={".env": 0o640},
         )
 
@@ -292,7 +314,9 @@ class TestRsyncToStaging:
         )
         conn = RecordingConn(host=make_host())
         with pytest.raises(HostUnreachableError):
-            rsync_to_staging(conn, str(tmp_path), "/x/.staging-1", first_deploy=True)
+            rsync_to_staging(
+                conn, str(tmp_path), "/x/.staging-1", ignore_existing=False
+            )
 
     def test_rsync_generic_failure(self, tmp_path, monkeypatch):
         monkeypatch.setattr(transfer.Path, "is_dir", lambda self: True)
@@ -301,7 +325,9 @@ class TestRsyncToStaging:
         )
         conn = RecordingConn(host=make_host())
         with pytest.raises(TransferError) as exc_info:
-            rsync_to_staging(conn, str(tmp_path), "/x/.staging-1", first_deploy=True)
+            rsync_to_staging(
+                conn, str(tmp_path), "/x/.staging-1", ignore_existing=False
+            )
         assert not isinstance(exc_info.value, HostUnreachableError)
         assert "exit code 23" in exc_info.value.message
 

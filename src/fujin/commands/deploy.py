@@ -28,6 +28,7 @@ from fujin.config import get_git_short_hash
 from fujin.errors import DeploymentError
 from fujin.formatting import safe_format
 from fujin.secrets import resolve_secrets
+from rich.prompt import Confirm
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,23 @@ def _socket_timer_unit_names(manifest: m.Manifest) -> set[str]:
         if manifest.entries[path].kind is m.EntryKind.UNIT
         and _unit_rel_name(path).endswith((".socket", ".timer"))
     }
+
+
+def _resolve_live_digest(conn, app_dir: str, state: store.State | None) -> str | None:
+    """Digest of the release the ``current`` symlink actually points at.
+
+    The symlink is the source of truth (state.json is a cache that can be
+    stale); falls back to ``state.current`` when the symlink is missing.
+    """
+    out, ok = conn.run(
+        f"readlink {shlex.quote(app_dir + '/current')}", warn=True, hide=True
+    )
+    target = out.strip() if ok and out.strip() else ""
+    if target:
+        digest = target.rstrip("/").rsplit("/", 1)[-1]
+        if len(digest) == 64 and all(c in "0123456789abcdef" for c in digest):
+            return digest
+    return state.current if state and state.current else None
 
 
 def collect_local_units(
@@ -397,7 +415,7 @@ class Deploy(BaseCommand):
         # The live release's manifest is read BEFORE any swap: it is the diff
         # base for the restart set and the rollback target on failure.
         prev_manifest = serverops.read_current_manifest(conn, app_dir)
-        live_digest = state.current if state else None
+        live_digest = _resolve_live_digest(conn, app_dir, state)
         first_deploy = live_digest is None and prev_manifest is None
 
         remote_staging = f"{app_dir}/releases/.staging-{os.getpid()}"
@@ -405,6 +423,36 @@ class Deploy(BaseCommand):
 
         mfile = m.CADDYFILE_PATH
         try:
+            # Dedup: hardlink every client-known entry that is byte-identical
+            # (same sha256) to the live release. rsync's own --link-dest is
+            # unusable (RsyncProject/rsync#715), so this is explicit.
+            unchanged: dict[str, int] = {}
+            if prev_manifest is not None and live_digest:
+                for path, entry in client_manifest.entries.items():
+                    prev_entry = prev_manifest.entries.get(path)
+                    if (
+                        prev_entry is not None
+                        and prev_entry.sha256 == entry.sha256
+                        and not path.startswith("venv/")
+                    ):
+                        unchanged[path] = entry.mode
+            if unchanged:
+                linked, failed = serverops.link_unchanged(
+                    conn,
+                    remote_staging,
+                    f"{app_dir}/releases/{live_digest}",
+                    unchanged,
+                )
+                if failed:
+                    logger.info(
+                        "Hardlink dedup missed %d file(s); rsync will transfer them",
+                        len(failed),
+                    )
+                else:
+                    self.output.info(
+                        f"Deduped {linked} unchanged file(s) against the live release."
+                    )
+
             self.output.info("Uploading release tree...")
             # ``built.json`` is local build-cache bookkeeping, not release
             # content: nothing in the tree references it and it would land
@@ -414,7 +462,7 @@ class Deploy(BaseCommand):
                 conn,
                 str(staging_dir),
                 remote_staging,
-                first_deploy=first_deploy,
+                ignore_existing=bool(unchanged),
                 compress_zstd=self.compress_zstd,
                 modes={
                     path: entry.mode for path, entry in client_manifest.entries.items()
@@ -570,7 +618,12 @@ class Deploy(BaseCommand):
         env-fed service units, code changes restart all app units; sockets and
         timers restart only when their own file changed; oneshots excluded."""
         if force_full_restart:
-            unit_names: Iterable[str] = _service_unit_names(final_manifest)
+            # Full restart covers every app unit incl. sockets/timers (a
+            # restarted timer starts; the old installer did the same).
+            unit_names: Iterable[str] = sorted(
+                set(_service_unit_names(final_manifest))
+                | _socket_timer_unit_names(final_manifest)
+            )
         else:
             unit_names = store.restart_set(
                 prev_manifest,
@@ -770,8 +823,6 @@ class Deploy(BaseCommand):
         self._auto_rollback(conn, prev_digest)
 
     def _confirm_rollback(self) -> bool:
-        from rich.prompt import Confirm
-
         try:
             return bool(
                 Confirm.ask(

@@ -174,6 +174,8 @@ def setup_deploy(
         fujin.serverops, "read_current_manifest", lambda _c, _a: prev_manifest
     )
     monkeypatch.setattr(fujin.serverops, "install_code_into_staging", MagicMock())
+    link_unchanged = MagicMock(return_value=(0, []))
+    monkeypatch.setattr(fujin.serverops, "link_unchanged", link_unchanged)
     monkeypatch.setattr(fujin.serverops, "hash_server_built", lambda *a, **k: {})
     install_units = MagicMock()
     monkeypatch.setattr(fujin.serverops, "install_units", install_units)
@@ -267,6 +269,7 @@ def setup_deploy(
         "enable_and_start": enable_and_start,
         "stop_and_disable": stop_and_disable,
         "cleanup_staging": cleanup,
+        "link_unchanged": link_unchanged,
         "released": released,
     }
     return cmd, spies
