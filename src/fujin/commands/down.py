@@ -13,6 +13,10 @@ from fujin.commands import BaseCommand
 from fujin import connection
 
 
+def _join_quoted(names: list[str]) -> str:
+    return " ".join(shlex.quote(n) for n in names)
+
+
 @cappa.command(
     help="Tear down the project by stopping services and cleaning up resources"
 )
@@ -56,12 +60,22 @@ class Down(BaseCommand):
             install_dir = shlex.quote(self.config.install_dir)
             res, ok = conn.run(f"cat {install_dir}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
+
+            # Stop and disable declared units (legacy uninstaller did this;
+            # release-tree apps have no uninstall script).
+            units = [u for u in self.config.systemd_units if u]
+            if units:
+                conn.run(
+                    f"sudo systemctl disable --now {_join_quoted(units)}",
+                    warn=True,
+                    pty=True,
+                )
+
             bundle_path = (
                 f"{install_dir}/.versions/{self.config.app_name}-{version}.pyz"
             )
 
             _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
-
             uninstall_ok = False
             if bundle_exists:
                 verbose_flag = f" --verbose {self.verbose}" if self.verbose > 0 else ""

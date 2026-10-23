@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### 🚀 Features
+
+- *(deploy)* Content-addressed release tree with manifest store and build cache
+
 ## [0.27.1] - 2026-06-25
 
 ### 🐛 Bug Fixes

@@ -130,9 +130,10 @@ class Config(msgspec.Struct, kw_only=True, dict=True):
 
     @property
     def app_bin(self) -> str:
+        """Path (relative to ``app_dir``) of the app binary in the release tree."""
         if self.installation_mode == InstallationMode.PY_PACKAGE:
-            return f".install/.venv/bin/{self.app_name}"
-        return f".install/{self.app_name}"
+            return f"current/venv/bin/{self.app_name}"
+        return f"current/bin/{self.app_name}"
 
     @property
     def local_version(self) -> str:

@@ -89,6 +89,26 @@ def test_bootstrap_creates_infrastructure(
     with patch("fujin.config.Config.read", return_value=config):
         server.bootstrap()
 
+    # Verify the release-tree layout: setgid dirs + store lock
+    assert_dir_exists(vps_container["name"], "/opt/fujin/testapp/releases")
+    assert_dir_exists(vps_container["name"], "/opt/fujin/testapp/store")
+    assert_dir_exists(vps_container["name"], "/opt/fujin/testapp/shared")
+    _, ok = exec_in_container(
+        vps_container["name"], "test -f /opt/fujin/testapp/store/lock"
+    )
+    assert ok, "store/lock does not exist after bootstrap"
+    for path in (
+        "/opt/fujin/testapp",
+        "/opt/fujin/testapp/releases",
+        "/opt/fujin/testapp/store",
+    ):
+        stdout, _ = exec_in_container(vps_container["name"], f"stat -c '%a' {path}")
+        assert stdout == "2755", f"{path} should be setgid 2755, got: {stdout}"
+    stdout, _ = exec_in_container(
+        vps_container["name"], "stat -c '%a' /opt/fujin/testapp/shared"
+    )
+    assert stdout == "2775", f"shared/ should be 2775, got: {stdout}"
+
     # Verify everything still works after second run
     assert_dir_exists(vps_container["name"], "/opt/fujin")
     stdout, success = exec_in_container(vps_container["name"], "getent group fujin")

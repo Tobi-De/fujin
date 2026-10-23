@@ -106,7 +106,7 @@ Create standard systemd service files with Fujin-specific variable substitution:
     Group=fujin
     WorkingDirectory={app_dir}
     EnvironmentFile={app_dir}/.env
-    ExecStart={app_dir}/.venv/bin/gunicorn myapp.wsgi:app --bind localhost:8000
+    ExecStart={app_dir}/current/venv/bin/gunicorn myapp.wsgi:app --bind localhost:8000
 
     [Install]
     WantedBy=multi-user.target
@@ -198,7 +198,7 @@ Hook Phases
         ]
 
 **post-install**
-    Runs after the package is installed but before systemd services are started. Executes as ``app_user`` via ``sudo -u``, within the app's environment (``.appenv`` sourced, so the app binary is on ``PATH``). Use for database migrations. **Failure is fatal** — the deploy stops.
+    Runs after the package is installed but before systemd services are started. Runs with the release's environment (``.env``) sourced and the working directory set to the new release directory. Use for database migrations. **Failure is fatal** — the deploy stops.
 
     .. code-block:: toml
         :caption: fujin.toml
@@ -209,7 +209,7 @@ Hook Phases
         ]
 
 **post-start**
-    Runs after services are confirmed running, before Caddy configuration. Executes as ``app_user`` within the app environment. Use for static file collection, cache warming, or health checks. **Failure is non-fatal** — services are already running, a warning is logged but the deploy succeeds.
+    Runs after services are confirmed running, before Caddy configuration. Runs with the live release's environment sourced. Use for static file collection, cache warming, or health checks. **Failure is non-fatal** — services are already running, a warning is logged but the deploy succeeds.
 
     .. code-block:: toml
         :caption: fujin.toml
@@ -225,10 +225,12 @@ Available Variables
 Hook commands support the same template variables as systemd unit files:
 
 - ``{app_name}`` - Application name
-- ``{app_dir}`` - Full path to application directory (``/opt/fujin/{app_name}``)
+- ``{app_dir}`` - Live release directory during ``post_install``/``post_start``
+  (``/opt/fujin/{app_name}/releases/<digest>``), or the app directory while
+  the old release is live (``pre_install``)
 - ``{app_user}`` - User running the app
 - ``{version}`` - Current version being deployed
-- ``{install_dir}`` - Path to ``.install`` directory
+- ``{install_dir}`` - Legacy deployment-infrastructure path (``.install``); prefer ``{app_dir}/current/...`` for the live release
 
 Complete Example
 ~~~~~~~~~~~~~~~~
@@ -467,7 +469,7 @@ This is a minimal working example for a Python web application:
     Group=fujin
     WorkingDirectory={app_dir}
     EnvironmentFile={app_dir}/.env
-    ExecStart={app_dir}/.venv/bin/gunicorn myapp.wsgi:app --bind localhost:8000
+    ExecStart={app_dir}/current/venv/bin/gunicorn myapp.wsgi:app --bind localhost:8000
 
     NoNewPrivileges=true
     PrivateTmp=true
