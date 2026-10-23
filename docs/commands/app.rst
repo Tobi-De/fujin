@@ -225,7 +225,7 @@ Open an interactive shell on the server in your app's directory.
       bookstore@server:/opt/fujin/bookstore$ bookstore createsuperuser
       bookstore@server:/opt/fujin/bookstore$ bookstore migrate
 
-   The wrapper function in ``.appenv`` ensures these commands have the correct permissions without needing ``sudo`` manually.
+   The command runs as the app user with the release environment sourced, so it has the correct permissions without manual ``sudo``.
 
 This is useful for:
 
@@ -270,7 +270,7 @@ This runs commands via your application binary, equivalent to:
 
 .. code-block:: bash
 
-   cd /path/to/app && source .appenv && myapp your-command
+   cd /path/to/app && source current/.env && myapp your-command
 
 **Examples:**
 

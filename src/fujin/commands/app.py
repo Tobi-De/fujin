@@ -56,14 +56,14 @@ class App(BaseCommand):
                 names.append(timer_name)
 
         with connection.connection(host=self.selected_host) as conn:
-            shlex.quote(self.config.app_dir)
-            fujin_dir = shlex.quote(self.config.install_dir)
+            app_dir_q = shlex.quote(self.config.app_dir)
             remote_version, _ = conn.run(
-                f"cat {fujin_dir}/.version 2>/dev/null || echo N/A",
+                f'grep -o \'"version":"[^"]*"\' {app_dir_q}/current/manifest.json'
+                " 2>/dev/null | head -1 | cut -d'\"' -f4 || echo N/A",
                 warn=True,
                 hide=True,
             )
-            remote_version = remote_version.strip()
+            remote_version = remote_version.strip() or "N/A"
 
             statuses_output, _ = conn.run(
                 f"sudo systemctl is-active {' '.join(names)} 2>/dev/null || true",
@@ -248,7 +248,7 @@ class App(BaseCommand):
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
         full_remote_cmd = (
-            f"cd {self.config.app_dir} && source .install/.appenv && {command}"
+            f"cd {self.config.app_dir} && source current/.env && {command}"
         )
         ssh_cmd.extend([ssh_target, full_remote_cmd])
         subprocess.run(ssh_cmd)
@@ -259,7 +259,7 @@ class App(BaseCommand):
         command: Annotated[str, cappa.Arg(help="Command to execute")],
     ):
         with connection.connection(host=self.selected_host) as conn:
-            cmd = f"cd {self.config.app_dir} && source .install/.appenv && {self.config.app_bin} {command}"
+            cmd = f"cd {self.config.app_dir} && source current/.env && {self.config.app_bin} {command}"
             conn.run(
                 f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
                 pty=True,
@@ -435,8 +435,7 @@ class App(BaseCommand):
                 return
 
             if name == "env":
-                fujin_dir = shlex.quote(self.config.install_dir)
-                env_path = f"{fujin_dir}/.env"
+                env_path = f"{self.config.app_dir}/current/.env"
                 self.output.output(f"[cyan]# {env_path}[/cyan]")
                 print()
                 conn.run(f"cat {env_path}", warn=True)
@@ -650,7 +649,7 @@ class App(BaseCommand):
         # 2. Count changed
         if needs_conversion:
             self.output.info(
-                f"\nNext steps:\n  1. Deploy to apply changes: fujin deploy"
+                "\nNext steps:\n  1. Deploy to apply changes: fujin deploy"
             )
         elif old_replica_count != count and old_is_template:
             self._scale_on_server(service, old_replica_count, count)
@@ -677,7 +676,7 @@ class App(BaseCommand):
                 if success:
                     self.output.success(f"Started {len(new_instances)} new instance(s)")
                 else:
-                    self.output.error(f"Failed to start new instances")
+                    self.output.error("Failed to start new instances")
 
             elif new_count < old_count:
                 # Scaling down - stop old instances
@@ -695,7 +694,7 @@ class App(BaseCommand):
                 if success:
                     self.output.success(f"Stopped {len(removed_instances)} instance(s)")
                 else:
-                    self.output.error(f"Failed to stop instances")
+                    self.output.error("Failed to stop instances")
 
     def _update_replicas_config(self, service_name: str, count: int | None):
         fujin_toml = Path("fujin.toml")

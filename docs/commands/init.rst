@@ -89,10 +89,10 @@ The Django profile adds ``ExecStartPre`` directives for migrations and static fi
 
    [Service]
    # Run migrations and collect static files before starting
-   ExecStartPre={app_dir}/.venv/bin/myapp migrate
-   ExecStartPre={app_dir}/.venv/bin/myapp collectstatic --no-input
+   ExecStartPre={app_dir}/current/venv/bin/myapp migrate
+   ExecStartPre={app_dir}/current/venv/bin/myapp collectstatic --no-input
    ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/ {app_dir}/staticfiles/'
-   ExecStart={app_dir}/.venv/bin/gunicorn myapp.wsgi:application --bind 0.0.0.0:8000
+   ExecStart={app_dir}/current/venv/bin/gunicorn myapp.wsgi:application --bind 0.0.0.0:8000
 
 The Caddyfile includes static file handling:
 

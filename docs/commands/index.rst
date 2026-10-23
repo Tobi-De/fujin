@@ -35,6 +35,8 @@ Quick Reference
      - Tear down the project by stopping services and cleaning up
    * - :doc:`prune`
      - Prune old artifacts, keeping only specified number of versions
+   * - :doc:`cache`
+     - Manage the local build cache
    * - :doc:`migrate`
      - Migrate from older Fujin configuration formats
    * - :doc:`audit`
@@ -53,5 +55,6 @@ Quick Reference
    rollback
    down
    prune
+   cache
    migrate
    audit

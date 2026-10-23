@@ -92,7 +92,7 @@ class SSH2Connection:
         env_prefix = (
             f"/home/{self.host.user}/.cargo/bin:/home/{self.host.user}/.local/bin:$PATH"
         )
-        full_command = f'export PATH="{env_prefix}" && {cwd_prefix}{command}'
+        full_command = f'export PATH="{env_prefix}"; {cwd_prefix}{command}'
         logger.debug(f"Running command: {full_command}")
 
         watchers: tuple[re.Pattern[str], ...] | None = None

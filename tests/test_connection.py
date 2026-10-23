@@ -55,7 +55,7 @@ def test_command_includes_path_export(connection, mock_ssh_components):
     connection.run("echo hello", hide=True)
 
     # Should prepend PATH with .cargo/bin and .local/bin
-    expected = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && echo hello'
+    expected = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"; echo hello'
     mock_channel.execute.assert_called_with(expected)
 
 
@@ -65,7 +65,7 @@ def test_command_includes_cd_when_in_directory(connection, mock_ssh_components):
     connection.cwd = "/var/www"
     connection.run("ls", hide=True)
 
-    expected = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && cd /var/www && ls'
+    expected = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"; cd /var/www && ls'
     mock_channel.execute.assert_called_with(expected)
 
 
@@ -84,7 +84,7 @@ def test_cd_context_manager_with_absolute_and_relative_paths(
         connection.run("ls", hide=True)
         assert connection.cwd == "/var/www"
 
-        expected_1 = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && cd /var/www && ls'
+        expected_1 = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"; cd /var/www && ls'
         mock_channel.execute.assert_called_with(expected_1)
 
         # Relative path appends to current cwd
@@ -92,13 +92,13 @@ def test_cd_context_manager_with_absolute_and_relative_paths(
             connection.run("touch index.html", hide=True)
             assert connection.cwd == "/var/www/html"
 
-            expected_2 = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && cd /var/www/html && touch index.html'
+            expected_2 = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"; cd /var/www/html && touch index.html'
             mock_channel.execute.assert_called_with(expected_2)
 
     # Should restore to empty cwd after exiting context
     assert connection.cwd == ""
     connection.run("whoami", hide=True)
-    expected_3 = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && whoami'
+    expected_3 = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"; whoami'
     mock_channel.execute.assert_called_with(expected_3)
 
 
@@ -110,7 +110,7 @@ def test_cd_with_relative_path_from_empty_cwd(connection, mock_ssh_components):
         assert connection.cwd == "projects"
         connection.run("ls", hide=True)
 
-        expected = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH" && cd projects && ls'
+        expected = 'export PATH="/home/testuser/.cargo/bin:/home/testuser/.local/bin:$PATH"; cd projects && ls'
         mock_channel.execute.assert_called_with(expected)
 
 
