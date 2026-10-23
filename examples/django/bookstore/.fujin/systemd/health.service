@@ -10,10 +10,10 @@ Type=oneshot
 User={app_user}
 Group={app_user}
 WorkingDirectory={app_dir}
-EnvironmentFile={install_dir}/.env
+EnvironmentFile={app_dir}/current/.env
 
 # Main command - adjust to match your application
-ExecStart={install_dir}/.venv/bin/bookstore health
+ExecStart={app_dir}/current/venv/bin/bookstore health
 
 # Security hardening
 NoNewPrivileges=true

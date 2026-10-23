@@ -1,11 +1,11 @@
 # Caddyfile for {app_name}
 # Learn more: https://caddyserver.com/docs/caddyfile
 
-book.144.91.117.80.nip.io {
+net.oluwatobi.dev {
 
     # Serve static files
     handle_path /static/* {
-        root * /var/www/bookstore/staticfiles
+        root * {app_dir}/shared/staticfiles
         file_server
     }
 

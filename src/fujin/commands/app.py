@@ -494,14 +494,45 @@ class App(BaseCommand):
         return du
 
     def _get_runtime_units(self, names: list[str] | None) -> list[str]:
-        """Get runtime units for start/stop/restart/logs."""
+        """Get runtime units for start/stop/restart/logs.
+
+        Accepts bare service names (``worker`` → every configured instance),
+        suffix-qualified names (``worker.service``, ``web.socket``), and
+        instance-qualified names (``worker@2``, ``worker@2.service`` → only
+        that instance).
+        """
         if not names:
             return self.config.systemd_units
 
         units = []
         for name in names:
-            du = self._find_unit(name)
-            units.extend(du.service_instances())
+            base, at, instance = name.partition("@")
+            if at:
+                du = self._find_unit(base.removesuffix(".service"))
+                if not du.is_template:
+                    raise cappa.Exit(
+                        f"Service '{du.name}' is not a template; use '{du.name}'"
+                        " to target all instances",
+                        code=1,
+                    )
+                try:
+                    index = int(instance.removesuffix(".service"))
+                except ValueError:
+                    raise cappa.Exit(
+                        f"Invalid instance '{instance}' for '{du.name}'; expected"
+                        f" '{du.name}@<1-{du.replicas}>'",
+                        code=1,
+                    ) from None
+                if not 1 <= index <= du.replicas:
+                    raise cappa.Exit(
+                        f"Unknown instance '{du.name}@{index}';"
+                        f" '{du.name}' has {du.replicas} instance(s)",
+                        code=1,
+                    )
+                units.append(f"{self.config.app_name}-{du.name}@{index}.service")
+            else:
+                du = self._find_unit(name)
+                units.extend(du.service_instances())
         return units
 
     def _get_template_units(self, name: str) -> list[str]:
