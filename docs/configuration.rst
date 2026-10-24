@@ -291,6 +291,45 @@ Fujin supports deploying to multiple hosts (servers) from a single configuration
 
    Without ``-H``, commands target the first host by default.
 
+Per-Host Overrides
+~~~~~~~~~~~~~~~~~~
+
+Beyond connection details, hosts can differ in settings such as replica counts, secrets, or versions. Fujin resolves configuration with a layered merge; later layers win:
+
+1. Built-in schema defaults.
+2. ``fujin.toml`` — the primary source, with hosts defined in ``[[hosts]]`` (list form) or ``[hosts.<name>]`` (map form).
+3. Per-host override files under ``.fujin/hosts/<name>.toml``.
+
+Merge semantics are simple: scalars replace, tables (maps) merge key-by-key recursively, and arrays replace entirely (no appending or delta semantics).
+
+**Host fields vs app-level keys:** Keys in the override file that are valid host fields (e.g. ``address``, ``port``) override only that host. Other app-level keys (e.g. ``replicas``, ``versions_to_keep``, ``hooks``) override the app configuration **when that host is selected** (e.g. with ``fujin deploy -H staging``). Overrides never leak into a different host's config.
+
+**Map form:** Instead of the ``[[hosts]]`` array, hosts may be declared as TOML tables keyed by name (a TOML file cannot mix the two forms):
+
+.. code-block:: toml
+
+   [hosts.staging]
+   address = "staging.example.com"
+   user = "deploy"
+   port = 2200
+
+**Override file:** ``.fujin/hosts/<name>.toml`` is machine-local (gitignore it) and holds partial overrides for the host named ``<name>``. Host-level keys live at the top level; app-level and additional host fields may also be nested under ``[hosts.<name>]``:
+
+.. code-block:: toml
+
+   # .fujin/hosts/staging.toml
+
+   # host-level overrides
+   port = 2200
+   native_ssh_auth = true
+
+   # app-level overrides (apply only when this host is selected)
+   replicas = { web = 1, worker = 2 }
+
+.. important::
+
+   An override file whose name does not match any host defined in ``fujin.toml`` hard-errors, as does passing ``-H <unknown>``. This protects against typos. Unknown top-level keys anywhere in the configuration also hard-error (strict validation).
+
 Host Fields
 ~~~~~~~~~~~
 

@@ -8,6 +8,7 @@ from typing import Annotated
 import cappa
 
 from fujin.config import Config, HostConfig
+from fujin.redaction import install_log_filter, redact
 
 _logging_configured = False
 
@@ -55,7 +56,7 @@ class BaseCommand:
 
     @cached_property
     def config(self) -> Config:
-        return Config.read()
+        return Config.read(self.host)
 
     @cached_property
     def deployed_units(self) -> list:
@@ -77,36 +78,40 @@ class MessageFormatter:
 
     def __init__(self, output: cappa.Output):
         self._output = output
+        # Every command's user-facing output goes through a
+        # MessageFormatter; attaching the filter here covers logging on all
+        # command paths as well (deploy, rollback, app logs, ...).
+        install_log_filter()
 
     def success(self, message: str):
         """Print success message (green)."""
-        self._output.output(f"[green]{message}[/green]")
+        self._output.output(f"[green]{redact(message)}[/green]")
 
     def error(self, message: str):
         """Print error message (red)."""
-        self._output.output(f"[red]{message}[/red]")
+        self._output.output(f"[red]{redact(message)}[/red]")
 
     def warning(self, message: str):
         """Print warning message (yellow)."""
-        self._output.output(f"[yellow]{message}[/yellow]")
+        self._output.output(f"[yellow]{redact(message)}[/yellow]")
 
     def info(self, message: str):
         """Print info/progress message (blue)."""
-        self._output.output(f"[blue]{message}[/blue]")
+        self._output.output(f"[blue]{redact(message)}[/blue]")
 
     def critical(self, message: str):
         """Print critical message (bold red)."""
-        self._output.output(f"[bold red]{message}[/bold red]")
+        self._output.output(f"[bold red]{redact(message)}[/bold red]")
 
     def output(self, message: str):
         """Print plain message (for custom formatting)."""
-        self._output.output(message)
+        self._output.output(redact(message))
 
     def link(self, url: str, text: str | None = None) -> str:
         """Format clickable URL link (returns string for inline use)."""
-        display = text or url
+        display = redact(text or url)
         return f"[link={url}]{display}[/link]"
 
     def dim(self, message: str) -> str:
         """Format dimmed/secondary text (returns string for inline use)."""
-        return f"[dim]{message}[/dim]"
+        return f"[dim]{redact(message)}[/dim]"

@@ -26,7 +26,8 @@ from fujin.commands import BaseCommand
 from fujin.config import get_git_short_hash
 from fujin.errors import DeploymentError
 from fujin.formatting import safe_format
-from fujin.secrets import resolve_secrets
+from fujin.redaction import clear_secrets, redact, register_secrets
+from fujin.secrets import env_values, resolve_secrets, secret_refs
 from rich.prompt import Confirm
 
 logger = logging.getLogger(__name__)
@@ -151,18 +152,38 @@ class Deploy(BaseCommand):
         host = self.selected_host
         app_dir = config.app_dir
 
+        # A fresh deploy starts with an empty redaction registry; resolved
+        # secrets are registered right after resolution below.
+        clear_secrets()
+
         logger.debug("Starting deployment for %s", config.app_name)
         logger.debug("Target host: %s", host.address)
 
         if config.secret_config:
             self.output.info("Resolving secrets from configuration...")
             parsed_env = resolve_secrets(host.env_content, config.secret_config)
+            # Track every resolved secret value so all output paths render it
+            # as `<$REF>` instead of the raw value (never registered in the
+            # build cache; #77).
+            secret_aliases = secret_refs(host.env_content)
+            register_secrets(env_values(parsed_env), secret_aliases)
         else:
             parsed_env = host.env_content
+            secret_aliases = {}
 
         context = build._interpolation_context(config, host)
-        resolved_env, _ = safe_format(parsed_env, **context)
-        self._fail_closed_on_unresolved_secrets(resolved_env)
+        resolved_env, unresolved = safe_format(parsed_env, **context)
+        if unresolved:
+            self.output.error(
+                f"Unresolved template variables in env file:"
+                f" {', '.join(sorted(unresolved))}."
+            )
+            raise DeploymentError(
+                "Unresolved template variables in env file:"
+                f" {', '.join(sorted(unresolved))}. Deployment aborted"
+                " (fail-closed)."
+            )
+        self._fail_closed_on_unresolved_secrets(resolved_env, secret_aliases)
 
         with connection.connection(host=host, compress=False) as conn:
             self._notice_old_layout(conn)
@@ -188,9 +209,16 @@ class Deploy(BaseCommand):
         app_dir = config.app_dir
 
         self.output.info("Building application ...")
-        result = build.run_build(
-            config, no_cache=self.no_cache, host=self.selected_host
-        )
+        try:
+            result = build.run_build(
+                config, no_cache=self.no_cache, host=self.selected_host
+            )
+        except Exception as exc:
+            raw = str(exc.message) if isinstance(exc, DeploymentError) else str(exc)
+            wrapped = redact(raw)
+            # If the value only lived in the original exception's message,
+            # the cause chain must not carry it into tracebacks either.
+            raise DeploymentError(wrapped) from (exc if wrapped == raw else None)
         files = dict(result.files)
 
         # The rendered .env is deploy-time state (kind ``env``), never
@@ -371,7 +399,9 @@ class Deploy(BaseCommand):
                 conn, remote_staging, m.manifest_to_dict(final_manifest)
             )
             if not verify.ok:
-                raise DeploymentError(transfer.verify_report(remote_staging, verify))
+                raise DeploymentError(
+                    redact(transfer.verify_report(remote_staging, verify))
+                )
 
             # Pre-install hooks: the old release is still live.
             self._run_hooks(conn, "pre_install", context, release_path=None)
@@ -427,12 +457,18 @@ class Deploy(BaseCommand):
         except cappa.Exit:
             transfer.cleanup_staging(conn, remote_staging)
             raise
-        except DeploymentError:
+        except DeploymentError as exc:
             transfer.cleanup_staging(conn, remote_staging)
-            raise
+            wrapped_msg = str(exc.message)
+            raise DeploymentError(redact(wrapped_msg)) from (
+                exc if redact(wrapped_msg) == wrapped_msg else None
+            )
         except Exception as exc:
             transfer.cleanup_staging(conn, remote_staging)
-            raise DeploymentError(f"Deployment failed: {exc}") from exc
+            wrapped_msg = f"Deployment failed: {exc}"
+            raise DeploymentError(redact(wrapped_msg)) from (
+                exc if redact(wrapped_msg) == wrapped_msg else None
+            )
 
         self.output.success("Deployment completed successfully!")
         domain = config.get_domain_name()
@@ -875,7 +911,19 @@ class Deploy(BaseCommand):
             }
 
         for raw in commands:
-            cmd, _unresolved = safe_format(raw, **context)
+            cmd, unresolved_vars = safe_format(raw, **context)
+            if unresolved_vars:
+                # Fail closed on interpolation gaps: an unresolved variable
+                # in a hook command is a broken template, not something to
+                # run with a literal ``{name}`` placeholder in it. (Secret
+                # values are never interpolated into hook commands.) Note:
+                # raise before any execution; server ops would just echo it
+                # into deploy logs.
+                raise DeploymentError(
+                    f"{label} hook '{raw}' references unknown variables"
+                    f" {', '.join(sorted(unresolved_vars))}. Deployment"
+                    " aborted (fail-closed)."
+                )
             self.output.info(f"  [{label}] {cmd}")
             full_cmd = f"set -a; {select_env}; set +a; "
             if cwd:
@@ -887,13 +935,17 @@ class Deploy(BaseCommand):
     # Secrets
     # =======================================================================================
 
-    def _fail_closed_on_unresolved_secrets(self, env: str) -> None:
+    def _fail_closed_on_unresolved_secrets(
+        self, env: str, secret_aliases: dict[str, str]
+    ) -> None:
         """Abort when a ``$REF`` secret line survived the adapters unresolved.
 
         The ``system`` adapter resolves ``$VAR`` values from the environment;
         an adapter returning a value still starting with ``$`` means the
-        secret was NOT resolved, and shipping it would leak the reference into
-        the release tree instead of removing it.
+        secret was NOT resolved, and shipping it would leak the reference
+        into the release tree instead of removing it. This is fail-closed:
+        any unresolved secret ref aborts the deploy before any server I/O,
+        and only the key/ref name is reported (never the raw value).
         """
         for line in env.splitlines():
             line = line.strip()
@@ -901,16 +953,24 @@ class Deploy(BaseCommand):
                 continue
             key, _, value = line.partition("=")
             stripped = value.strip().strip("'\"")
+            if stripped.startswith("$$") or "{{" in stripped:
+                # `$$` = literal dollar; `{{...}}` = deploy-time template
+                # placeholder still to be rendered elsewhere.
+                continue
             if stripped.startswith("$") and len(stripped) > 1:
                 ref = stripped[1:]
-                ref_name = ref if not ref.startswith("$") else ref[1:]
-                if ref_name not in os.environ and not ref_name.startswith("{{{"):
-                    raise DeploymentError(
-                        f"Unresolved secret reference in '{key.strip()}':"
-                        f" the value '{value.strip()}' could not be resolved"
-                        " by the configured secret adapter. Deployment aborted"
-                        " (fail-closed)."
-                    )
+                if ref.startswith("$"):
+                    ref = ref[1:]
+                self.output.error(
+                    f"Unresolved secret reference '<${ref}>' for"
+                    f" '{key.strip()}': the configured secret adapter did"
+                    " not resolve it and deployment aborted (fail-closed)."
+                )
+                raise DeploymentError(
+                    f"Unresolved secret reference in '{key.strip()}':"
+                    f" '<${ref}>' could not be resolved by the configured"
+                    " secret adapter. Deployment aborted (fail-closed)."
+                )
 
     # =======================================================================================
     # Presentation
