@@ -72,7 +72,6 @@ def make_config(env_content: str = "") -> Config:
                 address="example.com",
                 user="deploy",
                 env_content=env_content,
-                password_env="DEPLOY_PASSWORD",
             ),
             HostConfig(name="secondary", address="other.example.com", user="deploy2"),
         ],

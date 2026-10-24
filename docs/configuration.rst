@@ -366,18 +366,6 @@ check out the `integrations guide </integrations.html>`_
 
     *envfile* and *env* are mutually exclusive—you can define only one.
 
-password_env
-^^^^^^^^^^^^
-
-**(Optional)**
-
-Environment variable containing the user's password. Only needed if the user cannot run sudo without a password.
-
-.. code-block:: toml
-
-   [[hosts]]
-   password_env = "DEPLOY_PASSWORD"
-
 port
 ^^^^
 

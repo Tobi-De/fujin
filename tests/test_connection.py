@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import socket
 from unittest.mock import MagicMock, patch
 
@@ -173,31 +172,3 @@ def test_hide_parameter_accepts_out_and_err_values(connection, mock_ssh_componen
 
 
 # ============================================================================
-# Sudo Password Handling
-# ============================================================================
-
-
-@pytest.mark.parametrize(
-    "prompt_text,command",
-    [
-        (b"[sudo] password:", "sudo ls"),
-        (b"[sudo] password for testuser:", "sudo apt update"),
-    ],
-)
-def test_sudo_password_injection(mock_ssh_components, prompt_text, command):
-    """Test sudo password injection on various prompt formats."""
-    mock_session, mock_channel, mock_sock = mock_ssh_components
-
-    with patch.dict(os.environ, {"MY_PASSWORD": "secret123"}):
-        host = HostConfig(
-            address="example.com", user="testuser", password_env="MY_PASSWORD"
-        )
-        conn = SSH2Connection(mock_session, host, mock_sock)
-
-        # Simulate sudo password prompt in output
-        mock_channel.read.side_effect = [(len(prompt_text), prompt_text), (0, b"")]
-
-        conn.run(command, hide=True)
-
-        # Should write password to channel
-        mock_channel.write.assert_called_with(b"secret123\n")

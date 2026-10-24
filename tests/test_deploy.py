@@ -693,47 +693,6 @@ def test_merged_manifest_uploaded_via_scp_not_command_string(
     )
 
 
-def test_scp_fallback_stages_env_and_skips_bookkeeping(
-    monkeypatch, minimal_config, tmp_path
-):
-    """SCP-fallback path: the transfer stages the whole on-disk tree, so the
-    local cache bookkeeping file (built.json) must be excluded explicitly;
-    the rendered .env rides along with the tree."""
-    from fujin.transfer import _scp_fallback
-
-    minimal_config.hosts[0].env_content = "SECRET_TOKEN=1\n"
-    cmd, spies = setup_deploy(
-        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
-    )
-    # Reproduce the staging tree the deploy code writes (with .env bytes and
-    # with built.json present in the cache dir, as run_build leaves it).
-    staging = spies["staging_dir"]
-    (staging / ".env").write_bytes(b"SECRET_TOKEN=1\n")
-    (staging / "built.json").write_bytes(b'{"bundle_key": "k"}')
-
-    conn = FakeConn()
-
-    def run(cmd, **kw):
-        conn.calls.append((cmd, kw))
-        return "", True
-
-    conn.run = run
-    puts = []
-    conn.put = lambda src, dest: puts.append(dest)
-
-    _scp_fallback(conn, staging, "/remote/.staging-1", modes={}, exclude={"built.json"})
-
-    uploaded = {p.rsplit("/", 1)[1] for p in puts}
-    assert "built.json" not in uploaded
-    assert uploaded == {
-        "testapp-1.0.0-py3-none-any.whl",
-        "logo.png",
-        "testapp-web.service",
-        "testapp-worker@.service",
-        ".env",
-    }
-
-
 def test_auto_rollback_targets_release_live_before_this_deploy(
     monkeypatch, minimal_config, tmp_path
 ):
