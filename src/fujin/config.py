@@ -128,6 +128,10 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
                 f"Host '{host_name}' not found. No named hosts configured."
             )
 
+    def effective_secrets(self, host: HostConfig) -> SecretConfig | None:
+        """Secret config for *this* host: host override (#75) or the global."""
+        return host.secrets or self.secret_config
+
     @property
     def app_bin(self) -> str:
         """Path (relative to ``app_dir``) of the app binary in the release tree."""
@@ -357,6 +361,7 @@ _HOST_OVERRIDE_KEYS = frozenset(
         "key_filename",
         "key_passphrase_env",
         "native_ssh_auth",
+        "secrets",
     }
 )
 
@@ -404,6 +409,9 @@ class HostConfig(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     _key_filename: str | None = msgspec.field(name="key_filename", default=None)
     key_passphrase_env: str | None = None
     native_ssh_auth: bool = False  # Use native ssh for auth (for Tailscale, etc.)
+    #: Per-host secret adapter override (#75); None = use the global
+    #: ``[secrets]`` / ``Config.secret_config``.
+    secrets: SecretConfig | None = None
 
     def __post_init__(self):
         if self._env_file and self.env_content:

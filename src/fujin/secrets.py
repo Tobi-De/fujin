@@ -73,9 +73,34 @@ def env_values(env_content: str) -> dict[str, str]:
         return {k: v for k, v in dotenv_values(stream=buffer).items() if v is not None}
 
 
+def has_secret_refs(env_content: str) -> bool:
+    """True when the env file contains any ``$REF`` secret reference (#75)."""
+    return bool(secret_refs(env_content))
+
+
+def _format_env(env_dict: dict[str, str | None]) -> str:
+    """Format env vars - only quote values that need it."""
+    lines = []
+    for key, value in env_dict.items():
+        if value is None:
+            lines.append(f"{key}=")
+        elif _needs_quotes(value):
+            lines.append(f'{key}="{value}"')
+        else:
+            lines.append(f"{key}={value}")
+    return "\n".join(lines)
+
+
 def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
     if not env_content:
         return ""
+
+    # No $-refs: no adapter needs to be contacted (#75 staging case - a host
+    # with only literal values must not invoke a global adapter at all).
+    # Reuse the system adapter's formatting for output parity.
+    if not has_secret_refs(env_content):
+        with closing(StringIO(env_content)) as buffer:
+            return _format_env(dict(dotenv_values(stream=buffer)))
 
     adapter_registry = get_adapter_registry()
     adapter_name = secret_config.adapter
@@ -130,15 +155,7 @@ def system(env_content: str, secret_config: SecretConfig) -> str:
                 env_dict[key] = resolved
 
     # Format env vars - only quote values that need it
-    lines = []
-    for key, value in env_dict.items():
-        if value is None:
-            lines.append(f"{key}=")
-        elif _needs_quotes(value):
-            lines.append(f'{key}="{value}"')
-        else:
-            lines.append(f"{key}={value}")
-    return "\n".join(lines)
+    return _format_env(env_dict)
 
 
 def _needs_quotes(value: str) -> bool:

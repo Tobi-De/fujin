@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from fujin.config import Config, merge_host_layers
+from fujin.config import Config, SecretConfig, merge_host_layers
 from fujin.errors import ImproperlyConfiguredError
 
 BASE_FUJIN_TOML = """
@@ -343,3 +343,32 @@ def test_layers_merge_over_host_fields():
     )
     assert config.select_host("staging").port == 22
     assert config.select_host("production").port == 22
+
+
+def test_per_host_secrets_override(tmp_path, monkeypatch):
+    """Per-host secrets (#75): host-level [secrets] overrides the global,
+    hosts without one keep the global adapter."""
+    write_fujin_toml(tmp_path, BASE_FUJIN_TOML + '\n[secrets]\nadapter = "bitwarden"\n')
+    write_override(tmp_path, "staging", '[secrets]\nadapter = "system"')
+    monkeypatch.chdir(tmp_path)
+    staging_cfg = Config.read("staging")
+    prod_cfg = Config.read("production")
+    assert staging_cfg.effective_secrets(staging_cfg.hosts[0]).adapter == "system"
+    prod_host = prod_cfg.select_host("production")
+    assert prod_cfg.effective_secrets(prod_host).adapter == "bitwarden"
+
+
+def test_resolve_secrets_skips_adapter_without_refs(monkeypatch):
+    """A host env without $-refs must never contact an adapter (#75)."""
+    import fujin.secrets as secrets
+
+    def fake_adapter(env, config):  # pragma: no cover - must never run
+        raise AssertionError("adapter must not be called without secret refs")
+
+    monkeypatch.setitem(secrets.get_adapter_registry(), "bitwarden", fake_adapter)
+    out = secrets.resolve_secrets(
+        'DATABASE_URL="postgres://x"\nDEBUG=True',
+        SecretConfig(adapter="bitwarden"),
+    )
+    assert "DATABASE_URL=postgres://x" in out
+    assert "DEBUG=True" in out
