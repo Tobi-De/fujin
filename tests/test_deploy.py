@@ -109,6 +109,18 @@ class FakeConn:
     def append_response(self, marker, out, ok=True):
         self.responses.append((marker, (out, ok)))
 
+    def get(self, remote, local, verify=False):
+        """Fake SCP download: answers from the same marker registry."""
+        self.calls.append((remote, {"get": True}))
+        for marker, (out, ok) in self.responses:
+            if marker in remote:
+                if not ok:
+                    raise FileNotFoundError(remote)
+                with open(local, "w") as fh:
+                    fh.write(out)
+                return
+        raise FileNotFoundError(remote)
+
 
 def invoke(cmd) -> int:
     """Run a deploy; return its exit code (0 when it completed normally)."""
@@ -566,7 +578,7 @@ def _setup_failing_deploy(
         is_failed="failed\nfailed\n",
     )
     spies["conn"].append_response(
-        f"cat /opt/fujin/testapp/releases/{prev_digest}/manifest.json",
+        f"/opt/fujin/testapp/releases/{prev_digest}/manifest.json",
         manifest_json(version="0.9.0"),
     )
     cmd.no_rollback = no_rollback
@@ -579,6 +591,32 @@ def test_service_start_failure_auto_rolls_back_and_exits_3(
     cmd, spies = _setup_failing_deploy(
         monkeypatch, minimal_config, tmp_path, no_rollback=False
     )
+    assert invoke(cmd) == 3
+
+    swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
+    assert "prev" in swap_digests
+    written = spies["write_states"][0]
+    assert written.current == "prev"
+    assert written.deploys[-1].result == "rollback"
+
+
+def test_restart_command_failure_rolls_back(monkeypatch, minimal_config, tmp_path):
+    """#76 step table: a failing `systemctl restart` (not just failed units)
+    must trigger the same interactive auto-rollback after the swap."""
+    state = State(current="prev", previous=[])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        prev_manifest=manifest_for(dist="dist-old"),
+        is_failed="active\nactive\n",
+    )
+    spies["conn"].append_response(
+        "/opt/fujin/testapp/releases/prev/manifest.json",
+        manifest_json(version="0.9.0"),
+    )
+    spies["conn"].append_response("systemctl reload-or-restart", "", False)
     assert invoke(cmd) == 3
 
     swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
@@ -712,7 +750,7 @@ def test_auto_rollback_targets_release_live_before_this_deploy(
         is_failed="failed\nfailed\n",
     )
     spies["conn"].append_response(
-        "cat /opt/fujin/testapp/releases/third/manifest.json",
+        "/opt/fujin/testapp/releases/third/manifest.json",
         manifest_json(version="1.0.0"),
     )
     assert invoke(cmd) == 3

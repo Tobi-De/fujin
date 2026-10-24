@@ -8,13 +8,10 @@ import cappa
 from rich.prompt import Confirm
 
 from fujin import caddy
+from fujin import serverops
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin import connection
-
-
-def _join_quoted(names: list[str]) -> str:
-    return " ".join(shlex.quote(n) for n in names)
 
 
 @cappa.command(
@@ -67,7 +64,7 @@ class Down(BaseCommand):
             units = [u for u in self.config.systemd_units if u]
             if units:
                 _, stopped = conn.run(
-                    f"sudo systemctl disable --now {_join_quoted(units)}",
+                    f"sudo systemctl disable --now {serverops.q(*units)}",
                     warn=True,
                     pty=True,
                 )

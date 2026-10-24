@@ -126,17 +126,25 @@ class VerifyResult:
     def __bool__(self) -> bool:
         return self.ok
 
-    def summary(self) -> str:
-        parts = []
-        if self.missing:
-            parts.append(f"missing: {', '.join(self.missing[:10])}")
-        if self.mismatch:
-            parts.append(f"sha mismatch: {', '.join(list(self.mismatch)[:10])}")
-        if self.mode_mismatch:
-            parts.append(f"mode mismatch: {', '.join(list(self.mode_mismatch)[:10])}")
-        if self.link_mismatch:
-            parts.append(f"link mismatch: {', '.join(list(self.link_mismatch)[:10])}")
-        return "; ".join(parts) or "ok"
+
+def verify_report(staging: str, result: VerifyResult) -> str:
+    """Full human-readable failure report for a ``VerifyResult``."""
+    parts = [f"The release tree {staging} failed verification:"]
+    for path in result.missing:
+        parts.append(f"  missing: {path}")
+    for path, mismatch in result.mismatch.items():
+        parts.append(
+            f"  hash mismatch: {path}"
+            f" (expected {mismatch.expected}, got {mismatch.actual})"
+        )
+    for path, want in result.link_mismatch.items():
+        parts.append(f"  symlink mismatch: {path} (expected link to {want})")
+    for path, mismatch in result.mode_mismatch.items():
+        parts.append(
+            f"  mode mismatch: {path}"
+            f" (expected {mismatch.expected}, got {mismatch.actual})"
+        )
+    return "\n".join(parts)
 
 
 def _ssh_transport_opts(host: Any) -> str:
