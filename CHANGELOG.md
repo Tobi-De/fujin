@@ -29,6 +29,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### ⚙️ Miscellaneous Tasks
 
+- Stop tracking fujin build cache artifacts (ignored since .gitignore update)
+- Apply pre-commit (fmt, changelog)
 - Drop debug watchdog, keep SIGTERM lock-release handler
 - Revert uv.lock format churn from local uv runs
 
