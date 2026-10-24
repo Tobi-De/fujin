@@ -51,9 +51,19 @@ adapter
 ~~~~~~~
 The secret management service to use. The currently available options are *bitwarden*, *1password*, *doppler*
 
-password_env
-~~~~~~~~~~~~
-Environment variable containing the password for the service account. This is only required for certain adapters.
+options.password_env
+~~~~~~~~~~~~~~~~~~~~
+Environment variable containing the password for the service account, set in the ``[secrets.options]`` table. This is only required for certain adapters:
+
+.. code-block:: toml
+
+   [secrets]
+   adapter = "bitwarden"
+
+   [secrets.options]
+   password_env = "BW_PASSWORD"
+
+Unknown keys in ``[secrets]`` and ``[secrets.options]`` are hard errors.
 
 Per-host override
 ~~~~~~~~~~~~~~~~~
@@ -320,7 +330,7 @@ Merge semantics are simple: scalars replace, tables (maps) merge key-by-key recu
 
 **Host fields vs app-level keys:** Keys in the override file that are valid host fields (e.g. ``address``, ``port``, ``secrets``) override only that host. Other app-level keys (e.g. ``replicas``, ``versions_to_keep``, ``hooks``) override the app configuration **when that host is selected** (e.g. with ``fujin deploy -H staging``). Overrides never leak into a different host's config.
 
-**Map form:** Instead of the ``[[hosts]]`` array, hosts may be declared as TOML tables keyed by name (a TOML file cannot mix the two forms):
+**Map form:** Instead of the ``[[hosts]]`` array, hosts may be declared as TOML tables keyed by name:
 
 .. code-block:: toml
 
@@ -328,6 +338,14 @@ Merge semantics are simple: scalars replace, tables (maps) merge key-by-key recu
    address = "staging.example.com"
    user = "deploy"
    port = 2200
+
+.. note::
+
+   TOML *allows* ``[[hosts]]`` entries and ``[hosts.<name>]`` map blocks in
+   the same file, but the map block then nests into the last ``[[hosts]]``
+   entry and fujin rejects the configuration: the ``[hosts.<name>]`` block
+   would silently rewrite that host. Only one form may be used per file;
+   mixing them hard-errors with a message explaining exactly this.
 
 **Override file:** ``.fujin/hosts/<name>.toml`` is machine-local (gitignore it) and holds partial overrides for the host named ``<name>``. Host-level keys live at the top level; app-level and additional host fields may also be nested under ``[hosts.<name>]``:
 

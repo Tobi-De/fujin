@@ -46,9 +46,10 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
    a full deploy anyway (e.g. to re-run hooks).
 
 5. **Stage and Upload**: The tree is rsynced into
-   ``releases/.staging-<pid>/`` with ``--link-dest=../current`` so unchanged
-   files (mostly dependencies) are hardlinked instead of re-uploaded.
-   Password-auth hosts without rsync fall back to SCP.
+   ``releases/.staging-<pid>/``; unchanged files (mostly dependencies) were
+   already server-side deduplicated by hardlinking every byte-identical
+   file from the live release, so only changed content is re-uploaded
+   (rsync requires key-based SSH auth).
 
 6. **Verify and Commit**: The staging tree is verified on the server against
    ``manifest.json`` (one file entry per path: sha256, mode, kind). Only then
@@ -83,8 +84,8 @@ The restart set is computed by diffing the previous live release manifest
 against the new one:
 
 - **Unit file changed**: restart that unit only (all of its instances).
-- **Environment changed**: restart the units fed from ``.env`` (all app
-  service units with ``--restart-on-env-change``).
+- **Environment changed**: all app service units are fed from ``.env``, so
+  every app service unit restarts.
 - **Code changed** (dist sha256 or code entries): restart all app units.
 - **Caddyfile changed**: reload Caddy only.
 - **Assets changed**: no restart.

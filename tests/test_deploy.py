@@ -14,6 +14,7 @@ import json
 import sys
 from unittest.mock import MagicMock
 
+import cappa
 import pytest
 
 import fujin.commands.deploy as deploy_mod
@@ -23,6 +24,7 @@ import fujin.transfer
 from fujin.build import BuildResult
 from fujin.commands.deploy import Deploy
 from fujin.errors import DeploymentError
+import fujin.redaction
 from fujin.manifest import InputFile, build_manifest, manifest_to_dict
 from fujin.store import State
 
@@ -102,6 +104,16 @@ class FakeConn:
         for marker, (out, ok) in self.responses:
             if marker in cmd:
                 return out, ok
+        # Existence checks are path-aware: a test -d/-f probe hits iff some
+        # registered marker equals the probed path or lives inside it (a
+        # blind ok=True would spuriously trigger the release-reuse path).
+        if cmd.startswith("test -d ") or cmd.startswith("test -f "):
+            target = cmd.split(" ", 2)[2].split()[0].strip("'\"")
+            return "", bool(
+                any(
+                    m == target or m.startswith(target + "/") for m, _ in self.responses
+                )
+            )
         return "", True
 
     def put(self, local, remote, verify=False):
@@ -937,3 +949,251 @@ def test_unresolved_secret_ref_aborts_before_any_upload(
     out, err = capsys.readouterr()
     all_out = "\n".join([joined, out, err])
     assert "STRIPE_TOKEN=$STRIPE_TOKEN" not in all_out
+
+
+# ===========================================================================
+# Identical-release reuse (#88: --force / post-rollback no commit collision)
+# ===========================================================================
+
+
+def _reuse_setup(monkeypatch, minimal_config, tmp_path, *, hooks=None, force=True):
+    """Deploy whose release dir already exists on the server."""
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="digest-x", client_digest=None)
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=state, hooks=hooks
+    )
+    cmd.force = force
+    # The already-committed release dir exists.
+    spies["conn"].append_response(
+        "test -d /opt/fujin/testapp/releases/digest-x", ("", True)
+    )
+    return cmd, spies
+
+
+def test_force_with_unchanged_content_reuses_committed_release(
+    monkeypatch, minimal_config, tmp_path
+):
+    """--force with identical content must not die on commit_release's
+    no-overwrite rule: the committed dir is verified and reused, the deploy
+    still activates it and runs its hooks."""
+    from fujin.config import HooksConfig
+
+    hooks = HooksConfig(
+        pre_install=["echo PRE"],
+        post_install=["migrate-me"],
+        post_start=["echo POST"],
+    )
+    cmd, spies = _reuse_setup(monkeypatch, minimal_config, tmp_path, hooks=hooks)
+    assert invoke(cmd) == 0
+
+    spies["commit"].assert_not_called()
+    spies["rsync"].assert_called()  # upload happened before the reuse check
+    spies["swap"].assert_called_once()
+    assert spies["swap"].call_args.args[2] == "digest-x"
+    # Hooks/restart machinery kept running on the reused release.
+    assert any("echo POST" in c for c, _ in spies["conn"].calls)
+    assert any("migrate-me" in c for c, _ in spies["conn"].calls)
+    operations = [k.get("operation") or a[2] for a, k in spies["log_calls"]]
+    assert "deploy" in operations
+    written = spies["write_states"][0]
+    assert written.deploys[-1].result == "ok"
+
+
+def test_reuse_verifies_existing_tree_against_final_manifest(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, spies = _reuse_setup(monkeypatch, minimal_config, tmp_path)
+    invoke(cmd)
+    verify_paths = [args[0][1] for args in spies["verify"].call_args_list]
+    assert verify_paths == ["/opt/fujin/testapp/releases/digest-x"], verify_paths
+
+
+def test_corrupt_existing_release_replaced_by_fresh_staging(
+    monkeypatch, minimal_config, tmp_path
+):
+    """An existing release dir that fails verification (crashed earlier
+    commit) is removed after the fresh staging tree verifies, then a normal
+    commit replaces it."""
+    cmd, spies = _reuse_setup(monkeypatch, minimal_config, tmp_path)
+    bad = fujin.transfer.VerifyResult(
+        ok=False, missing=[".env"], mismatch={}, link_mismatch={}, mode_mismatch={}
+    )
+    spies["verify"].side_effect = [bad, fujin.transfer.VerifyResult()]
+    invoke(cmd)
+
+    spies["commit"].assert_called_once()
+    rms = [
+        c
+        for c, kw in spies["conn"].calls
+        if "rm -rf" in c and "test -d" not in c and kw.get("warn")
+    ]
+    assert any("releases/digest-x" in c for c in rms), rms
+
+
+def test_first_deploy_after_rollback_no_commit_collision(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A stale/rolled-back state can carry a client digest that no longer
+    matches, so no-op detection fires False and the deploy re-transferring
+    identical content computes a final digest whose release dir already
+    exists: that dir must be reused, not committed (which would refuse)."""
+    # e.g. client_digest left over from before a rollback
+    state = State(current="digest-x", previous=[], client_digest="legacy-client")
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=state)
+    spies["conn"].append_response(
+        "test -d /opt/fujin/testapp/releases/digest-x", ("", True)
+    )
+    assert invoke(cmd) == 0
+
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_called_once()
+    written = spies["write_states"][0]
+    assert written.deploys[-1].result == "ok"
+    assert written.client_digest == "digest-x"
+
+
+def test_record_rollback_does_not_poison_noop_detection():
+    """Fix 2: record_rollback must not set client_digest to the final
+    digest (it was never the client's pre-merge digest)."""
+    from fujin import store as store_mod
+
+    state = State(current="digest-x", previous=[])
+    rolled = store_mod.record_rollback(state, "digest-x", at="t")
+    assert rolled.client_digest is None
+
+
+# ===========================================================================
+# --full-restart on the no-op path (#79 semantics)
+# ===========================================================================
+
+
+def test_noop_with_full_restart_restarts_units_without_transfer(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=state)
+    cmd.full_restart = True
+    invoke(cmd)
+
+    spies["rsync"].assert_not_called()
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_not_called()
+    restarts = systemctl_restart_calls(spies["conn"])
+    assert restarts, "--full-restart must restart units on a no-op deploy"
+    assert all("systemctl restart" in c for c in restarts)
+
+
+def test_noop_without_full_restart_restarts_nothing(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=state)
+    invoke(cmd)
+    assert systemctl_restart_calls(spies["conn"]) == []
+
+
+def test_oneshots_excluded_from_forced_full_restart(
+    monkeypatch, minimal_config, tmp_path
+):
+    """#79: Type=oneshot units (migrations) are never restarted, not even
+    with --full-restart."""
+    oneshot_files = dict(STAGING_FILES)
+    oneshot_files["systemd/testapp-migrate.service"] = (
+        "[Service]\nType=oneshot\nExecStart=/bin/true\n"
+    )
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(with_env=True, files=STAGING_FILES),
+        files=oneshot_files,
+    )
+    cmd.full_restart = True
+    invoke(cmd)
+
+    joined = "\n".join(systemctl_restart_calls(spies["conn"]))
+    assert "testapp-web.service" in joined
+    assert "testapp-migrate.service" not in joined
+
+
+# ===========================================================================
+# Redaction: only actual secret refs are registered (#87)
+# ===========================================================================
+
+
+def test_only_secret_reference_values_are_registered_redaction(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Non-secret env values (DEBUG=..., ...) must not be registered for
+    redaction: they would false-positive-replace unrelated output."""
+    from fujin.config import SecretConfig
+
+    dummy_debug = "this-is-a-long-nonsecret-debug-value"
+    monkeypatch.setattr(
+        deploy_mod,
+        "resolve_secrets",
+        lambda env, sc: env.replace("$STRIPE_TOKEN", SENTINEL),
+    )
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[
+        0
+    ].env_content = f"STRIPE_TOKEN=$STRIPE_TOKEN\nDEBUG={dummy_debug}"
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=State())
+    printer = _CapturingPrinter()
+    cmd.output = printer
+    assert invoke(cmd) == 0
+    # only the resolved $STRIPE_TOKEN sentinel is registered
+    assert set(fujin.redaction._registered) == {SENTINEL}
+
+
+def test_non_secret_env_value_never_redacted(monkeypatch, minimal_config, tmp_path):
+    """A long non-secret env value must not be registered for redaction."""
+    from fujin.config import SecretConfig
+
+    plain = "zzzpliant-nonsecret-arrangement"
+    monkeypatch.setattr(
+        deploy_mod,
+        "resolve_secrets",
+        lambda env, sc: env.replace("$STRIPE_TOKEN", SENTINEL),
+    )
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[0].env_content = f"STRIPE_TOKEN=$STRIPE_TOKEN\nDEBUG={plain}"
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=State())
+    printer = _CapturingPrinter()
+    cmd.output = printer
+    spies["commit"].side_effect = Exception(f"fs blew up: {plain}")
+    with pytest.raises(DeploymentError) as excinfo:
+        cmd()
+    # the plain value survives; only real secrets are masked
+    assert plain in str(excinfo.value.message)
+    assert set(fujin.redaction._registered) == {SENTINEL}
+
+
+# ===========================================================================
+# Build failure surface: cappa.Exit variants keep exit codes, redacted
+# ===========================================================================
+
+
+def test_build_failure_as_cappa_exit_preserves_code_and_redacts(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    cmd, spies, printer = _secrets_setup(monkeypatch, minimal_config, tmp_path)
+    monkeypatch.setattr(
+        deploy_mod.build,
+        "run_build",
+        MagicMock(
+            side_effect=cappa.Exit(f"build blew up with {SENTINEL} everywhere", code=7)
+        ),
+    )
+    with pytest.raises(cappa.Exit) as excinfo:
+        cmd()
+    assert excinfo.value.code == 7
+    assert SENTINEL not in str(excinfo.value.message)
+    assert "<$STRIPE_TOKEN>" in str(excinfo.value.message)
+    spies["rsync"].assert_not_called()

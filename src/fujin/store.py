@@ -179,12 +179,18 @@ def record_rollback(state: State, target: str, at: str) -> State:
     becomes the target and ``previous`` holds the pre-rollback current, so
     deploys history records ``result="rollback"`` and the swap remains a
     single level (no recursion into previous-of-previous).
+
+    ``client_digest`` is cleared (not set to ``target``): the target was not
+    transferred by the client, so recording it as the last-known client
+    digest would permanently break #78 no-op detection. ``None`` forces the
+    next deploy to transfer; identical content is then gracefully reused
+    (deploy checks for an already-committed release dir).
     """
     target = normalize_digest(target)
     old_current = normalize_digest(state.current) if state.current else None
     return State(
         current=target,
-        client_digest=target,
+        client_digest=None,
         previous=[old_current] if old_current and old_current != target else [],
         units_installed_from=target,
         deploys=[

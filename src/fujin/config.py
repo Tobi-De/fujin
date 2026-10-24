@@ -33,7 +33,7 @@ class InstallationMode(StrEnum):
     BINARY = "binary"
 
 
-class SecretConfig(msgspec.Struct):
+class SecretConfig(msgspec.Struct, forbid_unknown_fields=True):
     adapter: str
     options: dict[str, str] = msgspec.field(default_factory=dict)
 
@@ -45,7 +45,7 @@ class SecretConfig(msgspec.Struct):
             )
 
 
-class HooksConfig(msgspec.Struct):
+class HooksConfig(msgspec.Struct, forbid_unknown_fields=True):
     pre_install: list[str] = msgspec.field(default_factory=list)
     post_install: list[str] = msgspec.field(default_factory=list)
     post_start: list[str] = msgspec.field(default_factory=list)
@@ -282,16 +282,28 @@ def merge_host_layers(
     never leaks into another host. The merged value tree is decoded once
     into a typed :class:`Config`.
 
-    Raises :class:`ImproperlyConfiguredError` if an override (layer 3 or 4)
-    targets a host name that is not defined in fujin.toml.
+    Raises :class:`ImproperlyConfiguredError` if an override file targets a
+    host name that is not defined in fujin.toml, or if ``hosts`` mixes the
+    ``[[hosts]]`` list form with ``[hosts.<name>]`` map blocks.
     """
     hosts_value = raw.get("hosts")
-    map_blocks: dict[str, dict] = {}
     if isinstance(hosts_value, dict):
-        # Layer 3 map form: [hosts.<name>] blocks; each entry is a host
-        # (TOML cannot mix [[hosts]] and [hosts.<name>] in one file).
+        # Layer 3 map form: [hosts.<name>] blocks; each entry is a host.
+        bad = sorted(k for k, v in hosts_value.items() if not isinstance(v, dict))
+        if bad:
+            raise ImproperlyConfiguredError(
+                f"Each 'hosts' entry must define a host table; "
+                f"these [hosts.<name>] blocks are not tables: {', '.join(bad)}."
+            )
         hosts_list = [dict(v, name=name) for name, v in hosts_value.items()]
     elif isinstance(hosts_value, list):
+        for i, entry in enumerate(hosts_value):
+            if not isinstance(entry, dict):
+                raise ImproperlyConfiguredError(
+                    f"Each 'hosts' entry must define a host table ([[hosts]]); "
+                    f"entry {i} is {type(entry).__name__}, not a table."
+                )
+        _validate_hosts_list_form(hosts_value)
         hosts_list = hosts_value
     else:
         hosts_list = None
@@ -302,7 +314,7 @@ def merge_host_layers(
 
     names_in_config = [h.get("name") for h in hosts_list]
     known = {n for n in names_in_config if n}
-    unknown = (set(file_overrides) | set(map_blocks)) - known
+    unknown = set(file_overrides) - known
     if unknown:
         available = ", ".join(sorted(n for n in known if n)) or "none"
         raise ImproperlyConfiguredError(
@@ -339,10 +351,25 @@ def merge_host_layers(
     merged_hosts = []
     for host in hosts_list:
         host_data = dict(host)
-        if config_host_name := host.get("name"):
-            host_data = _deep_merge(host_data, map_blocks.get(config_host_name, {}))
         if host.get("name") == selected and override_host_data:
+            had_env, had_envfile = "env" in host_data, "envfile" in host_data
             host_data = _deep_merge(host_data, override_host_data)
+            # An override that introduces one of env/envfile must quash the
+            # BASE's counterpart key: TOML has no null, so it could never be
+            # unset again and would trip the "both set" conflict check
+            # forever after. Keys the override itself set are left alone.
+            if (
+                "env" in override_host_data
+                and had_envfile
+                and "envfile" not in override_host_data
+            ):
+                host_data.pop("envfile", None)
+            elif (
+                "envfile" in override_host_data
+                and had_env
+                and "env" not in override_host_data
+            ):
+                host_data.pop("env", None)
         merged_hosts.append(host_data)
 
     app_data["hosts"] = merged_hosts
@@ -366,19 +393,48 @@ _HOST_OVERRIDE_KEYS = frozenset(
 )
 
 
+def _validate_hosts_list_form(hosts_value: list[dict]) -> None:
+    """Detect a ``hosts`` list entry containing keys that are not host fields.
+
+    TOML allows ``[hosts.<name>]`` map blocks after ``[[hosts]]`` entries, in
+    which case the block nests into the last list entry as a table-valued
+    key. That almost always means the two forms were mixed (the map block
+    silently rewrites the last host otherwise); a scalar-valued unknown key
+    is an unknown-field typo. Both hard-error, with distinct messages.
+    """
+    for entry in hosts_value:
+        unknown = {k: v for k, v in entry.items() if k not in _HOST_OVERRIDE_KEYS}
+        if not unknown:
+            continue
+        mixed = sorted(k for k, v in unknown.items() if isinstance(v, dict))
+        if mixed:
+            raise ImproperlyConfiguredError(
+                "hosts mixes the list form [[hosts]] with the map form "
+                f"[hosts.{mixed[0]}]; the block nests into the last [[hosts]] "
+                "entry and silently rewrites it. Use one form: either an "
+                "array of [[hosts]] tables or named [hosts.<name>] blocks."
+            )
+        typos = sorted(unknown)
+        raise ImproperlyConfiguredError(
+            f"Unknown host field(s) in hosts: {', '.join(typos)}. "
+            f"Valid fields: {', '.join(sorted(_HOST_OVERRIDE_KEYS))}."
+        )
+
+
 def _extract_override_host(
     override_hosts: dict | list | None, selected: str | None
 ) -> dict:
     """Pull the selected host entry out of a layer-4 override ``hosts`` value."""
     if not override_hosts:
         return {}
+    target = selected if selected else "(unnamed host)"
     if isinstance(override_hosts, dict):
         mismatched = [n for n in override_hosts if n != selected]
         if mismatched:
             raise ImproperlyConfiguredError(
-                f"Host override file contains hosts for unknown host(s): "
-                f"{', '.join(sorted(mismatched))}. The host must be defined in "
-                "fujin.toml first."
+                f"Override file for '{target}' may not describe other hosts: "
+                f"{', '.join(sorted(mismatched))}. Each per-host override file "
+                "must only contain its own host."
             )
         return next(iter(override_hosts.values()), {})
     # List form: [[hosts]] with name = "..."
@@ -389,9 +445,11 @@ def _extract_override_host(
             )
         entry_name = entry.get("name")
         if entry_name != selected:
+            name = entry_name if entry_name else "(unnamed entry)"
             raise ImproperlyConfiguredError(
-                f"Host override file contains hosts for unknown host(s): "
-                f"{entry_name}. The host must be defined in fujin.toml first."
+                f"Override file for '{target}' may not describe other hosts: "
+                f"{name}. Each per-host override file must only contain its "
+                "own host."
             )
         return {k: v for k, v in entry.items() if k != "name"}
     raise ImproperlyConfiguredError(

@@ -373,10 +373,6 @@ def _fingerprint_host(host: HostConfig) -> dict[str, Any]:
         "user": host.user,
         "port": host.port,
         "native_ssh_auth": host.native_ssh_auth,
-        # Adapter identity only - values/refs never enter the fingerprint.
-        "secrets": None
-        if host.secrets is None
-        else {"adapter": host.secrets.adapter, "options": host.secrets.options},
         "key_passphrase_env": host.key_passphrase_env,
         "env_keys": _env_keys(host.env_content),
     }
@@ -384,8 +380,8 @@ def _fingerprint_host(host: HostConfig) -> dict[str, Any]:
 
 def _fingerprint_data(config: Config) -> dict[str, Any]:
     """Resolved-config identity dict. Explicit include-list: excludes version,
-    replicas, aliases, hooks, local paths, and all secret VALUES."""
-    secrets = config.secret_config
+    replicas, aliases, hooks, local paths, and all secret configuration
+    (values and adapter settings alike)."""
     return {
         "app_name": config.app_name,
         "app_user": config.app_user,
@@ -397,9 +393,6 @@ def _fingerprint_data(config: Config) -> dict[str, Any]:
         "requirements": config.requirements,
         "apps_dir": config.apps_dir,
         "caddy_config_dir": config.caddy_config_dir,
-        "secrets": None
-        if secrets is None
-        else {"adapter": secrets.adapter, "options": secrets.options},
         "hosts": [_fingerprint_host(host) for host in config.hosts],
     }
 
@@ -409,8 +402,12 @@ def config_fingerprint(config: Config) -> str:
 
     Canonical resolved-config JSON (sorted keys), excluding:
 
-    - secret VALUES: ``HostConfig.env_content`` (read from ``env``/``envfile``
-      during ``__post_init__``) is reduced to its variable NAMES only;
+    - secret VALUES and adapter settings: ``HostConfig.env_content`` (read
+      from ``env``/``envfile`` during ``__post_init__``) is reduced to its
+      variable NAMES only, and the global/per-host ``[secrets]`` adapter
+      configuration is omitted entirely: adapter identity is not a build
+      input (the venv installs from requirements; resolved VALUES land in
+      the rendered ``.env``, whose change already flips the release digest).
     - ``replicas`` (per #79 convergence handles scaling separately);
     - ``version``, ``aliases``, ``hooks_config``, ``local_config_dir``
       (release-identity / local-only knobs that must not bust build caches).

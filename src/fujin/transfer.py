@@ -13,9 +13,11 @@ Server layout assumed (per app)::
 Staging dir naming (``releases/.staging-<pid>``) is chosen by the deploy
 orchestration; every function here receives the exact path as a parameter.
 
-``--link-dest=../../current``: rsync resolves --link-dest relative to the
-DESTINATION dir (``releases/.staging-<pid>``), so the live release at
-``<app_dir>/current`` is two levels up (rsync follows the symlink).
+Dedup: rsync's own ``--link-dest`` is unusable (RsyncProject/rsync#715);
+instead the deployment orchestration hardlinks every byte-identical file
+from the live release into the staging dir server-side (``serverops.
+link_unchanged``) before the rsync runs, so only changed content is
+transferred.
 
 ``mv -T`` (commit/swap) needs GNU coreutils; busybox mv lacks it. The
 contract targets Debian/Ubuntu servers where GNU mv is standard.
@@ -210,8 +212,8 @@ def rsync_to_staging(
     (exit 23 "update discarded"). Dedup is done explicitly by
     ``serverops.link_unchanged`` instead.
 
-    ``modes`` maps staging-relative paths to permission bits; only used by
-    the SCP fallback (rsync ``-p`` preserves modes otherwise).
+    ``modes`` maps staging-relative paths to permission bits; rsync's
+    ``-p`` preserves modes on transfer (the mapping documents intent).
 
     ``exclude`` names top-level files that are local working state (e.g.
     ``built.json``) and must not reach the release tree.

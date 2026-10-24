@@ -17,8 +17,9 @@ release. Fujin keeps immutable releases on the server under
 ``current`` symlink; rollback is a symlink swap plus restart, not a
 re-install.
 
-Rollback targets are the releases the release store keeps (current +
-previous + the newest ``versions_to_keep``). By default a target is selected
+Rollback targets are the releases the release store keeps (the keep set is
+``current`` + ``previous[0]`` plus the newest releases by deploy order, up
+to ``versions_to_keep`` in total). By default a target is selected
 interactively; use ``--previous`` (or ``-p``) to roll back to the
 immediately-previous release without prompting, and ``--to <digest>`` to
 roll back to a specific release.

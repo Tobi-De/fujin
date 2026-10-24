@@ -46,11 +46,22 @@ Redaction and Fail-Closed Resolution
 
 .. tip:: Redaction and fail-closed resolution
 
-   Resolved secret values are registered for redaction at deploy time: any
-   secret value that would appear in command output, log messages or error
-   text is replaced with a ``<$REF>`` placeholder instead. The env file that
-   is signed into a release still contains the real values (that is its
-   purpose); only fujin's own output is scrubbed.
+   Resolved secret values are registered for redaction at deploy time: in
+   fujin's **own** output — command messages, log records, exceptions and
+   the audit trail — any registered value is replaced with a ``<$REF>``
+   placeholder instead of the real bytes. The env file that is signed into
+   a release still contains the real values (that is its purpose).
+
+   The scrubbing covers what fujin emits, not everything it touches. By
+   design, secret values are still plainly visible in these places:
+
+   - ``fujin show env`` (and ``--plain``), and the rendered ``.env`` on
+     the server, are meant to show real values.
+   - Hook output: hooks run remotely with the release environment sourced
+     (``set -a``) and their output streams over the SSH pty. A hook that
+     echoes a secret prints it as-is — hooks are *supposed* to be able to
+     see the values.
+   - Application runtime logs (anything the app itself prints).
 
    Resolution is fail-closed, before any server contact: a missing
    reference, a failing adapter or a secret that the adapter left

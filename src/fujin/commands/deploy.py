@@ -167,7 +167,14 @@ class Deploy(BaseCommand):
             # as `<$REF>` instead of the raw value (never registered in the
             # build cache; #77).
             secret_aliases = secret_refs(host.env_content)
-            register_secrets(env_values(parsed_env), secret_aliases)
+            # Register only values that really are secret references;
+            # registering every env value would make unrelated output
+            # (DEBUG=1, etc.) redact as a false positive.
+            resolved_values = env_values(parsed_env)
+            register_secrets(
+                {k: resolved_values[k] for k in secret_aliases if k in resolved_values},
+                secret_aliases,
+            )
         else:
             parsed_env = host.env_content
             secret_aliases = {}
@@ -214,11 +221,22 @@ class Deploy(BaseCommand):
             result = build.run_build(
                 config, no_cache=self.no_cache, host=self.selected_host
             )
-        except Exception as exc:
-            raw = str(exc.message) if isinstance(exc, DeploymentError) else str(exc)
+        except DeploymentError as exc:
+            raw = str(exc.message)
             wrapped = redact(raw)
             # If the value only lived in the original exception's message,
             # the cause chain must not carry it into tracebacks either.
+            raise DeploymentError(wrapped) from (exc if wrapped == raw else None)
+        except cappa.Exit as exc:
+            # Build failures surface as cappa.Exit too (BuildError derives
+            # from it): preserve the exit code, but never echo a secret
+            # through the message.
+            if exc.message:
+                raise cappa.Exit(redact(str(exc.message)), code=exc.code) from None
+            raise
+        except Exception as exc:
+            raw = str(exc)
+            wrapped = redact(raw)
             raise DeploymentError(wrapped) from (exc if wrapped == raw else None)
         files = dict(result.files)
 
@@ -244,6 +262,22 @@ class Deploy(BaseCommand):
             self.output.info(
                 f"No changes detected; release {client_digest} is already live."
             )
+            if self.full_restart:
+                # --full-restart still restarts everything, but nothing is
+                # transferred or committed: reload the live release's units
+                # over the (unchanged) manifests (#79 excludes oneshots).
+                self.output.info(
+                    "--full-restart: restarting all units without a transfer."
+                )
+                prev_manifest = serverops.read_current_manifest(conn, app_dir)
+                _unit_files, _dropins, oneshots = collect_local_units(files, config)
+                self._restart(
+                    conn,
+                    prev_manifest or client_manifest,
+                    client_manifest,
+                    oneshots,
+                    force_full_restart=True,
+                )
             self._converge(conn, client_manifest)
             self._run_hooks(conn, "post_start", context, release_path=None)
             self._gc(conn, state, self._list_releases(conn))
@@ -395,21 +429,36 @@ class Deploy(BaseCommand):
             final_digest = m.release_digest(final_manifest)
             self._write_remote_manifest(conn, remote_staging, final_manifest)
 
-            self.output.info("Verifying staged release tree...")
-            verify = transfer.verify_staging(
-                conn, remote_staging, m.manifest_to_dict(final_manifest)
+            release_path = f"{app_dir}/releases/{final_digest}"
+            # Identical content can already be committed on the server
+            # (e.g. `deploy --force` with unchanged content, or the first
+            # deploy after a rollback): commit_release refuses to overwrite
+            # an existing release dir, so reuse the committed tree instead
+            # of letting the deploy die after the upload.
+            reuse_verdict = self._try_reuse_committed_release(
+                conn, release_path, remote_staging, final_manifest
             )
-            if not verify.ok:
-                raise DeploymentError(
-                    redact(transfer.verify_report(remote_staging, verify))
-                )
-
             # Pre-install hooks: the old release is still live.
             self._run_hooks(conn, "pre_install", context, release_path=None)
 
-            self.output.info("Committing release...")
-            transfer.commit_release(conn, remote_staging, final_digest)
-            release_path = f"{app_dir}/releases/{final_digest}"
+            if reuse_verdict == "reuse":
+                transfer.cleanup_staging(conn, remote_staging)
+            elif reuse_verdict == "replaced-staging":
+                # Staging already verified and the corrupt release dir was
+                # removed: commit directly.
+                self.output.info("Committing release...")
+                transfer.commit_release(conn, remote_staging, final_digest)
+            else:
+                self.output.info("Verifying staged release tree...")
+                verify = transfer.verify_staging(
+                    conn, remote_staging, m.manifest_to_dict(final_manifest)
+                )
+                if not verify.ok:
+                    raise DeploymentError(
+                        redact(transfer.verify_report(remote_staging, verify))
+                    )
+                self.output.info("Committing release...")
+                transfer.commit_release(conn, remote_staging, final_digest)
 
             unit_files, dropins, oneshots = collect_local_units(files, config)
             if unit_files or dropins:
@@ -455,15 +504,17 @@ class Deploy(BaseCommand):
                 version=config.local_version,
                 git_commit=get_git_short_hash(),
             )
-        except cappa.Exit:
-            transfer.cleanup_staging(conn, remote_staging)
-            raise
         except DeploymentError as exc:
             transfer.cleanup_staging(conn, remote_staging)
             wrapped_msg = str(exc.message)
             raise DeploymentError(redact(wrapped_msg)) from (
                 exc if redact(wrapped_msg) == wrapped_msg else None
             )
+        except cappa.Exit:
+            # A plain cappa.Exit (e.g. a service-start failure offering
+            # rollback) carries its own exit code and is never re-wrapped.
+            transfer.cleanup_staging(conn, remote_staging)
+            raise
         except Exception as exc:
             transfer.cleanup_staging(conn, remote_staging)
             wrapped_msg = f"Deployment failed: {exc}"
@@ -496,6 +547,63 @@ class Deploy(BaseCommand):
         finally:
             os.unlink(tmp_path)
 
+    def _try_reuse_committed_release(
+        self,
+        conn,
+        release_path: str,
+        remote_staging: str,
+        final_manifest: m.Manifest,
+    ) -> bool:
+        """Reuse an already-committed release dir with identical content.
+
+        Returns ``"reuse"`` when ``releases/<digest>`` exists, verifies
+        against the fresh manifest, and is byte-identical: the freshly
+        uploaded staging tree is then redundant. Returns None when no dir
+        exists.
+
+        When the existing dir verifies as INCOMPLETE (e.g. a crashed
+        earlier deploy left a partially committed tree), the freshly
+        uploaded staging tree is verified instead and, on success, the
+        corrupt dir is removed; the helper returns ``"replaced-staging"``
+        (the staging tree is then already verified and only needs the
+        commit). A verification failure of both raises a DeploymentError
+        (the old release is still live).
+        """
+        _, dir_exists = conn.run(
+            f"test -d {serverops.q(release_path)}", warn=True, hide=True
+        )
+        if not dir_exists:
+            return None
+
+        self.output.info(
+            f"Release {release_path.rsplit('/', 1)[-1]} already committed;"
+            " verifying the existing tree..."
+        )
+        existing_verify = transfer.verify_staging(
+            conn, release_path, m.manifest_to_dict(final_manifest)
+        )
+        if existing_verify.ok:
+            self.output.info(
+                f"Release {release_path.rsplit('/', 1)[-1]} already committed;"
+                " reusing it."
+            )
+            return "reuse"
+
+        self.output.warning(
+            f"Existing release directory {release_path} is incomplete"
+            " (failed verification); replacing it with the freshly"
+            " uploaded tree."
+        )
+        staging_verify = transfer.verify_staging(
+            conn, remote_staging, m.manifest_to_dict(final_manifest)
+        )
+        if not staging_verify.ok:
+            raise DeploymentError(
+                redact(transfer.verify_report(remote_staging, staging_verify))
+            )
+        conn.run(f"rm -rf {serverops.q(release_path)}", warn=True, hide=True)
+        return "replaced-staging"
+
     # =======================================================================================
     # Restart set / convergence / readiness
     # =======================================================================================
@@ -515,10 +623,15 @@ class Deploy(BaseCommand):
         timers restart only when their own file changed; oneshots excluded."""
         if force_full_restart:
             # Full restart covers every app unit incl. sockets/timers (a
-            # restarted timer starts; the old installer did the same).
+            # restarted timer starts; the old installer did the same), but
+            # Type=oneshot units are still excluded: they complete and exit,
+            # restarting them only causes spurious failures (#79).
             unit_names: Iterable[str] = sorted(
-                set(serverops.service_unit_names(final_manifest))
-                | serverops.socket_timer_unit_names(final_manifest)
+                (
+                    set(serverops.service_unit_names(final_manifest))
+                    | set(serverops.socket_timer_unit_names(final_manifest))
+                )
+                - set(oneshots)
             )
         else:
             unit_names = store.restart_set(

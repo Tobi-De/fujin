@@ -246,7 +246,10 @@ def test_state_update_semantics_after_rollback(monkeypatch, minimal_config):
     new_state = write_state.call_args.args[-1]
     assert new_state.current == "a-digest"
     assert new_state.previous == ["b-digest"]
-    assert new_state.client_digest == "a-digest"
+    # client_digest must NOT be set to the final digest: the target was
+    # never transferred by the client, and recording it there would
+    # permanently break #78 no-op detection.
+    assert new_state.client_digest is None
     assert new_state.units_installed_from == "a-digest"
     assert new_state.deploys[-1].manifest == "a-digest"
 
@@ -661,3 +664,150 @@ def test_to_version_uses_digest_dir_hint(monkeypatch, minimal_config):
     )
     cmd()
     swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "a-digest")
+
+
+# ===========================================================================
+# Version targeting / digest discrimination edge cases
+# ===========================================================================
+
+
+def test_to_version_matches_git_suffixed_manifest_version(monkeypatch, minimal_config):
+    """In git checkouts the manifest records '<version>-<short-hash>'; a
+    plain '--to <version>' still resolves to that release."""
+    conn = FakeConn(
+        [
+            *LAYOUT_RESPONSES,
+            ("ls -1t releases/", ("suff-digest\n", True)),
+            manifest_response("suff-digest", "1.0.0-ab12cd3", "dist-000"),
+            *unit_responses_for("suff-digest", default_files()),
+        ]
+    )
+    state = State(current="suff-digest", previous=[], client_digest=None)
+    current = make_manifest("1.0.0-ab12cd3", "dist-000")
+    cmd, _ws, swap_current, _v, _iu = setup_rollback(
+        monkeypatch,
+        minimal_config,
+        conn,
+        state=state,
+        current_manifest=current,
+        to="1.0.0",
+    )
+    with pytest.raises(cappa.output.Exit) as excinfo:
+        cmd()
+    # target == current: clean no-op exit rather than a resolution error
+    assert excinfo.value.code == 0
+
+
+def test_to_version_ignores_gc_releases(monkeypatch, minimal_config):
+    """Only kept releases are version candidates: a GC'd release carrying
+    the version is no longer resolvable (never offered via raw ls output)."""
+    conn = FakeConn(DEFAULT_CONN_RESPONSES)
+    state = State(
+        current="b-digest",
+        previous=["a-digest"],
+        deploys=[
+            DeployRecord(manifest="a-digest", at="t0", result="ok"),
+            DeployRecord(manifest="b-digest", at="t1", result="ok"),
+            DeployRecord(manifest="c-digest", at="t2", result="ok"),
+        ],
+    )
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, _ws, swap_current, _v, _iu = setup_rollback(
+        monkeypatch,
+        minimal_config,
+        conn,
+        state=state,
+        current_manifest=current,
+        to="1.0.2",
+    )
+    minimal_config.versions_to_keep = 2
+    assert exit_code_of(lambda: cmd()) == 1
+    swap_current.assert_not_called()
+
+
+def test_to_digest_incomplete_release_dir_hard_error(monkeypatch, minimal_config):
+    """A release dir that exists without manifest.json is reported as an
+    incomplete release, not a GC'd one."""
+    e_digest = "e" * 64
+    conn = FakeConn(
+        [
+            *LAYOUT_RESPONSES,
+            ("ls -1t releases/", ("b-digest\n" + e_digest + "\n", True)),
+            (f"test -d /opt/fujin/testapp/releases/{e_digest}", ("", True)),
+        ]
+    )
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, _ws, swap_current, _v, _iu = setup_rollback(
+        monkeypatch,
+        minimal_config,
+        conn,
+        state=state,
+        current_manifest=current,
+        to=e_digest,
+    )
+    with pytest.raises(cappa.output.Exit) as excinfo:
+        cmd()
+    assert excinfo.value.code == 1
+    assert "incomplete" in (excinfo.value.message or "")
+    swap_current.assert_not_called()
+
+
+def test_to_digest_uppercase_normalizes_to_lowercase_path(monkeypatch, minimal_config):
+    upper = "A" * 64
+    conn = FakeConn(
+        [
+            *LAYOUT_RESPONSES,
+            ("ls -1t releases/", ("b-digest\nlower" * 0 + f"{'a' * 64}\n", True)),
+            manifest_response("a" * 64, "1.0.0", "dist-000"),
+            (
+                f"/opt/fujin/testapp/releases/{'a' * 64}/systemd/testapp-web.service",
+                (WEB_UNIT, True),
+            ),
+            (
+                f"/opt/fujin/testapp/releases/{'a' * 64}/systemd/testapp-worker@.service",
+                (WORKER_TEMPLATE_UNIT, True),
+            ),
+            (
+                f"/opt/fujin/testapp/releases/{'a' * 64}/systemd/common.d/hardening.conf",
+                ("[Service]\nLimitNOFILE=65536", True),
+            ),
+        ]
+    )
+    state = State(current=("a" * 64).replace("a", "b") and "b-digest", previous=[])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, _ws, swap_current, _v, _iu = setup_rollback(
+        monkeypatch,
+        minimal_config,
+        conn,
+        state=state,
+        current_manifest=current,
+        to=upper,
+    )
+    cmd()
+    swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "a" * 64)
+
+
+def test_to_version_swaps_git_suffixed_release(monkeypatch, minimal_config):
+    """The git-suffixed base-version compare drives a real swap when the
+    matched release is not the current one."""
+    conn = FakeConn(
+        [
+            *LAYOUT_RESPONSES,
+            ("ls -1t releases/", ("suff-digest\nb-digest\n", True)),
+            manifest_response("suff-digest", "1.0.0-ab12cd3", "dist-000"),
+            *unit_responses_for("suff-digest", default_files()),
+        ]
+    )
+    state = State(current="b-digest", previous=["suff-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, _ws, swap_current, _v, _iu = setup_rollback(
+        monkeypatch,
+        minimal_config,
+        conn,
+        state=state,
+        current_manifest=current,
+        to="1.0.0",
+    )
+    cmd()
+    swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "suff-digest")
