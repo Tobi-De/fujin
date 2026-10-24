@@ -324,8 +324,7 @@ class Deploy(BaseCommand):
             self.output.info("Uploading release tree...")
             # ``built.json`` is local build-cache bookkeeping, not release
             # content: nothing in the tree references it and it would land
-            # in the immutable release dir otherwise (rsync mirrors the
-            # staging tree; the SCP fallback excludes it below).
+            # in the immutable release dir otherwise.
             transfer.rsync_to_staging(
                 conn,
                 str(staging_dir),

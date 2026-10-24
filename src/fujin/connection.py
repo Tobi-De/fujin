@@ -5,7 +5,6 @@ import hashlib
 import shlex
 import logging
 import os
-import re
 import select
 import socket
 import time
@@ -106,16 +105,6 @@ class SSH2Connection:
         full_command = f'export PATH="{env_prefix}"; {cwd_prefix}{command}'
         logger.debug(f"Running command: {full_command}")
 
-        watchers: tuple[re.Pattern[str], ...] | None = None
-        pass_response: str | None = None
-        if self.host.password:
-            logger.debug("Setting up sudo password watchers")
-            watchers = (
-                re.compile(r"\[sudo\] password:"),
-                re.compile(rf"\[sudo\] password for {self.host.user}:"),
-            )
-            pass_response = self.host.password + "\n"
-
         stdout_buffer = []
         stderr_buffer = []
 
@@ -172,13 +161,6 @@ class SSH2Connection:
                             sys.stdout.flush()
                         stdout_buffer.append(text)
 
-                        if "sudo" in text and watchers and pass_response:
-                            for pattern in watchers:
-                                if pattern.search(text):
-                                    logger.debug(
-                                        "Password pattern matched, sending response"
-                                    )
-                                    channel.write(pass_response.encode())
                     else:
                         break
 
@@ -535,18 +517,8 @@ def connection(
             except Exception as e:
                 logger.debug(f"Key {key_path} failed: {e}")
 
-    # Method 4: Password (if configured)
-    if not authenticated and host.password:
-        try:
-            logger.debug("Trying password authentication...")
-            session.userauth_password(host.user, host.password)
-            authenticated = session.userauth_authenticated()
-            if authenticated:
-                logger.info("✓ Authenticated using password")
-            auth_methods_tried.append("password")
-        except Exception as e:
-            logger.debug(f"Password auth failed: {e}")
-            auth_methods_tried.append("password (failed)")
+    # Method 4: Password auth is no longer supported; key/agent auth or
+    # native_ssh_auth only.
 
     if not authenticated:
         sock.close()
@@ -560,7 +532,7 @@ def connection(
             f"  1. Ensure your SSH key is authorized on the server\n"
             f"  2. Add your key to ssh-agent: ssh-add ~/.ssh/id_ed25519\n"
             f'  3. Specify key in fujin.toml: key_filename = "~/.ssh/id_ed25519"\n'
-            f"  4. Set password in fujin.toml or .env file"
+            f"  4. Use `fujin server setup-ssh` to copy your key to the server\n"
         )
         raise SSHAuthenticationError(error_msg)
 

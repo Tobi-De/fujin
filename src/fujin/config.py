@@ -221,7 +221,6 @@ class HostConfig(msgspec.Struct, kw_only=True):
     user: str
     _env_file: str | None = msgspec.field(name="envfile", default=None)
     env_content: str = msgspec.field(name="env", default="")
-    password_env: str | None = None
     port: int = 22
     _key_filename: str | None = msgspec.field(name="key_filename", default=None)
     key_passphrase_env: str | None = None
@@ -243,16 +242,6 @@ class HostConfig(msgspec.Struct, kw_only=True):
     def key_filename(self) -> Path | None:
         if self._key_filename:
             return Path(self._key_filename)
-
-    @property
-    def password(self) -> str | None:
-        if not self.password_env:
-            return
-        password = os.getenv(self.password_env)
-        if password is None:
-            msg = f"Env {self.password_env} can not be found"
-            raise ImproperlyConfiguredError(msg)
-        return password
 
     @property
     def key_passphrase(self) -> str | None:

@@ -47,7 +47,6 @@ def make_host(**kw):
         "address": "203.0.113.7",
         "port": 22,
         "key_filename": None,
-        "password": None,
     }
     base.update(kw)
     return SimpleNamespace(**base)
@@ -257,53 +256,6 @@ class TestRsyncToStaging:
             )
         assert "apt install rsync" in exc_info.value.message
         assert calls == []  # never invoked rsync locally
-
-    def test_password_auth_uses_scp_fallback(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(transfer, "_rsync_installed_locally", lambda: True)
-        calls = fake_rsync_run(monkeypatch)
-        root = tmp_path / "bundle"
-        (root / "sub").mkdir(parents=True)
-        (root / "app.py").write_text("x")
-        (root / "sub" / "a.txt").write_text("y")
-        conn = RecordingConn(host=make_host(password="pw"))
-
-        result = rsync_to_staging(
-            conn,
-            str(root),
-            "/opt/fujin/myapp/releases/.staging-3",
-            ignore_existing=False,
-        )
-
-        assert calls == []  # rsync never invoked
-        assert conn.puts == [
-            (f"{root}/app.py", "/opt/fujin/myapp/releases/.staging-3/app.py"),
-            (f"{root}/sub/a.txt", "/opt/fujin/myapp/releases/.staging-3/sub/a.txt"),
-        ]
-        # fallback creates dirs remotely before uploading
-        assert any("mkdir -p" in c for c in conn.runs)
-        assert result == [
-            ItemizedChange(code=">f+++++++++", path="app.py"),
-            ItemizedChange(code=">f+++++++++", path="sub/a.txt"),
-        ]
-
-    def test_scp_fallback_applies_manifest_modes(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(transfer, "_rsync_installed_locally", lambda: True)
-        fake_rsync_run(monkeypatch)
-        root = tmp_path / "bundle"
-        root.mkdir()
-        (root / ".env").write_text("x")
-        conn = RecordingConn(host=make_host(password="pw"))
-
-        rsync_to_staging(
-            conn,
-            str(root),
-            "/opt/fujin/myapp/releases/.staging-5",
-            ignore_existing=False,
-            modes={".env": 0o640},
-        )
-
-        chmods = [c for c in conn.runs if c.startswith("chmod")]
-        assert chmods == ["chmod 0640 /opt/fujin/myapp/releases/.staging-5/.env"]
 
     def test_unreachable_host_distinct_exception(self, tmp_path, monkeypatch):
         monkeypatch.setattr(transfer.Path, "is_dir", lambda self: True)

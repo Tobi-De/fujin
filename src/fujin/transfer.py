@@ -220,14 +220,6 @@ def rsync_to_staging(
     if not local.is_dir():
         raise TransferError(f"Local bundle dir missing: {local_dir}")
 
-    if conn.host.password:
-        # rsync's ssh transport can't drive an interactive password prompt;
-        # fall back to per-file SCP into staging. NOTE: no dedup on this
-        # path -- no --link-dest, no delta transfer; every deploy uploads
-        # each file in full.
-        logger.info("Password-auth host: per-file SCP fallback (no dedup)")
-        return _scp_fallback(conn, local, staging_dir, modes, exclude)
-
     if not _rsync_installed_locally():
         raise RsyncUnavailableError(
             "rsync is not installed locally. Install it, e.g. `sudo apt install rsync`."
@@ -283,49 +275,6 @@ def parse_itemize(output: str) -> list[ItemizedChange]:
         if path.endswith("/"):
             path = path[:-1]
         changes.append(ItemizedChange(code=code, path=path))
-    return changes
-
-
-def _scp_fallback(
-    conn: SSH2Connection,
-    local: Path,
-    staging_dir: str,
-    modes: dict[str, int] | None = None,
-    exclude: set[str] | None = None,
-) -> list[ItemizedChange]:
-    """Per-file SCP upload fallback for password-auth hosts.
-
-    SCP carries no preserve-perms flag, so when a manifest is available
-    every uploaded file is ``chmod``ed to its manifest mode (fallback for
-    the rsync ``-p`` behaviour). ``exclude`` skips top-level files that are
-    local working state, mirroring the rsync ``--exclude`` behaviour.
-    """
-    modes = modes or {}
-    excluded = exclude or set()
-    changes: list[ItemizedChange] = []
-
-    def walk(d: Path, rel: str) -> None:
-        for child in sorted(d.iterdir()):
-            rel_child = f"{rel}/{child.name}" if rel else child.name
-            if not rel and child.name in excluded:
-                continue
-            remote_child = f"{staging_dir}/{rel_child}"
-            if child.is_dir():
-                conn.run(f"mkdir -p {_quote(remote_child)}", warn=True, hide=True)
-                walk(child, rel_child)
-            else:
-                # NOTE: conn.put goes over SCP (no shell), so remote paths
-                # must NOT be shell-quoted.
-                conn.put(str(child), remote_child)
-                if rel_child in modes:
-                    conn.run(
-                        f"chmod {modes[rel_child]:04o} {_quote(remote_child)}",
-                        warn=True,
-                        hide=True,
-                    )
-                changes.append(ItemizedChange(code=">f+++++++++", path=rel_child))
-
-    walk(local, "")
     return changes
 
 

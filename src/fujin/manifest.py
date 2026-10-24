@@ -373,7 +373,6 @@ def _fingerprint_host(host: HostConfig) -> dict[str, Any]:
         "user": host.user,
         "port": host.port,
         "native_ssh_auth": host.native_ssh_auth,
-        "password_env": host.password_env,
         "key_passphrase_env": host.key_passphrase_env,
         "env_keys": _env_keys(host.env_content),
     }
