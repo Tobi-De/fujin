@@ -480,6 +480,26 @@ class TestConfigFingerprint:
         config.version = "9.9.9"
         assert config_fingerprint(config) == fp1
 
+    def test_secret_adapter_config_excluded(self):
+        """Adapter identity/options are not build inputs (#84)."""
+        config = make_config()
+        fp1 = config_fingerprint(config)
+        config.secret_config = SecretConfig(
+            adapter="bitwarden", options={"password_env": "BW_PASSWORD"}
+        )
+        config.secret_config.options["password_env"] = "BW_SESSION"
+        assert config_fingerprint(config) == fp1
+
+    def test_host_secret_options_do_not_flip_other_hosts(self):
+        """Editing one host's secrets must not bust another host's cache."""
+        config = make_config()
+        fp_b = config_fingerprint(config)
+        config.hosts[1].secrets = SecretConfig(
+            adapter="1password", options={"vault": "other"}
+        )
+        config.hosts[1].secrets.options["vault"] = "changed"
+        assert config_fingerprint(config) == fp_b
+
     def test_hosts_env_content_value_change_no_fingerprint_change(self):
         config = make_config(env_content="A=1")
         fp1 = config_fingerprint(config)

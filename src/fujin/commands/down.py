@@ -98,6 +98,34 @@ class Down(BaseCommand):
                 )
                 errors |= not removed
 
+                # Remove this app's Caddy config and reload the proxy
+                # (reload failure is non-fatal: caddy may not be installed).
+                if self.config.caddyfile_exists:
+                    __, caddy_ok = conn.run(
+                        f"sudo rm -f {shlex.quote(self.config.caddy_config_path)}"
+                        f" && sudo systemctl reload caddy",
+                        warn=True,
+                        pty=True,
+                    )
+                    if not caddy_ok:
+                        self.output.warning(
+                            "Could not remove the Caddy config and/or reload"
+                            " caddy; the site config may need manual cleanup."
+                        )
+
+                # Terminate any leftover app-user processes and delete the
+                # app user (both non-fatal when nothing/left to remove).
+                app_user = self.config.app_user or self.config.app_name
+                user_q = shlex.quote(app_user)
+                _, userdel_ok = conn.run(
+                    f"sudo pkill -u {user_q} || true; sleep 1;"
+                    f" sudo pkill -9 -u {user_q} || true;"
+                    f" sudo userdel {user_q} || true",
+                    warn=True,
+                    pty=True,
+                )
+                errors |= not userdel_ok
+
             if errors:
                 if not self.force:
                     raise cappa.Exit("Teardown failed", code=1)

@@ -62,7 +62,7 @@ Deployment Issues
 
       [[hosts]]
       user = "deploy"  # Correct username?
-      domain_name = "example.com"  # Correct domain?
+      # fujin derives the domain from the Caddyfile, not from fujin.toml
       key_filename = "~/.ssh/id_rsa"  # Correct key path?
 
 3. **Check server firewall:**
@@ -589,7 +589,7 @@ Configuration Issues
       # These are required
       app = "myapp"  # App name
       [[hosts]]  # At least one host
-      domain_name = "example.com"  # Domain required
+      address = "example.com"  # Where to connect
       user = "deploy"  # User required
 
 Secrets not resolving

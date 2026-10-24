@@ -372,3 +372,228 @@ def test_resolve_secrets_skips_adapter_without_refs(monkeypatch):
     )
     assert "DATABASE_URL=postgres://x" in out
     assert "DEBUG=True" in out
+
+
+# ============================================================================
+# env/envfile override replacement (#fill-in: override introduces env key)
+# ============================================================================
+
+
+ENVFILE_HOST_FUJIN_TOML = """
+app = "testapp"
+version = "1.0.0"
+build_command = "echo building"
+installation_mode = "python-package"
+python_version = "3.11"
+distfile = "dist/testapp-{version}-py3-none-any.whl"
+
+[[hosts]]
+name = "production"
+address = "example.com"
+user = "deploy"
+envfile = ".env.prod"
+"""
+
+ENV_HOST_FUJIN_TOML = """
+app = "testapp"
+version = "1.0.0"
+build_command = "echo building"
+installation_mode = "python-package"
+python_version = "3.11"
+distfile = "dist/testapp-{version}-py3-none-any.whl"
+
+[[hosts]]
+name = "production"
+address = "example.com"
+user = "deploy"
+env = "BASE_KEY=base"
+"""
+
+
+def test_override_env_replaces_committed_envfile(tmp_path, monkeypatch):
+    "A layer-4 override introducing ``env`` must unseat the committed 'envfile'."
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env.prod").write_text("FROM_FILE=1\n")
+    write_fujin_toml(tmp_path, ENVFILE_HOST_FUJIN_TOML)
+    write_override(tmp_path, "production", 'env = "FROM_OVERRIDE=2"')
+
+    config = Config.read("production")
+    host = config.select_host("production")
+    assert host.env_content == "FROM_OVERRIDE=2"
+    assert "FROM_FILE" not in host.env_content
+
+
+def test_override_envfile_replaces_committed_env(tmp_path, monkeypatch):
+    "A layer-4 override introducing ``envfile`` must unseat the committed 'env'."
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env.newprod").write_text("FROM_FILE=1\n")
+    write_fujin_toml(tmp_path, ENV_HOST_FUJIN_TOML)
+    write_override(tmp_path, "production", 'envfile = ".env.newprod"')
+
+    config = Config.read("production")
+    host = config.select_host("production")
+    assert "FROM_FILE=1" in host.env_content
+    assert "BASE_KEY" not in host.env_content
+
+
+def test_override_keeping_envfile_still_errors_on_duplicate(tmp_path, monkeypatch):
+    "An override that does NOT introduce env/envfile keeps conflict detection."
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env.prod").write_text("FROM_FILE=1\n")
+    write_fujin_toml(tmp_path, ENVFILE_HOST_FUJIN_TOML)
+    write_override(tmp_path, "production", 'env = "X=1"\nenvfile = ".env.prod"')
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        Config.read("production")
+    assert "both" in exc_info.value.message.lower()
+
+
+# ============================================================================
+# Malformed hosts entries
+# ============================================================================
+
+
+NO_HOSTS_FUJIN_TOML = """
+app = "testapp"
+version = "1.0.0"
+build_command = "echo building"
+installation_mode = "python-package"
+python_version = "3.11"
+distfile = "dist/testapp-{version}-py3-none-any.whl"
+"""
+
+
+def test_hosts_scalar_list_entry_hard_errors(tmp_path, monkeypatch):
+    write_fujin_toml(tmp_path, NO_HOSTS_FUJIN_TOML + "hosts = [1]\n")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        Config.read()
+    msg = exc_info.value.message.lower()
+    assert "entry 0" in msg
+    assert "not a table" in msg
+
+
+def test_hosts_map_scalar_value_hard_errors(tmp_path, monkeypatch):
+    write_fujin_toml(tmp_path, NO_HOSTS_FUJIN_TOML + '\n[hosts]\nstaging = "x"\n')
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        Config.read()
+    msg = exc_info.value.message.lower()
+    assert "not tables" in msg
+    assert "staging" in msg
+
+
+# ============================================================================
+# Mixed [[hosts]] / [hosts.<name>] forms
+# ============================================================================
+
+
+MIXED_FORMS_FUJIN_TOML = """
+app = "testapp"
+version = "1.0.0"
+build_command = "echo building"
+installation_mode = "python-package"
+python_version = "3.11"
+distfile = "dist/testapp-{version}-py3-none-any.whl"
+
+[[hosts]]
+name = "staging"
+address = "staging.example.com"
+user = "deploy"
+
+[[hosts]]
+name = "production"
+address = "example.com"
+user = "deploy"
+
+[hosts.staging]
+port = 3000
+"""
+
+
+def test_mixed_hosts_forms_error(tmp_path, monkeypatch):
+    """[[hosts]] followed by [hosts.<name>] nests into the last entry and
+    is rejected with a mixed-forms explanation, not an unknown-field error."""
+    monkeypatch.chdir(tmp_path)
+    write_fujin_toml(tmp_path, MIXED_FORMS_FUJIN_TOML)
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        Config.read()
+    msg = exc_info.value.message.lower()
+    assert "mixes the list form" in msg
+    assert "hosts.staging" in msg
+
+
+UNKNOWN_HOST_FIELD_FUJIN_TOML = """
+app = "testapp"
+version = "1.0.0"
+build_command = "echo building"
+installation_mode = "python-package"
+python_version = "3.11"
+distfile = "dist/testapp-{version}-py3-none-any.whl"
+
+[[hosts]]
+name = "production"
+address = "example.com"
+user = "deploy"
+ports = 2222
+"""
+
+
+def test_hosts_unknown_scalar_field_is_not_mixed_forms(tmp_path, monkeypatch):
+    "A scalar typo inside [[hosts]] reports an unknown field, not mixed forms."
+    monkeypatch.chdir(tmp_path)
+    write_fujin_toml(tmp_path, UNKNOWN_HOST_FIELD_FUJIN_TOML)
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        Config.read()
+    msg = exc_info.value.message.lower()
+    assert "unknown host field" in msg
+    assert "mixes" not in msg
+
+
+# ============================================================================
+# Nested strictness: unknown keys in [secrets] / [hooks] hard-error
+# ============================================================================
+
+
+def test_unknown_secrets_key_hard_errors(monkeypatch):
+    raw = dict(BASE_RAW)
+    raw["secrets"] = {"adapter": "bitwarden", "pasword_env": "BW"}
+    with pytest.raises(ImproperlyConfiguredError):
+        merge_host_layers(raw, {})
+
+
+def test_unknown_hooks_key_hard_errors(monkeypatch):
+    raw = dict(BASE_RAW)
+    raw["hooks"] = {"pre_install": ["echo hi"], "preinstall": ["echo typo"]}
+    with pytest.raises(ImproperlyConfiguredError):
+        merge_host_layers(raw, {})
+
+
+# ============================================================================
+# Override spillover message wording
+# ============================================================================
+
+
+def test_override_spillover_message_names_owner_file(tmp_path, monkeypatch):
+    "The override file describing ANOTHER host reports the spillover clearly."
+    write_fujin_toml(tmp_path, BASE_FUJIN_TOML)
+    write_override(tmp_path, "production", "[hosts.staging]\nport = 3000\n")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        Config.read("production")
+    msg = exc_info.value.message
+    assert "may not describe other hosts" in msg
+    assert "staging" in msg
+    assert "unknown host" not in msg
+
+
+def test_override_spillover_unnamed_entry_named_in_message(tmp_path, monkeypatch):
+    "An unnamed [[hosts]] entry in an override file is reported as such."
+    write_fujin_toml(tmp_path, BASE_FUJIN_TOML)
+    write_override(tmp_path, "production", "[[hosts]]\naddress = 'other.example.com'\n")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        Config.read("production")
+    msg = exc_info.value.message
+    assert "may not describe other hosts" in msg
+    assert "(unnamed entry)" in msg

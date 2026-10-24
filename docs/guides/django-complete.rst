@@ -276,19 +276,22 @@ Edit ``fujin.toml``:
    # Use Bitwarden for secrets
    [secrets]
    adapter = "bitwarden"
+
+   [secrets.options]
    password_env = "BW_PASSWORD"
 
    # Staging environment
+   # The domain is derived from the Caddyfile, not a host field.
    [[hosts]]
    name = "staging"
-   domain_name = "staging.example.com"
+   address = "staging.example.com"
    user = "deploy"
    envfile = ".env.staging"
 
    # Production environment
    [[hosts]]
    name = "production"
-   domain_name = "example.com"
+   address = "example.com"
    user = "deploy"
    envfile = ".env.prod"
 
@@ -897,25 +900,26 @@ Here's the complete ``fujin.toml`` with all features:
    # Secrets management
    [secrets]
    adapter = "bitwarden"
+
+   [secrets.options]
    password_env = "BW_PASSWORD"
 
    # Staging environment
+   # The domain is derived from the Caddyfile, not a host field.
    [[hosts]]
    name = "staging"
-   domain_name = "staging.example.com"
+   address = "staging.example.com"
    user = "deploy"
    envfile = ".env.staging"
-   ssh_port = 22
-   apps_dir = "/opt/apps"
+   port = 22
 
    # Production environment
    [[hosts]]
    name = "production"
-   domain_name = "example.com"
+   address = "example.com"
    user = "deploy"
    envfile = ".env.prod"
-   ssh_port = 22
-   apps_dir = "/opt/apps"
+   port = 22
    # Process definitions
    [processes.web]
    command = ".venv/bin/gunicorn config.wsgi:application --bind unix:/run/bookstore/bookstore.sock --workers 4 --max-requests 1000 --access-logfile - --error-logfile -"

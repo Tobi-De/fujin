@@ -33,8 +33,9 @@ How it works
 1. **Read the release store**: Loads ``store/state.json`` and lists the
    releases under ``releases/``.
 
-2. **Compute the keep set**: The current release, the previous release and
-   the newest ``--keep`` releases are always kept.
+2. **Compute the keep set**: The set that is always kept is the current
+   release plus ``previous[0]``, plus the newest releases by deploy order,
+   up to ``versions_to_keep`` in total.
 
 3. **Prompt for confirmation**: Shows which release digests will be deleted
    and asks for confirmation before proceeding.

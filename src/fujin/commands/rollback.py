@@ -11,18 +11,6 @@ from fujin import connection
 from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
-
-
-def _is_digest(value: str) -> bool:
-    """64 hex lowercase chars: a release digest, not a version string."""
-    return bool(
-        value
-        and len(value) == 64
-        and all(c in "0123456789abcdef" for c in value.lower())
-    )
-
-
-from fujin import serverops, store, transfer
 from fujin.manifest import Manifest, decode_manifest, manifest_to_dict
 from fujin.store import (
     convergence,
@@ -32,6 +20,13 @@ from fujin.store import (
     record_rollback,
     restart_set,
 )
+
+
+def _is_digest(value: str) -> bool:
+    """64 hex lowercase chars: a release digest, not a version string."""
+    return bool(
+        value and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
 
 
 @cappa.command(
@@ -124,6 +119,22 @@ class Rollback(BaseCommand):
         )
         return set(releases) - set(kill)
 
+    def _version_matches(self, manifest_version: str, version: str) -> bool:
+        """Exact match, or a git-suffixed manifest version's base version.
+
+        In git checkouts the manifest records ``"<version>-<short-hash>"``
+        (see ``Config.local_version``), so ``--to 1.2.3`` never exact-matches
+        ``1.2.3-4b8a2c1``. The prefix compare only kicks in when the manifest
+        version really carries a hex (optionally ``g``-prefixed) short-hash
+        suffix; any other ``<version>-<word>`` must match exactly.
+        """
+        if manifest_version == version:
+            return True
+        _, sep, suffix = manifest_version.rpartition("-")
+        if sep and suffix and all(c in "0123456789abcdefABCDEFg" for c in suffix):
+            return manifest_version.rpartition("-")[0] == version
+        return False
+
     def _resolve_target(
         self,
         conn,
@@ -134,11 +145,19 @@ class Rollback(BaseCommand):
         if self.to is not None:
             raw = normalize_digest(self.to)
             # Digests only exist under releases/<digest>/; anything else is
-            # tried as a version string against kept release manifests.
-            if _is_digest(raw) or self._digest_dir_exists(conn, raw):
+            # probed as a release dir first (release dirs are digest-named
+            # in practice), then tried as a version string against kept
+            # release manifests.
+            # A digest-shaped value is case-normalized so the release path
+            # probe cannot silently miss an uppercase SHA (release dirs are
+            # always lowercase hex).
+            if _is_digest(raw.lower()):
+                raw = raw.lower()
+                target = self._check_digest_target(conn, raw)
+            elif self._digest_dir_exists(conn, raw):
                 target = self._check_digest_target(conn, raw)
             else:
-                target = self._target_by_version(conn, releases, raw)
+                target = self._target_by_version(conn, state, releases, raw)
             if target == normalize_digest(current_digest):
                 self.output.info(
                     "The requested release is already the current release."
@@ -168,6 +187,13 @@ class Rollback(BaseCommand):
 
     def _check_digest_target(self, conn, target: str) -> str:
         """Discriminate presence of an exact digest target on the server."""
+        if not self._digest_dir_exists(conn, target):
+            raise cappa.Exit(
+                f"Release '{target}' is not available on the server - it was"
+                " pruned when old releases were garbage-collected.\nRedeploy"
+                " the old commit/tag instead.",
+                code=1,
+            )
         _, exists = conn.run(
             f"test -f {serverops.q(f'{self._release_path(target)}/manifest.json')}",
             warn=True,
@@ -175,31 +201,39 @@ class Rollback(BaseCommand):
         )
         if not exists:
             raise cappa.Exit(
-                f"Release '{target}' is not available on the server - it was"
-                " pruned when old releases were garbage-collected.\nRedeploy"
-                " the old commit/tag instead.",
+                f"Release directory '{target}' exists but is incomplete (no"
+                " manifest.json) - it cannot be activated. Re-run"
+                " `fujin deploy --force` to rebuild it.",
                 code=1,
             )
         return target
 
-    def _target_by_version(self, conn, releases: list[str], version: str) -> str:
-        """Resolve a ``--to <version>`` against kept release manifests.
+    def _target_by_version(
+        self, conn, state: store.State, releases: list[str], version: str
+    ) -> str:
+        """Resolve a ``--to <version>`` against kept release manifests only.
 
-        Reading every kept release's manifest is cheap (few releases kept);
-        the target discrimen is ambiguous on no or multiple matches.
+        Only releases the server's GC keeps are candidates (users never see
+        raw ``ls releases/`` output); reading every kept release's manifest
+        is cheap (few releases kept). The target discrimen is ambiguous on
+        no or multiple matches.
         """
+        kept = self._kept_releases(state, releases)
         candidates: list[str] = []
         for digest in releases:
+            if digest not in kept:
+                continue  # garbage-collected releases are never targets
             raw = serverops.read_remote_file(
                 conn, f"{self._release_path(digest)}/manifest.json"
             )
             if raw is None:
                 continue  # staging residue or corrupt dir: not a candidate
             try:
-                if decode_manifest(raw).version == version:
-                    candidates.append(normalize_digest(digest))
+                manifest_version = decode_manifest(raw).version
             except Exception:
                 continue
+            if self._version_matches(manifest_version, version):
+                candidates.append(normalize_digest(digest))
         if not candidates:
             raise cappa.Exit(
                 f"No kept release with version '{version}' on the server"
