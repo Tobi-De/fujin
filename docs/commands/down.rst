@@ -32,22 +32,21 @@ Here's what happens when you run ``fujin down``:
 
 1. **Prompt for confirmation**: Shows a warning message about the irreversible action and asks for confirmation.
 
-2. **Read current version**: Reads the version from the ``.version`` file to locate the bundle.
+2. **Stop services**: Stops and disables all configured systemd services (app services, sockets, timers).
 
-3. **Run uninstall script**: Executes the bundle's uninstall script (``python3 {bundle}.pyz uninstall``) which:
-   - Stops all systemd services
-   - Disables services from auto-starting
-   - Removes systemd unit files
-   - Removes Caddy configuration (if webserver was enabled)
-   - Deletes the application user
+3. **Legacy uninstall**: If the app still has an old-style ``.versions/*.pyz`` bundle, its uninstall script is executed first.
 
-4. **Remove app directory**: Deletes the entire application directory (``/opt/fujin/your-app``).
+4. **Remove app directory**: Deletes the entire application directory
+   (``/opt/fujin/your-app``), including the release tree
+   (``releases/``, ``store/``, ``shared/``), any leftover legacy
+   ``.install/``/``.versions/`` directories, and the application user is
+   deleted.
 
 5. **Uninstall Caddy** (if ``--full``): Removes the Caddy web server from the system.
 
 6. **Log operation**: Records the teardown to the audit log as either ``down`` or ``full-down``.
 
-If the uninstall script fails and ``--force`` is not set, the command exits with an error. With ``--force``, it continues and force-removes the app directory using ``rm -rf``.
+If the remove step errors and ``--force`` is not set, the command exits with an error. With ``--force``, it continues and force-removes the app directory using ``rm -rf``.
 
 See Also
 --------

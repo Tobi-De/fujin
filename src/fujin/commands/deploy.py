@@ -1,41 +1,99 @@
 from __future__ import annotations
 
-import json
 import logging
+import os
 import shlex
-import shutil
-import hashlib
-import subprocess
+import signal
+import sys
 import tempfile
-import zipapp
-from contextlib import contextmanager
+import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Generator
+from typing import Annotated
 
 import cappa
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm
 from rich.table import Table
 
-import fujin._installer as installer
+from fujin import build, connection
+from fujin import manifest as m
+from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
-from fujin.commands.rollback import Rollback
 from fujin.config import get_git_short_hash
-from fujin import connection
-from fujin.connection import SSH2Connection
-from fujin.errors import (
-    BuildError,
-    CommandError,
-    DeploymentError,
-    UploadError,
-)
+from fujin.errors import DeploymentError
 from fujin.formatting import safe_format
-from fujin.secrets import resolve_secrets
+from fujin.redaction import clear_secrets, redact, register_secrets
+from fujin.secrets import env_values, resolve_secrets, secret_refs
+from rich.prompt import Confirm
 
 logger = logging.getLogger(__name__)
+
+EXIT_SERVICE_START_FAILED = 3
+
+
+def _resolve_live_digest(conn, app_dir: str, state: store.State | None) -> str | None:
+    """Digest of the release the ``current`` symlink actually points at.
+
+    The symlink is the source of truth (state.json is a cache that can be
+    stale); falls back to ``state.current`` when the symlink is missing.
+    """
+    out, ok = conn.run(
+        f"readlink {shlex.quote(app_dir + '/current')}", warn=True, hide=True
+    )
+    target = out.strip() if ok and out.strip() else ""
+    if target:
+        digest = target.rstrip("/").rsplit("/", 1)[-1]
+        if len(digest) == 64 and all(c in "0123456789abcdef" for c in digest):
+            return digest
+    return state.current if state and state.current else None
+
+
+def collect_local_units(
+    files: Mapping[str, m.InputFile], config
+) -> tuple[dict[str, str], dict[str, dict[str, str]], set[str]]:
+    """Unit files + dropins + oneshot units from the local staging tree.
+
+    See :func:`serverops.expand_dropins` for the return contract.
+    """
+    unit_contents = [
+        (serverops.unit_rel_name(path), (spec.content or b"").decode("utf-8"))
+        for path, spec in sorted(files.items())
+        if path.startswith("systemd/")
+    ]
+    return serverops.expand_dropins(unit_contents)
+
+
+def merge_server_built(
+    client_manifest: m.Manifest, server_built: Mapping[str, dict]
+) -> m.Manifest:
+    """Merge server-hashed ``venv/**`` / ``bin/**`` entries into the manifest.
+
+    The server reports ``{"sha256": hex, "mode": octalStr|int}`` for regular
+    files and ``{"link": target, "mode": ...}`` for symlinks, keyed by
+    staging-relative path. Rebuilt deterministically; the final
+    :func:`fujin.manifest.release_digest` covers the complete tree.
+    """
+    payload = m.manifest_to_dict(client_manifest, include_created_at=False)
+    entries: dict[str, dict] = dict(payload["entries"])
+    for path, info in dict(server_built).items():
+        mode = info.get("mode", 0)
+        if isinstance(mode, int):
+            mode = f"{mode:04o}"
+        entry: dict = {
+            "path": path,
+            "sha256": info.get("sha256"),
+            "mode": mode,
+            "kind": m.classify_path(path).value,
+        }
+        if "link" in info:
+            entry["link"] = info["link"]
+        entries[path] = entry
+    payload["entries"] = entries
+    return m.manifest_from_dict(payload)
 
 
 @cappa.command(
@@ -47,589 +105,919 @@ class Deploy(BaseCommand):
         bool,
         cappa.Arg(
             long="--no-input",
-            help="Do not prompt for input (e.g. retry upload)",
+            help="Do not prompt for input",
         ),
     ] = False
     full_restart: Annotated[
         bool,
         cappa.Arg(
             long="--full-restart",
-            help="Force a full restart instead of reload-or-restart",
-        ),
-    ] = False
-    restart_on_env_change: Annotated[
-        bool,
-        cappa.Arg(
-            long="--restart-on-env-change",
-            help="Force full restart if environment variables changed",
+            help="Restart every unit instead of reload-or-restart",
         ),
     ] = False
     no_rollback: Annotated[
         bool,
         cappa.Arg(
             long="--no-rollback",
-            help="Disable automatic rollback on deployment failure",
+            help="Disable automatic rollback when services fail to start",
         ),
     ] = False
-    bundle_dir: Annotated[
-        Path | None,
+    force: Annotated[
+        bool,
         cappa.Arg(
-            long="--bundle-dir",
-            help="Directory to create bundle in (preserved after deploy, fails if exists)",
+            long="--force",
+            help="Perform a full deploy even when nothing changed "
+            "(e.g. to re-run post-install hooks and migrations)",
         ),
-    ] = None
+    ] = False
+    no_cache: Annotated[
+        bool,
+        cappa.Arg(
+            long="--no-cache",
+            help="Rebuild from scratch instead of reusing the local build cache",
+        ),
+    ] = False
+    compress_zstd: Annotated[
+        bool,
+        cappa.Arg(
+            long="--compress-zstd",
+            help="Use zstd compression for the rsync transfer",
+        ),
+    ] = False
 
     def __call__(self):
-        logger.debug("Starting deployment for %s", self.config.app_name)
-        logger.debug("Target host: %s", self.selected_host.address)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
-        if self.config.secret_config:
+        config = self.config
+        host = self.selected_host
+        app_dir = config.app_dir
+
+        # A fresh deploy starts with an empty redaction registry; resolved
+        # secrets are registered right after resolution below.
+        clear_secrets()
+
+        logger.debug("Starting deployment for %s", config.app_name)
+        logger.debug("Target host: %s", host.address)
+
+        secret_config = config.effective_secrets(host)
+        if secret_config:
             self.output.info("Resolving secrets from configuration...")
-            logger.debug("Using secret adapter: %s", self.config.secret_config.adapter)
-            parsed_env = resolve_secrets(
-                self.selected_host.env_content, self.config.secret_config
-            )
+            parsed_env = resolve_secrets(host.env_content, secret_config)
+            # Track every resolved secret value so all output paths render it
+            # as `<$REF>` instead of the raw value (never registered in the
+            # build cache; #77).
+            secret_aliases = secret_refs(host.env_content)
+            register_secrets(env_values(parsed_env), secret_aliases)
         else:
-            parsed_env = self.selected_host.env_content
+            parsed_env = host.env_content
+            secret_aliases = {}
 
-        try:
-            logger.debug("Build command: %s", self.config.build_command)
-            self.output.info(f"Building application ...")
-            subprocess.run(
-                self.config.build_command,
-                check=True,
-                shell=True,
-                timeout=self.config.build_timeout,
-            )
-        except subprocess.TimeoutExpired:
+        context = build._interpolation_context(config, host)
+        resolved_env, unresolved = safe_format(parsed_env, **context)
+        if unresolved:
             self.output.error(
-                f"Build command timed out after {self.config.build_timeout}s"
+                f"Unresolved template variables in env file:"
+                f" {', '.join(sorted(unresolved))}."
             )
+            raise DeploymentError(
+                "Unresolved template variables in env file:"
+                f" {', '.join(sorted(unresolved))}. Deployment aborted"
+                " (fail-closed)."
+            )
+        self._fail_closed_on_unresolved_secrets(resolved_env, secret_aliases)
+
+        with connection.connection(host=host, compress=False) as conn:
+            self._notice_old_layout(conn)
+            serverops.ensure_app_user(conn, config.app_user or config.app_name)
+            serverops.ensure_layout(
+                conn, app_dir, config.app_user or config.app_name, host.user
+            )
+            lock = serverops.acquire_lock(conn, app_dir)
+            try:
+                # Inside the lock: a concurrent deploy's staging dir is not
+                # ours to delete.
+                transfer.sweep_stale_staging(conn, app_dir)
+                self._deploy(conn, resolved_env, context)
+            finally:
+                serverops.release_lock(conn, app_dir, lock)
+
+    # =======================================================================================
+    # Orchestration
+    # =======================================================================================
+
+    def _deploy(self, conn, resolved_env: str, context: Mapping[str, object]) -> None:
+        config = self.config
+        app_dir = config.app_dir
+
+        self.output.info("Building application ...")
+        try:
+            result = build.run_build(
+                config, no_cache=self.no_cache, host=self.selected_host
+            )
+        except Exception as exc:
+            raw = str(exc.message) if isinstance(exc, DeploymentError) else str(exc)
+            wrapped = redact(raw)
+            # If the value only lived in the original exception's message,
+            # the cause chain must not carry it into tracebacks either.
+            raise DeploymentError(wrapped) from (exc if wrapped == raw else None)
+        files = dict(result.files)
+
+        # The rendered .env is deploy-time state (kind ``env``), never
+        # build-cache content (#77): it is written into the staging tree for
+        # the transfer only, and removed again afterwards so the cache stays
+        # secret-free.
+        client_files: dict[str, m.InputFile | str | bytes] = {
+            **files,
+            m.ENV_PATH: m.InputFile(content=resolved_env.encode()),
+        }
+        client_manifest = m.build_manifest(
+            app_name=config.app_name,
+            version=config.local_version,
+            config_fingerprint=m.config_fingerprint(config),
+            dist_sha256=result.dist_sha256,
+            files=client_files,
+        )
+        client_digest = m.release_digest(client_manifest)
+
+        state = serverops.read_state(conn, app_dir)
+        if state is not None and not self.force and store.is_noop(client_digest, state):
             self.output.info(
-                f"Command: {self.config.build_command}\n\n"
-                "Troubleshooting:\n"
-                "  - The build is taking too long; increase build_timeout in fujin.toml\n"
-                "  - Check for infinite loops or hung subprocesses in your build\n"
-                "  - Try running the build command manually to see its progress"
+                f"No changes detected; release {client_digest} is already live."
             )
-            raise BuildError(
-                "Build timed out", command=self.config.build_command
-            ) from None
-        except subprocess.CalledProcessError as e:
-            self.output.error(f"Build command failed with exit code {e.returncode}")
-            self.output.info(
-                f"Command: {self.config.build_command}\n\n"
-                "Troubleshooting:\n"
-                "  - Check that all build dependencies are installed\n"
-                "  - Verify your build_command in fujin.toml is correct\n"
-                "  - Try running the build command manually to see full error output"
+            self._converge(conn, client_manifest)
+            self._run_hooks(conn, "post_start", context, release_path=None)
+            self._gc(conn, state, self._list_releases(conn))
+            log_operation(
+                conn,
+                config.app_name,
+                "noop",
+                host=self.selected_host.name or self.selected_host.address,
+                version=config.local_version,
             )
-            raise BuildError("Build failed", command=self.config.build_command) from e
-        # the build commands might be responsible for creating the requirements file
-        if self.config.requirements:
-            req_file = Path(self.config.requirements)
-            if req_file.exists():
-                with open(req_file, "rb") as f:
-                    logger.debug(
-                        "Requirements file hash: %s",
-                        hashlib.file_digest(f, "sha256").hexdigest(),
-                    )
-            else:
-                self.output.error(
-                    f"Requirements file not found: {self.config.requirements}"
-                )
-                self.output.info(
-                    "\nTroubleshooting:\n"
-                    "  - Ensure your build_command generates the requirements file\n"
-                    "  - Check that the 'requirements' path in fujin.toml is correct\n"
-                    f"  - Try running: uv pip compile pyproject.toml -o {self.config.requirements}"
-                )
-                raise BuildError(
-                    f"Requirements file not found: {self.config.requirements}"
-                )
+            self.output.success("Deployment already up to date!")
+            return
 
-        version = self.config.version
-        git_commit = get_git_short_hash()
-        bundle_version = self.config.local_version
-        distfile_path = self.config.get_distfile_path(version)
-        logger.debug("Version: %s (bundle: %s)", version, bundle_version)
-        logger.debug("Distfile: %s", distfile_path)
-        if git_commit:
-            logger.debug("Git commit: %s", git_commit)
-
-        if not self.config.deployed_units:
-            raise DeploymentError("No systemd units found, nothing to deploy")
-
-        with self._bundle_directory() as tmpdir:
-            self.output.info("Preparing deployment bundle...")
-            zipapp_dir = Path(tmpdir) / "zipapp_source"
-            zipapp_dir.mkdir()
-
-            context = {
-                "app_name": self.config.app_name,
-                "app_user": self.config.app_user,
-                "version": version,
-                "app_dir": self.config.app_dir,
-                "install_dir": self.config.install_dir,
-                "user": self.selected_host.user,
-            }
-
-            # Add unit names to context for cross-service references (e.g., After={web_socket})
-            # Only expose singleton units that make sense as dependency targets:
-            # - socket/timer if they exist (always singletons)
-            # - service only if no socket/timer and single replica
-            for du in self.config.deployed_units:
-                if du.socket_file:
-                    context[f"{du.name}_socket"] = du.template_socket_name
-                if du.timer_file:
-                    context[f"{du.name}_timer"] = du.template_timer_name
-                if not du.socket_file and not du.timer_file and not du.is_template:
-                    context[f"{du.name}"] = du.template_service_name
-
-            # Copy installer entry point
-            shutil.copy(installer.__file__, zipapp_dir / "__main__.py")
-
-            logger.debug("Copying distfile to bundle")
-            shutil.copy(distfile_path, zipapp_dir / distfile_path.name)
-            if self.config.requirements:
-                logger.debug("Copying requirements.txt to bundle")
-                shutil.copy(self.config.requirements, zipapp_dir / "requirements.txt")
-
-            # Track unresolved variables across all files
-            all_unresolved = set()
-
-            # Resolve env file (uploaded separately, not bundled)
-            resolved_env, unresolved = safe_format(parsed_env, **context)
-            all_unresolved.update(unresolved)
-
-            logger.debug("Validating and resolving systemd units")
-            systemd_dir = zipapp_dir / "systemd"
-            systemd_dir.mkdir()
-
-            logger.debug(
-                "Processing %d deployed units", len(self.config.deployed_units)
+        self._show_deployment_summary()
+        staging_dir = result.staging_dir
+        try:
+            # The rendered .env is deploy-time state (kind ``env``), written
+            # into the staging tree here: rsync_to_staging mirrors the on-disk
+            # tree and the SCP fallback walks it, so the server-side chmod
+            # 0640 and the verify step both need the real bytes present. The
+            # ``finally`` below removes it (and manifest.json) again so the
+            # build cache stays secret-free (#77).
+            (staging_dir / m.ENV_PATH).write_bytes(resolved_env.encode())
+            self._transfer_and_activate(
+                conn,
+                staging_dir,
+                result,
+                files,
+                client_manifest,
+                client_digest,
+                state,
+                context,
             )
-            for du in self.config.deployed_units:
-                # Validate and resolve main service file
-                logger.debug("Processing unit: %s", du.name)
-                service_content = du.service_file.read_text()
-                resolved_content, unresolved = safe_format(service_content, **context)
-                all_unresolved.update(unresolved)
-
-                (systemd_dir / du.service_file.name).write_text(resolved_content)
-
-                # Process and add socket file if exists
-                if du.socket_file:
-                    logger.debug("  Including socket file: %s", du.socket_file.name)
-                    socket_content = du.socket_file.read_text()
-                    resolved_socket, unresolved = safe_format(socket_content, **context)
-                    all_unresolved.update(unresolved)
-                    (systemd_dir / du.socket_file.name).write_text(resolved_socket)
-
-                # Process and add timer file if exists
-                if du.timer_file:
-                    logger.debug("  Including timer file: %s", du.timer_file.name)
-                    timer_content = du.timer_file.read_text()
-                    resolved_timer, unresolved = safe_format(timer_content, **context)
-                    all_unresolved.update(unresolved)
-                    (systemd_dir / du.timer_file.name).write_text(resolved_timer)
-
-            # Build installer metadata from deployed units
-            deployed_units_data = []
-            for du in self.config.deployed_units:
-                unit_dict = {
-                    "name": du.name,
-                    "service_file": du.service_file.name,
-                    "socket_file": du.socket_file.name if du.socket_file else None,
-                    "timer_file": du.timer_file.name if du.timer_file else None,
-                    "replicas": du.replicas,
-                    "is_template": du.is_template,
-                    "service_instances": du.service_instances(),
-                    "template_service_name": du.template_service_name,
-                    "template_socket_name": du.template_socket_name,
-                    "template_timer_name": du.template_timer_name,
-                }
-                deployed_units_data.append(unit_dict)
-
-            # Handle common dropins
-            common_dir = self.config.local_config_dir / "systemd" / "common.d"
-            if common_dir.exists():
-                common_bundle = systemd_dir / "common.d"
-                common_bundle.mkdir(exist_ok=True)
-                common_dropins = list(common_dir.glob("*.conf"))
-                if common_dropins:
-                    logger.debug("Processing %d common dropins", len(common_dropins))
-                for dropin in common_dropins:
-                    dropin_content = dropin.read_text()
-                    resolved_dropin, unresolved = safe_format(dropin_content, **context)
-                    all_unresolved.update(unresolved)
-                    (common_bundle / dropin.name).write_text(resolved_dropin)
-                    logger.debug("  Bundled common dropin: %s", dropin.name)
-
-            # Handle service-specific dropins
-            for service_dropin_dir in (self.config.local_config_dir / "systemd").glob(
-                "*.service.d"
-            ):
-                bundle_dropin_dir = systemd_dir / service_dropin_dir.name
-                bundle_dropin_dir.mkdir()
-                dropins = list(service_dropin_dir.glob("*.conf"))
-                logger.debug(
-                    "Processing %d dropins for %s",
-                    len(dropins),
-                    service_dropin_dir.name,
-                )
-                for dropin in dropins:
-                    dropin_content = dropin.read_text()
-                    resolved_dropin, unresolved = safe_format(dropin_content, **context)
-                    all_unresolved.update(unresolved)
-                    (bundle_dropin_dir / dropin.name).write_text(resolved_dropin)
-                    logger.debug("  Bundled dropin: %s", dropin.name)
-
-            if self.config.caddyfile_exists:
-                logger.debug("Resolving and bundling Caddyfile")
-                caddyfile_content = self.config.caddyfile_path.read_text()
-                resolved_caddyfile, unresolved = safe_format(
-                    caddyfile_content, **context
-                )
-                all_unresolved.update(unresolved)
-                (zipapp_dir / "Caddyfile").write_text(resolved_caddyfile)
-
-            # Resolve hook commands
-            resolved_hooks: dict[str, list[str]] = {}
-            if self.config.hooks_config:
-                for phase in (
-                    "pre_install",
-                    "post_install",
-                    "post_start",
-                ):
-                    commands = getattr(self.config.hooks_config, phase)
-                    resolved_commands = []
-                    for cmd in commands:
-                        resolved, unresolved = safe_format(cmd, **context)
-                        all_unresolved.update(unresolved)
-                        resolved_commands.append(resolved)
-                    if resolved_commands:
-                        resolved_hooks[phase] = resolved_commands
-
-            if all_unresolved:
-                self.output.warning(
-                    f"Found unresolved variables in configuration files: {', '.join(sorted(all_unresolved))}\n"
-                    f"Available variables: {', '.join(sorted(context.keys()))}\n"
-                    "These will be left as-is (e.g., {variable_name}) in deployed files."
-                )
-
-            installer_config = {
-                "app_name": self.config.app_name,
-                "app_user": self.config.app_user,
-                "deploy_user": self.selected_host.user,
-                "app_dir": self.config.app_dir,
-                "version": bundle_version,
-                "installation_mode": self.config.installation_mode.value,
-                "python_version": self.config.python_version,
-                "requirements": bool(self.config.requirements),
-                "distfile_name": distfile_path.name,
-                "webserver_enabled": self.config.caddyfile_exists,
-                "caddy_config_path": self.config.caddy_config_path,
-                "app_bin": self.config.app_name,  # Just the binary name, not full path
-                "deployed_units": deployed_units_data,
-                "hooks": resolved_hooks,
-            }
-
-            # Write config without indent for smaller size
-            (zipapp_dir / "config.json").write_text(json.dumps(installer_config))
-
-            logger.debug("Creating Python zipapp installer")
-            zipapp_path = Path(tmpdir) / "installer.pyz"
-            zipapp.create_archive(
-                zipapp_dir,
-                zipapp_path,
-                interpreter="/usr/bin/env python3",
-            )
-            logger.debug("Created zipapp at %s", zipapp_path)
-
-            bundle_size = zipapp_path.stat().st_size
-            self._show_deployment_summary(bundle_size, bundle_version)
-
-            remote_bundle_dir = Path(self.config.install_dir) / ".versions"
-            remote_bundle_path = (
-                f"{remote_bundle_dir}/{self.config.app_name}-{bundle_version}.pyz"
-            )
-
-            # Quote remote paths for shell usage (safe insertion into remote commands)
-            remote_bundle_dir_q = shlex.quote(str(remote_bundle_dir))
-            remote_bundle_path_q = shlex.quote(str(remote_bundle_path))
-
-            # Minimum size threshold for rsync (30MB) - below this, overhead isn't worth it
-            min_rsync_size = 30 * 1024 * 1024
-
-            # Upload and Execute
-            with self._deploy_session() as conn:
-                # Check rsync availability while creating the directory (single round trip)
-                # Only check if bundle is large enough to benefit from rsync
-                if bundle_size >= min_rsync_size:
-                    output, _ = conn.run(
-                        f"mkdir -p {remote_bundle_dir_q} > /dev/null && command -v rsync",
-                        warn=True,
-                        hide=True,
-                    )
-                    use_rsync = bool(output.strip())
-                else:
-                    conn.run(f"mkdir -p {remote_bundle_dir_q}", hide=True)
-                    use_rsync = False
-
-                self.output.info("Uploading deployment bundle...")
-                # rsync uses staging file for delta transfer benefits from prior deploys
-                if use_rsync:
-                    staging_path = f"{remote_bundle_dir}/.staging.pyz"
-                    staging_path_q = shlex.quote(staging_path)
-                    logger.debug("Using rsync for upload")
-                    try:
-                        conn.rsync_upload(str(zipapp_path), staging_path_q)
-                        # Copy staging to final path (preserves staging for next deploy's delta)
-                        conn.run(
-                            f"cp -f {staging_path_q} {remote_bundle_path_q}",
-                            hide=True,
-                        )
-                    except FileNotFoundError:
-                        self.output.warning(
-                            "rsync not found locally, falling back to SCP"
-                        )
-                        use_rsync = False
-                    except UploadError as e:
-                        self.output.warning(f"rsync failed: {e}, falling back to SCP")
-                        use_rsync = False
-
-                if not use_rsync:
-                    logger.debug("Using SCP for upload")
-                    conn.put(str(zipapp_path), remote_bundle_path_q, verify=True)
-
-                self.output.success("Bundle uploaded successfully.")
-
-                self.output.info("Executing remote installation...")
-
-                # Write .env file directly (not bundled for security)
-                remote_env_path = f"{self.config.install_dir}/.env"
-                remote_env_path_q = shlex.quote(remote_env_path)
-                install_dir_q = shlex.quote(self.config.install_dir)
-                remote_env_backup_q = shlex.quote(f"{remote_env_path}.bak")
-                logger.debug("Writing .env to %s", remote_env_path)
-
-                # Backup existing .env (ensure install dir exists first)
-                conn.run(
-                    f"mkdir -p {install_dir_q} && "
-                    f"cp {remote_env_path_q} {remote_env_backup_q} 2>/dev/null || true",
-                    hide=True,
-                )
-
-                if self.restart_on_env_change:
-                    new_env_hash = hashlib.sha256(resolved_env.encode()).hexdigest()
-                    old_hash_output, _ = conn.run(
-                        f"sha256sum {remote_env_path_q} 2>/dev/null | cut -d' ' -f1 || true",
-                        hide=True,
-                    )
-                    old_env_hash = old_hash_output.strip()
-                    if old_env_hash and old_env_hash != new_env_hash:
-                        self.output.info(
-                            "Environment variables changed, forcing full restart..."
-                        )
-                        self.full_restart = True
-
-                # Upload .env via SCP (avoids shell escaping issues with base64 piping)
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".env") as tmp_env:
-                    tmp_env.write(resolved_env)
-                    tmp_env.flush()
-                    conn.put(tmp_env.name, remote_env_path_q)
-
-                # chown may fail on first deploy if app_user doesn't exist yet
-                # (installer creates it), so use || true to make it non-fatal
-                conn.run(
-                    f"chmod 640 {remote_env_path_q} && "
-                    f"(chown {self.selected_host.user}:{self.config.app_user} {remote_env_path_q} || true)",
-                    hide=True,
-                )
-
-                # Run pre-install hooks (as deploy user, with .env sourced)
-                pre_install_commands = resolved_hooks.get("pre_install", [])
-                if pre_install_commands:
-                    self.output.info("Running pre-install hooks...")
-                    try:
-                        for cmd in pre_install_commands:
-                            self.output.info(f"  [pre-install] {cmd}")
-                            full_cmd = (
-                                f"set -a; source {install_dir_q}/.env 2>/dev/null; set +a; "
-                                f"{cmd}"
-                            )
-                            conn.run(full_cmd, pty=True)
-                    except CommandError:
-                        conn.run(
-                            f"mv {remote_env_backup_q} {remote_env_path_q} 2>/dev/null || true",
-                            hide=True,
-                        )
-                        raise
-
-                rollback_ran = False
-                rollback_succeeded = False
+        finally:
+            for name in (m.MANIFEST_FILENAME, m.ENV_PATH):
                 try:
-                    install_cmd = f"sudo python3 {remote_bundle_path_q} install"
-                    if self.full_restart:
-                        install_cmd += " --full-restart"
-                    if self.verbose > 0:
-                        install_cmd += f" --verbose {self.verbose}"
-                    conn.run(install_cmd, pty=True)
-                except CommandError as e:
-                    if e.code != installer.EXIT_SERVICE_START_FAILED:
-                        conn.run(f"rm -f {remote_env_backup_q}", warn=True, hide=True)
-                        raise DeploymentError(
-                            f"Installation failed with exit code {e.code}"
-                        ) from e
+                    (staging_dir / name).unlink()
+                except OSError:  # pragma: no cover - best effort
+                    pass
 
-                    if self.no_rollback:
-                        conn.run(f"rm -f {remote_env_backup_q}", warn=True, hide=True)
-                        raise DeploymentError(
-                            "Services failed to start. Rollback disabled via --no-rollback."
-                        ) from e
+    def _transfer_and_activate(
+        self,
+        conn,
+        staging_dir: Path,
+        result: build.BuildResult,
+        files: dict[str, m.InputFile],
+        client_manifest,
+        client_digest: str,
+        state: store.State | None,
+        context: Mapping[str, object],
+    ) -> None:
+        config = self.config
+        app_dir = config.app_dir
 
-                    # Restore previous .env before rollback
-                    self.output.info("Restoring previous environment...")
-                    conn.run(
-                        f"mv {remote_env_backup_q} {remote_env_path_q} 2>/dev/null || true",
-                        hide=True,
+        # Normalize staged file modes to their manifest entry modes, then
+        # write the client manifest into the local staging tree so the remote
+        # verify script (and the merged rewrite below) can find it.
+        for path, entry in client_manifest.entries.items():
+            staged = staging_dir / path
+            if staged.exists():
+                staged.chmod(entry.mode)
+        (staging_dir / m.MANIFEST_FILENAME).write_bytes(
+            m.canonical_manifest_bytes(client_manifest)
+        )
+
+        # The live release's manifest is read BEFORE any swap: it is the diff
+        # base for the restart set and the rollback target on failure.
+        prev_manifest = serverops.read_current_manifest(conn, app_dir)
+        live_digest = _resolve_live_digest(conn, app_dir, state)
+        first_deploy = live_digest is None and prev_manifest is None
+
+        remote_staging = f"{app_dir}/releases/.staging-{os.getpid()}"
+        conn.run(f"mkdir -p {serverops.q(remote_staging)}", warn=True, hide=True)
+
+        mfile = m.CADDYFILE_PATH
+        try:
+            # Dedup: hardlink every client-known entry that is byte-identical
+            # (same sha256) to the live release. rsync's own --link-dest is
+            # unusable (RsyncProject/rsync#715), so this is explicit.
+            unchanged: dict[str, int] = {}
+            if prev_manifest is not None and live_digest:
+                for path, entry in client_manifest.entries.items():
+                    prev_entry = prev_manifest.entries.get(path)
+                    if (
+                        prev_entry is not None
+                        and prev_entry.sha256 == entry.sha256
+                        and not path.startswith("venv/")
+                    ):
+                        unchanged[path] = entry.mode
+            if unchanged:
+                linked, failed = serverops.link_unchanged(
+                    conn,
+                    remote_staging,
+                    f"{app_dir}/releases/{live_digest}",
+                    unchanged,
+                )
+                if failed:
+                    logger.info(
+                        "Hardlink dedup missed %d file(s); rsync will transfer them",
+                        len(failed),
                     )
-
-                    rollback = Rollback(host=self.host, previous=True, strict=True)
+                else:
                     self.output.info(
-                        "Services failed to start. Rolling back to previous version."
-                    )
-                    try:
-                        if self.no_input or Confirm.ask(
-                            "\n[bold yellow]Proceed with rollback?[/bold yellow]",
-                            default=True,
-                        ):
-                            rollback_result = rollback()
-                            rollback_ran = True
-                            rollback_succeeded = rollback_result == 1
-                        else:
-                            raise DeploymentError(
-                                f"Installation failed with exit code {e.code}"
-                            ) from e
-                    except KeyboardInterrupt:
-                        self.output.info("\nRollback cancelled.")
-                    finally:
-                        # Always remove the failed bundle to prevent it from
-                        # appearing in future rollback options
-                        self.output.info("Removing failed deployment bundle...")
-                        conn.run(f"rm -f {remote_bundle_path_q}", warn=True)
-
-                if self.config.versions_to_keep and not rollback_ran:
-                    self.output.info("Pruning old versions...")
-                    logger.debug("Keeping %d versions", self.config.versions_to_keep)
-                    conn.run(
-                        f"cd {remote_bundle_dir_q} && "
-                        f"ls -1t | tail -n +{self.config.versions_to_keep + 1} | xargs -r rm",
-                        warn=True,
+                        f"Deduped {linked} unchanged file(s) against the live release."
                     )
 
-                if not rollback_ran:
-                    conn.run(f"rm -f {remote_env_backup_q}", warn=True, hide=True)
+            self.output.info("Uploading release tree...")
+            # ``built.json`` is local build-cache bookkeeping, not release
+            # content: nothing in the tree references it and it would land
+            # in the immutable release dir otherwise.
+            transfer.rsync_to_staging(
+                conn,
+                str(staging_dir),
+                remote_staging,
+                ignore_existing=bool(unchanged),
+                compress_zstd=self.compress_zstd,
+                modes={
+                    path: entry.mode for path, entry in client_manifest.entries.items()
+                },
+                exclude={build.BUILT_FILENAME},
+            )
+            serverops.set_envfile_mode(conn, remote_staging)
 
-                # Get git commit hash if available
-                log_operation(
-                    connection=conn,
-                    app_name=self.config.app_name,
-                    operation="deploy",
-                    host=self.selected_host.name or self.selected_host.address,
-                    version=bundle_version,
-                    git_commit=git_commit,
-                )
+            self.output.info("Installing application code on the server...")
+            tree_requirements = staging_dir / build.REQUIREMENTS_TREE_PATH
+            dist_tree_path = next(
+                path
+                for path in sorted(result.files)
+                if path.startswith(build.BIN_DIR + "/")
+            )
+            serverops.install_code_into_staging(
+                conn,
+                remote_staging,
+                config.installation_mode.value,
+                config.python_version,
+                (str(tree_requirements) if tree_requirements.is_file() else None),
+                dist_tree_path,
+                app_name=config.app_name,
+            )
 
-        if not rollback_ran:
-            self.output.success("Deployment completed successfully!")
+            serverops.normalize_staging_ownership(
+                conn, remote_staging, config.app_user or config.app_name
+            )
 
-        if self.config.caddyfile_exists and (not rollback_ran or rollback_succeeded):
-            domain = self.config.get_domain_name()
-            if domain:
-                url = f"https://{domain}"
-                self.output.info(f"Application is available at: {url}")
+            server_built = serverops.hash_server_built(
+                conn, remote_staging, config.installation_mode.value
+            )
+            final_manifest = merge_server_built(client_manifest, server_built)
+            final_digest = m.release_digest(final_manifest)
+            self._write_remote_manifest(conn, remote_staging, final_manifest)
 
-    @contextmanager
-    def _bundle_directory(self) -> Generator[Path, None, None]:
-        """Context manager for bundle directory.
-
-        If bundle_dir is specified, uses that directory (fails if exists).
-        Otherwise, creates a temporary directory that is cleaned up on exit.
-        """
-        if self.bundle_dir:
-            if self.bundle_dir.exists():
+            self.output.info("Verifying staged release tree...")
+            verify = transfer.verify_staging(
+                conn, remote_staging, m.manifest_to_dict(final_manifest)
+            )
+            if not verify.ok:
                 raise DeploymentError(
-                    f"Bundle directory already exists: {self.bundle_dir}"
+                    redact(transfer.verify_report(remote_staging, verify))
                 )
-            self.bundle_dir.mkdir(parents=True)
-            logger.debug("Using bundle directory: %s", self.bundle_dir)
-            yield self.bundle_dir
-            self.output.info(f"Bundle preserved in: {self.bundle_dir}")
-        else:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                yield Path(tmpdir)
 
-    @contextmanager
-    def _deploy_session(self) -> Generator[SSH2Connection, None, None]:
-        """Context manager that combines SSH connection + deployment lock.
+            # Pre-install hooks: the old release is still live.
+            self._run_hooks(conn, "pre_install", context, release_path=None)
 
-        Acquires the deploy lock on the remote server before yielding the
-        connection, and releases it on exit (even on error).
+            self.output.info("Committing release...")
+            transfer.commit_release(conn, remote_staging, final_digest)
+            release_path = f"{app_dir}/releases/{final_digest}"
+
+            unit_files, dropins, oneshots = collect_local_units(files, config)
+            if unit_files or dropins:
+                self.output.info("Installing systemd units...")
+                serverops.install_units(conn, config.app_name, unit_files, dropins)
+
+            caddy_entry = final_manifest.entries.get(m.CADDYFILE_PATH)
+            if caddy_entry is not None and caddy_entry.kind is m.EntryKind.CADDY:
+                self._install_caddyfile(conn, staging_dir / mfile)
+
+            # Post-install hooks: committed, NOT live yet; they see the new
+            # release dir and its rendered .env.
+            self._run_hooks(conn, "post_install", context, release_path=release_path)
+
+            self.output.info("Activating release...")
+            transfer.swap_current(conn, app_dir, final_digest)
+
+            self._restart(
+                conn,
+                prev_manifest,
+                final_manifest,
+                oneshots,
+                force_full_restart=self.full_restart or first_deploy,
+            )
+            self._converge(conn, final_manifest)
+            self._wait_for_units(conn, final_manifest, oneshots)
+            self._run_hooks(conn, "post_start", context, release_path=release_path)
+
+            at = datetime.now(UTC).isoformat()
+            new_state = store.record_deploy(
+                state if state is not None else store.State(),
+                final_digest,
+                at,
+                client_digest=client_digest,
+            )
+            serverops.write_state(conn, app_dir, new_state)
+            self._gc(conn, new_state, self._list_releases(conn))
+            log_operation(
+                conn,
+                config.app_name,
+                "deploy",
+                host=self.selected_host.name or self.selected_host.address,
+                version=config.local_version,
+                git_commit=get_git_short_hash(),
+            )
+        except cappa.Exit:
+            transfer.cleanup_staging(conn, remote_staging)
+            raise
+        except DeploymentError as exc:
+            transfer.cleanup_staging(conn, remote_staging)
+            wrapped_msg = str(exc.message)
+            raise DeploymentError(redact(wrapped_msg)) from (
+                exc if redact(wrapped_msg) == wrapped_msg else None
+            )
+        except Exception as exc:
+            transfer.cleanup_staging(conn, remote_staging)
+            wrapped_msg = f"Deployment failed: {exc}"
+            raise DeploymentError(redact(wrapped_msg)) from (
+                exc if redact(wrapped_msg) == wrapped_msg else None
+            )
+
+        self.output.success("Deployment completed successfully!")
+        domain = config.get_domain_name()
+        if domain and final_manifest.entries.get(m.CADDYFILE_PATH) is not None:
+            self.output.info(f"Application is available at: https://{domain}")
+
+    def _write_remote_manifest(
+        self, conn, remote_staging: str, final_manifest: m.Manifest
+    ) -> None:
+        """Overwrite ``manifest.json`` in staging with the merged (server +
+        client) manifest, before verify + commit.
+
+        Transferred via SCP: the merged manifest can be hundreds of KB
+        (thousands of ``venv/**`` entries), which exceeds what can safely
+        travel inside a shell command string (a manifest sent that way hung
+        the SSH channel forever).
         """
-        with connection.connection(host=self.selected_host, compress=False) as conn:
-            install_dir_q = shlex.quote(self.config.install_dir)
-            lock_file_q = shlex.quote(f"{self.config.install_dir}/.deploy_lock")
-            _, acquired = conn.run(
-                f"mkdir -p {install_dir_q} && (set -C; echo $$ > {lock_file_q}) 2>/dev/null",
+        manifest_bytes = m.canonical_manifest_bytes(final_manifest)
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(manifest_bytes)
+            tmp_path = tmp.name
+        try:
+            conn.put(tmp_path, f"{remote_staging}/{m.MANIFEST_FILENAME}")
+        finally:
+            os.unlink(tmp_path)
+
+    # =======================================================================================
+    # Restart set / convergence / readiness
+    # =======================================================================================
+
+    def _restart(
+        self,
+        conn,
+        prev_manifest: m.Manifest | None,
+        final_manifest: m.Manifest,
+        oneshots: set[str],
+        *,
+        force_full_restart: bool,
+    ) -> None:
+        """Restart per the diff-based restart set (#79): a changed unit file
+        restarts exactly that unit (its instances), env changes restart the
+        env-fed service units, code changes restart all app units; sockets and
+        timers restart only when their own file changed; oneshots excluded."""
+        if force_full_restart:
+            # Full restart covers every app unit incl. sockets/timers (a
+            # restarted timer starts; the old installer did the same).
+            unit_names: Iterable[str] = sorted(
+                set(serverops.service_unit_names(final_manifest))
+                | serverops.socket_timer_unit_names(final_manifest)
+            )
+        else:
+            unit_names = store.restart_set(
+                prev_manifest,
+                final_manifest,
+                env_fed_units=[
+                    name for name in serverops.service_unit_names(final_manifest)
+                ],
+                oneshot_units=oneshots,
+            )
+        specs = serverops.expand_patterns(unit_names)
+        if not specs:
+            self.output.info("No unit needs a restart for this deploy.")
+            return
+        verb = "restart" if self.full_restart else "reload-or-restart"
+        # systemctl enable does not accept globs (restart does) and hard-fails
+        # on units without an [Install] section: enable only concrete
+        # non-template units, non-fatal (boot survival is best-effort here);
+        # template instances are enabled by the convergence step right after.
+        enable_specs = sorted(
+            name
+            for name in set(serverops.service_unit_names(final_manifest))
+            | serverops.socket_timer_unit_names(final_manifest)
+            if not name.endswith("@.service") and name not in oneshots
+        )
+        if enable_specs:
+            _, enable_ok = conn.run(
+                f"sudo systemctl enable {serverops.q(*enable_specs)}", warn=True
+            )
+            if not enable_ok:
+                self.output.warning(
+                    "Could not enable some units (missing [Install] section?); "
+                    "they will not start on boot."
+                )
+        _, ok = conn.run(
+            f"sudo systemctl {verb} {serverops.q(*specs)}",
+            warn=True,
+        )
+        if not ok:
+            # Activation steps declare restart failure -> rollback (#76);
+            # _handle_failed_units raises a cappa.Exit in all paths.
+            self._handle_failed_units(conn, specs)
+
+    def _converge(self, conn, manifest: m.Manifest) -> None:
+        """Start missing / stop extra replica instances, both directions.
+
+        Desired instances are ``svc@1..N`` from ``config.replicas``; singular
+        service units keep running across deploys and are untouched here.
+        """
+        app_name = self.config.app_name
+        desired: list[str] = []
+        for path in sorted(manifest.entries):
+            entry = manifest.entries[path]
+            if entry.kind is not m.EntryKind.UNIT:
+                continue
+            name = serverops.unit_rel_name(path)
+            if not name.endswith("@.service"):
+                continue
+            if not name.startswith(f"{app_name}-"):
+                continue
+            base = name.removeprefix(f"{app_name}-").removesuffix("@.service")
+            replicas = self.config.replicas.get(base, 1)
+            desired.extend(
+                sorted(
+                    store.desired_instances(name.removesuffix("@.service"), replicas)
+                )
+            )
+        if not desired:
+            return
+        out, _ok = conn.run(
+            f"systemctl list-unit-files --no-legend "
+            f"{shlex.quote(f'{app_name}-*@*.service')} 2>/dev/null || true",
+            warn=True,
+            hide=True,
+        )
+        present = [
+            parts[0]
+            for line in out.splitlines()
+            if (parts := line.split()) and not parts[0].endswith("@.service")
+        ]
+        start, stop = store.convergence(desired, present)
+        # store.convergence normalizes to instance ids ("svc@2"); systemctl
+        # needs the full unit name ("svc@2.service").
+        if stop and not serverops.stop_and_disable(
+            conn, sorted(f"{u}.service" for u in stop)
+        ):
+            if getattr(self, "_rolling_back", False):
+                # Convergence failure while rolling back: state.current still
+                # points at the target, another rollback would be a no-op loop.
+                raise DeploymentError(
+                    "Failed while stopping extra service instances; inspect the server."
+                )
+            self._handle_failed_units(conn, sorted(f"{u}.service" for u in stop))
+        if start and not serverops.enable_and_start(
+            conn, sorted(f"{u}.service" for u in start)
+        ):
+            if getattr(self, "_rolling_back", False):
+                raise DeploymentError(
+                    "Failed while starting missing service instances; inspect the server."
+                )
+            self._handle_failed_units(conn, sorted(f"{u}.service" for u in start))
+
+    def _readiness_units(self, manifest: m.Manifest, oneshots: set[str]) -> list[str]:
+        """Runtime service units to health-check, derived from the release
+        manifest (same semantics the old installer used): oneshots and
+        services that have a socket or timer in the tree are exempt (the
+        socket/timer governs their lifecycle); template services poll their
+        ``svc@1..N`` instances."""
+        unit_names: set[str] = set()
+        for path, entry in manifest.entries.items():
+            if entry.kind is not m.EntryKind.UNIT:
+                continue
+            if name := store.unit_entry_name(path):
+                unit_names.add(name)
+        units_to_check: list[str] = []
+        app_prefix = f"{self.config.app_name}-"
+        for name in sorted(unit_names):
+            if not name.endswith(".service"):
+                continue
+            if name in oneshots:
+                continue
+            base = name.removesuffix(".service").removesuffix("@")
+            if f"{base}.socket" in unit_names or f"{base}.timer" in unit_names:
+                continue
+            if name.endswith("@.service"):
+                service = name.removesuffix("@.service")
+                if not service.startswith(app_prefix):
+                    continue
+                replicas = self.config.replicas.get(service[len(app_prefix) :], 1)
+                units_to_check.extend(
+                    sorted(
+                        f"{i}.service"
+                        for i in store.desired_instances(service, replicas)
+                    )
+                )
+            else:
+                units_to_check.append(name)
+        return units_to_check
+
+    def _wait_for_units(self, conn, manifest: m.Manifest, oneshots: set[str]) -> None:
+        """Poll ``systemctl is-failed`` for immediately-running service units
+        until every unit reports a status; any unit reported ``failed``
+        triggers the failure/rollback path immediately."""
+        units_to_check = self._readiness_units(manifest, oneshots)
+        if not units_to_check:
+            return
+        for attempt in range(10):
+            out, ok = conn.run(
+                f"systemctl is-failed {' '.join(serverops.q(u) for u in sorted(units_to_check))}",
                 warn=True,
                 hide=True,
             )
-            if not acquired:
+            statuses = [line.strip() for line in out.splitlines() if line.strip()]
+            failed = [
+                unit
+                for unit, status in zip(sorted(units_to_check), statuses, strict=False)
+                if status == "failed"
+            ]
+            if failed:
+                self._handle_failed_units(conn, failed)
+                return
+            if len(statuses) >= len(units_to_check):
+                return
+            if attempt < 9:
+                time.sleep(0.3)
+        self._handle_failed_units(conn, sorted(units_to_check))
+
+    # =======================================================================================
+    # Failure handling / auto rollback
+    # =======================================================================================
+
+    def _handle_failed_units(self, conn, failed: list[str]) -> None:
+        self.output.error("Services failed to start!")
+        for unit in failed:
+            self.output.error(f"{unit} failed to start")
+            log_out, _ = conn.run(
+                f"journalctl -u {serverops.q(unit)} -n 30 --no-pager || true",
+                warn=True,
+                hide=True,
+            )
+            if log_out:
+                self.output.output(log_out)
+
+        if self.no_rollback:
+            raise cappa.Exit(
+                "Services failed to start. Rollback disabled via --no-rollback.",
+                code=EXIT_SERVICE_START_FAILED,
+            )
+        state = serverops.read_state(conn, self.config.app_dir)
+        # state.json is only written AFTER a successful deploy, so on a
+        # failed deploy ``state.current`` is the release that was live
+        # before this deploy started: that is the correct rollback target
+        # (``previous[0]`` may point two deploys back and be stale).
+        prev_digest = state.current if state and state.current else None
+        if prev_digest is None:
+            raise cappa.Exit(
+                "Services failed to start and there is no previous release to"
+                " roll back to.",
+                code=EXIT_SERVICE_START_FAILED,
+            )
+        if not (self.no_input or self._confirm_rollback()):
+            raise cappa.Exit(
+                "Services failed to start; rollback cancelled.",
+                code=EXIT_SERVICE_START_FAILED,
+            )
+        self._auto_rollback(conn, prev_digest)
+
+    def _confirm_rollback(self) -> bool:
+        try:
+            return bool(
+                Confirm.ask(
+                    "\n[bold yellow]Services failed to start; proceed with"
+                    " rollback?[/bold yellow]",
+                    default=True,
+                )
+            )
+        except (KeyboardInterrupt, EOFError):
+            self.output.info("\nRollback cancelled.")
+            return False
+
+    def _auto_rollback(self, conn, prev_digest: str) -> None:
+        """Swap back to the previous release, reinstall its units, restart it,
+        record the failure in state, and exit 3."""
+        self._rolling_back = True
+        self.output.warning("Rolling back to the previous release...")
+        app_dir = self.config.app_dir
+        prev_path = f"{app_dir}/releases/{prev_digest}"
+
+        prev_raw = serverops.read_remote_file(conn, f"{prev_path}/manifest.json")
+        if prev_raw is None:
+            raise cappa.Exit(
+                f"Auto-rollback failed: previous release {prev_digest} is"
+                " incomplete (no manifest.json); inspect the server manually.",
+                code=EXIT_SERVICE_START_FAILED,
+            )
+        prev_manifest = m.decode_manifest(prev_raw)
+
+        transfer.swap_current(conn, app_dir, prev_digest)
+
+        unit_files, dropins, _oneshots, failed_units = serverops.collect_release_units(
+            conn, prev_path, prev_manifest
+        )
+        if failed_units:
+            # Best effort during auto-rollback: install what was readable.
+            self.output.warning(
+                "Could not read unit file(s) from the previous release: "
+                + ", ".join(failed_units)
+            )
+        if unit_files or dropins:
+            serverops.install_units(conn, self.config.app_name, unit_files, dropins)
+        caddy_entry = prev_manifest.entries.get(m.CADDYFILE_PATH)
+        if caddy_entry is not None and caddy_entry.kind is m.EntryKind.CADDY:
+            # Caddy is running the new release's config; restore the previous
+            # one before the restart (#80: env/units/code always restored
+            # together).
+            caddy_raw = serverops.read_remote_file(conn, f"{prev_path}/Caddyfile")
+            if caddy_raw is None:
+                self.output.warning(
+                    "Previous release declares a Caddyfile but it could not be"
+                    " read; caddy config unchanged."
+                )
+            else:
+                installed = serverops.install_caddyfile(
+                    conn, caddy_raw, self.config.caddy_config_path
+                )
+                if installed:
+                    self.output.info(
+                        "Caddy reloaded with the previous release's Caddyfile."
+                    )
+                else:
+                    self.output.warning(
+                        "Failed to apply the previous release's Caddyfile;"
+                        " caddy config unchanged."
+                    )
+        specs = serverops.expand_patterns(
+            name
+            for path, entry in prev_manifest.entries.items()
+            if entry.kind is m.EntryKind.UNIT
+            and (name := serverops.unit_rel_name(path)).endswith(".service")
+        )
+        if specs:
+            conn.run(
+                f"sudo systemctl restart --quiet {' '.join(serverops.q(s) for s in specs)}",
+                warn=True,
+            )
+            self._converge(conn, prev_manifest)
+
+        state = serverops.read_state(conn, app_dir)
+        if state is not None:
+            new_state = store.record_rollback(
+                state, prev_digest, datetime.now(UTC).isoformat()
+            )
+            serverops.write_state(conn, app_dir, new_state)
+            self._gc(conn, new_state, self._list_releases(conn))
+        log_operation(
+            conn,
+            self.config.app_name,
+            "rollback",
+            host=self.selected_host.name or self.selected_host.address,
+        )
+        raise cappa.Exit(
+            f"Deployment failed; rolled back to release {prev_digest}.",
+            code=EXIT_SERVICE_START_FAILED,
+        )
+
+    # =======================================================================================
+    # Caddy
+    # =======================================================================================
+
+    def _install_caddyfile(self, conn, local_caddy: Path) -> None:
+        if not local_caddy.is_file():
+            self.output.warning(
+                "The release declares a Caddyfile but it is unavailable; caddy"
+                " config unchanged."
+            )
+            return
+        content = local_caddy.read_text()
+        installed = serverops.install_caddyfile(
+            conn, content, self.config.caddy_config_path
+        )
+        if not installed:
+            self.output.warning(
+                "Failed to apply the new Caddyfile; the previous configuration"
+                " was restored."
+            )
+        else:
+            self.output.info("Caddy reloaded with the new configuration.")
+
+    # =======================================================================================
+    # Store / helpers
+    # =======================================================================================
+
+    def _list_releases(self, conn) -> list[str]:
+        """Digests under releases/, newest (mtime) first; staging excluded."""
+        return serverops.list_releases(conn, self.config.app_dir)
+
+    def _gc(self, conn, state: store.State, releases: list[str]) -> None:
+        """GC via store.gc_plan: keep current + previous[0] + newest releases."""
+        serverops.collect_garbage(
+            conn,
+            self.config.app_dir,
+            state,
+            releases,
+            self.config.versions_to_keep,
+            self.output,
+        )
+
+    # =======================================================================================
+    # Hooks
+    # =======================================================================================
+
+    def _run_hooks(
+        self,
+        conn,
+        phase: str,
+        context: Mapping[str, object],
+        *,
+        release_path: str | None,
+    ) -> None:
+        """Run a hook phase through the connection.
+
+        ``release_path=None``: the old release is live — env comes from the
+        live release's .env (or the legacy ``.install/.env``). Otherwise the
+        env is the NEW release's .env, the hook runs in the release dir and
+        ``{app_dir}`` inside hook commands resolves to the release dir.
+        """
+        hooks_config = self.config.hooks_config
+        if not hooks_config:
+            return
+        commands = list(getattr(hooks_config, phase) or [])
+        if not commands:
+            return
+        label = phase.replace("_", "-")
+        self.output.info(f"Running {label} hooks...")
+
+        if release_path is None:
+            app_dir = self.config.app_dir
+            select_env = (
+                f"if [ -f {serverops.q(f'{app_dir}/current/.env')} ]; then "
+                f"source {serverops.q(f'{app_dir}/current/.env')}; else "
+                f"source {serverops.q(f'{self.config.install_dir}/.env')} 2>/dev/null; fi"
+            )
+            cwd: str | None = None
+        else:
+            select_env = f"source {serverops.q(f'{release_path}/.env')}"
+            cwd = release_path
+            context = {
+                **context,
+                "app_dir": release_path,
+                "install_dir": release_path,
+            }
+
+        for raw in commands:
+            cmd, unresolved_vars = safe_format(raw, **context)
+            if unresolved_vars:
+                # Fail closed on interpolation gaps: an unresolved variable
+                # in a hook command is a broken template, not something to
+                # run with a literal ``{name}`` placeholder in it. (Secret
+                # values are never interpolated into hook commands.) Note:
+                # raise before any execution; server ops would just echo it
+                # into deploy logs.
                 raise DeploymentError(
-                    "Another deployment is in progress.\n"
-                    "If you are sure no deploy is running, remove the lock manually:\n"
-                    f"  ssh {self.selected_host.user}@{self.selected_host.address} rm {lock_file_q}"
+                    f"{label} hook '{raw}' references unknown variables"
+                    f" {', '.join(sorted(unresolved_vars))}. Deployment"
+                    " aborted (fail-closed)."
+                )
+            self.output.info(f"  [{label}] {cmd}")
+            full_cmd = f"set -a; {select_env}; set +a; "
+            if cwd:
+                full_cmd += f"cd {serverops.q(cwd)} && "
+            full_cmd += cmd
+            conn.run(full_cmd, pty=True)
+
+    # =======================================================================================
+    # Secrets
+    # =======================================================================================
+
+    def _fail_closed_on_unresolved_secrets(
+        self, env: str, secret_aliases: dict[str, str]
+    ) -> None:
+        """Abort when a ``$REF`` secret line survived the adapters unresolved.
+
+        The ``system`` adapter resolves ``$VAR`` values from the environment;
+        an adapter returning a value still starting with ``$`` means the
+        secret was NOT resolved, and shipping it would leak the reference
+        into the release tree instead of removing it. This is fail-closed:
+        any unresolved secret ref aborts the deploy before any server I/O,
+        and only the key/ref name is reported (never the raw value).
+        """
+        for line in env.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            stripped = value.strip().strip("'\"")
+            if stripped.startswith("$$") or "{{" in stripped:
+                # `$$` = literal dollar; `{{...}}` = deploy-time template
+                # placeholder still to be rendered elsewhere.
+                continue
+            if stripped.startswith("$") and len(stripped) > 1:
+                ref = stripped[1:]
+                if ref.startswith("$"):
+                    ref = ref[1:]
+                self.output.error(
+                    f"Unresolved secret reference '<${ref}>' for"
+                    f" '{key.strip()}': the configured secret adapter did"
+                    " not resolve it and deployment aborted (fail-closed)."
+                )
+                raise DeploymentError(
+                    f"Unresolved secret reference in '{key.strip()}':"
+                    f" '<${ref}>' could not be resolved by the configured"
+                    " secret adapter. Deployment aborted (fail-closed)."
                 )
 
-            try:
-                yield conn
-            finally:
-                conn.run(f"rm -f {lock_file_q}", warn=True, hide=True)
+    # =======================================================================================
+    # Presentation
+    # =======================================================================================
 
-    def _show_deployment_summary(self, bundle_size: int, bundle_version: str):
+    def _notice_old_layout(self, conn) -> None:
+        """Non-destructive old-layout notice: `.install/` present, `store/` absent."""
+        _, has_old = conn.run(
+            f"test -d {serverops.q(self.config.install_dir)}", warn=True, hide=True
+        )
+        _, has_store = conn.run(
+            f"test -d {serverops.q(f'{self.config.app_dir}/store')}",
+            warn=True,
+            hide=True,
+        )
+        if has_old and not has_store:
+            self.output.warning(
+                "This application uses the legacy `.install/` layout. It is kept"
+                " untouched; a fresh release tree (``current``, ``releases/``,"
+                " ``store/``) is created next. The old directories are removed"
+                " by `fujin down`."
+            )
+
+    def _show_deployment_summary(self):
         console = Console()
+        config = self.config
 
-        if bundle_size < 1024:
-            size_str = f"{bundle_size} B"
-        elif bundle_size < 1024 * 1024:
-            size_str = f"{bundle_size / 1024:.1f} KB"
-        else:
-            size_str = f"{bundle_size / (1024 * 1024):.1f} MB"
-
-        # Build summary table
         table = Table(show_header=False, box=None, padding=(0, 1))
         table.add_column("Key", style="bold cyan", width=12)
         table.add_column("Value")
 
-        table.add_row("App", self.config.app_name)
-        table.add_row("Version", bundle_version)
+        table.add_row("App", config.app_name)
+        table.add_row("Version", config.local_version)
         host_display = self.selected_host.name if self.selected_host.name else "default"
         table.add_row("Host", f"{host_display} ({self.selected_host.address})")
 
-        # Build services summary from deployed units
         services_summary = []
-        for du in self.config.deployed_units:
+        for du in config.deployed_units:
             if du.replicas > 1:
                 services_summary.append(f"{du.name} ({du.replicas})")
             else:
                 services_summary.append(du.name)
         if services_summary:
             table.add_row("Services", ", ".join(services_summary))
-        table.add_row("Bundle", size_str)
+        table.add_row("Mode", config.installation_mode.value)
 
-        # Display in a panel
         panel = Panel(
             table,
             title="[bold]Deployment Summary[/bold]",
@@ -638,13 +1026,3 @@ class Deploy(BaseCommand):
             width=60,
         )
         console.print(panel)
-
-        # Confirm unless --no-input is set
-        if not self.no_input:
-            try:
-                if not Confirm.ask(
-                    "\n[bold]Proceed with deployment?[/bold]", default=True
-                ):
-                    raise cappa.Exit("Deployment cancelled", code=0)
-            except KeyboardInterrupt:
-                raise cappa.Exit("\nDeployment cancelled", code=0)

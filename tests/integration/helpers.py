@@ -127,12 +127,51 @@ def read_file(container_name: str, path: str) -> str:
 
 
 def get_deployed_version(container_name: str, app_name: str) -> str:
-    """Get currently deployed version of app."""
-    stdout, ok = exec_in_container(
-        container_name, f"cat /opt/fujin/{app_name}/.install/.version"
-    )
-    assert ok, f"Could not read version for {app_name}"
+    """Get version of the live release from its manifest."""
+    path = f"/opt/fujin/{app_name}/current/manifest.json"
+    command = f'grep -o \'"version":"[^"]*"\' {path} | head -1 | cut -d\'"\' -f4'
+    stdout, ok = exec_in_container(container_name, command)
+    assert ok, f"Could not read version from {path}"
     return stdout.strip()
+
+
+def get_current_release(container_name: str, app_name: str) -> str:
+    """Get the digest of the release pointed at by ``current``."""
+    stdout, ok = exec_in_container(
+        container_name,
+        f"basename $(readlink /opt/fujin/{app_name}/current)",
+    )
+    assert ok, "current symlink does not exist"
+    return stdout.strip()
+
+
+def assert_release_layout(container_name: str, app_name: str) -> None:
+    """Assert the canonical release-tree layout exists with correct modes."""
+    app_dir = f"/opt/fujin/{app_name}"
+    assert_dir_exists(container_name, f"{app_dir}/releases")
+    assert_dir_exists(container_name, f"{app_dir}/store")
+    assert_dir_exists(container_name, f"{app_dir}/shared")
+    assert_file_exists(container_name, f"{app_dir}/store/state.json")
+    assert_file_exists(container_name, f"{app_dir}/current/manifest.json")
+    for path in (app_dir, f"{app_dir}/releases", f"{app_dir}/store"):
+        stdout, _ = exec_in_container(container_name, f"stat -c '%a' {path}")
+        assert stdout == "2755", f"{path} should be setgid 2755, got: {stdout}"
+    _, ok = exec_in_container(container_name, f"test -f {app_dir}/store/lock")
+    assert ok, "store/lock does not exist"
+
+
+def assert_noop_redeploy_kept_pid(
+    container_name: str, unit_name: str, pid_before: str
+) -> None:
+    """Assert a unit was never restarted: MainPID unchanged from pid_before."""
+    stdout, _ = exec_in_container(
+        container_name,
+        f"systemctl show {unit_name} --property=MainPID --value",
+    )
+    assert stdout.strip() == pid_before, (
+        f"Unit {unit_name} restarted during a no-op deploy "
+        f"(pid: {pid_before} -> {stdout.strip()})"
+    )
 
 
 def wait_for_service(container_name: str, service_name: str, timeout: int = 10) -> None:

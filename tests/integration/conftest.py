@@ -68,6 +68,13 @@ def vps_container(docker_image):
     # Output format: 0.0.0.0:32768
     host_port = int(port_output.split(":")[-1])
 
+    # Every fresh container gets a new host key for (127.0.0.1, port);
+    # purge stale conflicting entries so rsync's ssh transport works.
+    subprocess.run(
+        ["ssh-keygen", "-R", f"[127.0.0.1]:{host_port}"],
+        capture_output=True,
+    )
+
     # Wait for SSH to be ready
     time.sleep(5)
 

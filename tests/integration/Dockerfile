@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # 1. Install systemd, ssh, sudo, python (required for fujin/uv)
 RUN apt-get update && \
-    apt-get install -y systemd systemd-sysv openssh-server sudo python3 curl git && \
+    apt-get install -y systemd systemd-sysv openssh-server sudo python3 curl git rsync && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

@@ -2,7 +2,7 @@ app = "bookstore"
 requirements = "requirements.txt"
 python_version = "3.13"
 versions_to_keep = 2
-build_command = "uv build && uv pip compile pyproject.toml -o requirements.txt"
+build_command = "uv build --out-dir ../../../dist && uv pip compile pyproject.toml -o requirements.txt"
 distfile = "./../../../dist/bookstore-{version}-py3-none-any.whl"
 installation_mode = "python-package"
 

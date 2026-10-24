@@ -1,0 +1,37 @@
+# Systemd service for worker
+# Learn more: https://www.freedesktop.org/software/systemd/man/systemd.service.html
+
+[Unit]
+Description=bookstore worker %i
+After=network.target
+# Add dependencies if needed:
+# Requires=postgresql.service
+After=bookstore-web.service
+
+[Service]
+Type=simple
+User=bookstore
+Group=bookstore
+WorkingDirectory=/opt/fujin/bookstore
+EnvironmentFile=/opt/fujin/bookstore/current/.env
+
+# Main command - adjust to match your application
+ExecStart=/opt/fujin/bookstore/current/venv/bin/bookstore db_worker
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Resource limits (uncomment to enable)
+# MemoryMax=512M
+# CPUQuota=50%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/fujin/bookstore
+
+[Install]
+WantedBy=multi-user.target

@@ -13,10 +13,10 @@ Type=simple
 User={app_user}
 Group={app_user}
 WorkingDirectory={app_dir}
-EnvironmentFile={install_dir}/.env
+EnvironmentFile={app_dir}/current/.env
 
 # Main command - adjust to match your application
-ExecStart={install_dir}/.venv/bin/bookstore db_worker
+ExecStart={app_dir}/current/venv/bin/bookstore db_worker
 
 # Restart policy
 Restart=on-failure

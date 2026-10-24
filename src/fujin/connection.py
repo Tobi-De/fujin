@@ -5,9 +5,9 @@ import hashlib
 import shlex
 import logging
 import os
-import re
 import select
 import socket
+import time
 import subprocess
 from fujin.errors import UploadError
 import sys
@@ -67,6 +67,7 @@ class SSH2Connection:
         warn: bool = False,
         pty: bool = False,
         hide: bool = False,
+        idle_timeout: float = 300,
     ) -> tuple[str, bool]:
         """Executes a command on the remote host.
 
@@ -75,6 +76,9 @@ class SSH2Connection:
             warn: If True, don't raise an exception on non-zero exit status
             pty: If True, allocate a pseudo-terminal for the command (enables password prompts, interactive shells)
             hide: If True, suppress stdout/stderr output. Can also be 'out' or 'err' to hide selectively
+            idle_timeout: Seconds without any channel progress before the
+                command is declared wedged and an error is raised. ``None``
+                disables the deadline (interactive PTY sessions).
 
         Returns:
             A tuple of (stdout_output, success) where success is True if exit status was 0
@@ -82,6 +86,12 @@ class SSH2Connection:
         Raises:
             cappa.Exit: If the command fails and warn=False
         """
+        # Interactive sessions have no output deadline: the user may think.
+        if pty:
+            idle_timeout = None
+        idle_deadline = None
+        if idle_timeout is not None:
+            idle_deadline = time.monotonic() + idle_timeout
 
         cwd_prefix = ""
         if self.cwd:
@@ -92,18 +102,8 @@ class SSH2Connection:
         env_prefix = (
             f"/home/{self.host.user}/.cargo/bin:/home/{self.host.user}/.local/bin:$PATH"
         )
-        full_command = f'export PATH="{env_prefix}" && {cwd_prefix}{command}'
+        full_command = f'export PATH="{env_prefix}"; {cwd_prefix}{command}'
         logger.debug(f"Running command: {full_command}")
-
-        watchers: tuple[re.Pattern[str], ...] | None = None
-        pass_response: str | None = None
-        if self.host.password:
-            logger.debug("Setting up sudo password watchers")
-            watchers = (
-                re.compile(r"\[sudo\] password:"),
-                re.compile(rf"\[sudo\] password for {self.host.user}:"),
-            )
-            pass_response = self.host.password + "\n"
 
         stdout_buffer = []
         stderr_buffer = []
@@ -146,25 +146,21 @@ class SSH2Connection:
                 poller.register(stdin_fd, select.POLLIN)
             poller.register(sock_fd, select.POLLIN)
 
+            progress = [0]  # real payload bytes seen; drives the idle deadline
+
             def drain_channel() -> None:
                 while True:
                     size, data = channel.read()
                     if size == LIBSSH2_ERROR_EAGAIN:
                         break
                     if size > 0:
+                        progress[0] += size
                         text = stdout_decoder.decode(data)
                         if not hide or hide == "err":
                             sys.stdout.write(text)
                             sys.stdout.flush()
                         stdout_buffer.append(text)
 
-                        if "sudo" in text and watchers and pass_response:
-                            for pattern in watchers:
-                                if pattern.search(text):
-                                    logger.debug(
-                                        "Password pattern matched, sending response"
-                                    )
-                                    channel.write(pass_response.encode())
                     else:
                         break
 
@@ -173,6 +169,7 @@ class SSH2Connection:
                     if size == LIBSSH2_ERROR_EAGAIN:
                         break
                     if size > 0:
+                        progress[0] += size
                         text = stderr_decoder.decode(data)
                         if not hide or hide == "out":
                             sys.stderr.write(text)
@@ -208,12 +205,29 @@ class SSH2Connection:
                         select.POLLIN | select.POLLERR | select.POLLHUP
                     ):
                         drain_channel()
+                        if idle_timeout is not None:
+                            idle_deadline = time.monotonic() + idle_timeout
 
                 if directions & LIBSSH2_SESSION_BLOCK_INBOUND:
+                    seen = progress[0]
                     drain_channel()
+                    if progress[0] != seen and idle_timeout is not None:
+                        idle_deadline = time.monotonic() + idle_timeout
 
                 if channel.eof():
                     break
+
+                if (
+                    idle_deadline is not None
+                    and time.monotonic() > idle_deadline
+                    and not channel.eof()
+                ):
+                    raise CommandError(
+                        f"Remote command made no progress for {idle_timeout}s"
+                        " and never reached EOF; the SSH channel looks wedged:"
+                        f" {command[:120]!r}",
+                        code=-1,
+                    )
 
         finally:
             if old_tty_attrs:
@@ -304,6 +318,52 @@ class SSH2Connection:
                 raise UploadError(
                     f"Upload verification failed! Local: {local_checksum}, Remote: {remote_checksum}",
                     checksum_mismatch=True,
+                )
+
+    def get(self, remote: str, local: str, verify: bool = False) -> None:
+        """Downloads a remote file to the local path via system ``ssh cat``.
+
+        Large file reads must NOT go through the embedded session — neither
+        ``run("cat …")`` (exec-channel reads can trickle forever) nor scp
+        (needs an sftp subsystem or a remote scp binary, neither of which
+        exists on every target). System ssh is the transport the rsync path
+        already uses; its exec channel is proven solid.
+
+        Password-auth hosts are not supported here (BatchMode); callers read
+        small files via ``run()`` instead.
+        """
+        remote_path = remote
+        if not remote.startswith("/") and self.cwd:
+            remote_path = f"{self.cwd}/{remote}"
+
+        cmd = ["ssh", "-o", "BatchMode=yes", "-p", str(self.host.port)]
+        if self.host.key_filename:
+            cmd.extend(["-i", str(Path(self.host.key_filename).expanduser().resolve())])
+        cmd.extend([f"{self.host.user}@{self.host.address}", "cat", "--", remote_path])
+        with open(local, "wb") as out_fh:
+            result = subprocess.run(
+                cmd, stdout=out_fh, stderr=subprocess.PIPE, timeout=120
+            )
+        if result.returncode != 0:
+            import os as _os
+
+            _os.unlink(local)
+            raise UploadError(
+                f"Download failed for {remote_path} (exit {result.returncode}):\n"
+                f"{result.stderr.decode(errors='replace').strip()}"
+            )
+
+        if verify:
+            remote_q = shlex.quote(remote_path)
+            out, ok = self.run(f"sha256sum {remote_q} | awk '{{print $1}}'", hide=True)
+            if not ok:
+                raise UploadError(f"Could not checksum {remote_path} on server")
+            with open(local, "rb") as f:
+                local_checksum = hashlib.file_digest(f, "sha256").hexdigest()
+            if local_checksum != out.strip():
+                raise UploadError(
+                    f"Download verification failed! Local: {local_checksum},"
+                    f" Remote: {out.strip()}"
                 )
 
     def rsync_upload(self, local: str, remote: str) -> None:
@@ -457,18 +517,8 @@ def connection(
             except Exception as e:
                 logger.debug(f"Key {key_path} failed: {e}")
 
-    # Method 4: Password (if configured)
-    if not authenticated and host.password:
-        try:
-            logger.debug("Trying password authentication...")
-            session.userauth_password(host.user, host.password)
-            authenticated = session.userauth_authenticated()
-            if authenticated:
-                logger.info("✓ Authenticated using password")
-            auth_methods_tried.append("password")
-        except Exception as e:
-            logger.debug(f"Password auth failed: {e}")
-            auth_methods_tried.append("password (failed)")
+    # Method 4: Password auth is no longer supported; key/agent auth or
+    # native_ssh_auth only.
 
     if not authenticated:
         sock.close()
@@ -482,7 +532,7 @@ def connection(
             f"  1. Ensure your SSH key is authorized on the server\n"
             f"  2. Add your key to ssh-agent: ssh-add ~/.ssh/id_ed25519\n"
             f'  3. Specify key in fujin.toml: key_filename = "~/.ssh/id_ed25519"\n'
-            f"  4. Set password in fujin.toml or .env file"
+            f"  4. Use `fujin server setup-ssh` to copy your key to the server\n"
         )
         raise SSHAuthenticationError(error_msg)
 

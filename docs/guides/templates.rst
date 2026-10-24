@@ -86,7 +86,7 @@ Basic structure of ``default.service.j2``:
    Type={% if process.socket %}notify{% else %}simple{% endif %}
    User={{ user }}
    WorkingDirectory={{ app_dir }}
-   EnvironmentFile={{ install_dir }}/.env
+   EnvironmentFile={{ app_dir }}/current/.env
 
    # The command to run
    ExecStart={{ process.command }}
@@ -144,7 +144,9 @@ Global Variables
    * - ``{{ app_dir }}``
      - Full path to application directory (``/opt/fujin/{app_name}``)
    * - ``{{ install_dir }}``
-     - Full path to deployment infrastructure directory (``/opt/fujin/{app_name}/.fujin``)
+     - Legacy alias; resolves to ``/opt/fujin/{app_name}/.install``. Avoid in
+       new templates: reference the live release through
+       ``{{ app_dir }}/current/...`` instead
    * - ``{{ domain_name }}``
      - Host domain name
    * - ``{{ upstream }}``
@@ -208,7 +210,7 @@ Add environment variables directly in the service file:
 .. code-block:: jinja
 
    [Service]
-   EnvironmentFile={{ install_dir }}/.env
+   EnvironmentFile={{ app_dir }}/current/.env
 
    # Additional environment variables
    Environment="PYTHONUNBUFFERED=1"
@@ -253,7 +255,7 @@ Working Directory and Paths
    WorkingDirectory={{ app_dir }}
 
    # Add virtualenv to PATH
-   Environment="PATH={{ install_dir }}/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+   Environment="PATH={{ app_dir }}/current/venv/bin:/usr/local/bin:/usr/bin:/bin"
 
    # Python path
    Environment="PYTHONPATH={{ app_dir }}"
@@ -381,10 +383,10 @@ Create ``.fujin/web.service.j2``:
    User={{ user }}
    Group=www-data
    WorkingDirectory={{ app_dir }}
-   EnvironmentFile={{ install_dir }}/.env
+   EnvironmentFile={{ app_dir }}/current/.env
 
    # Gunicorn with custom settings
-   ExecStart={{ install_dir }}/.venv/bin/gunicorn \
+   ExecStart={{ app_dir }}/current/venv/bin/gunicorn \
        --bind unix:/run/{{ app_name }}/{{ app_name }}.sock \
        --workers 4 \
        --worker-class sync \
@@ -423,10 +425,10 @@ Create ``.fujin/worker.service.j2``:
    Type=simple
    User={{ user }}
    WorkingDirectory={{ app_dir }}
-   EnvironmentFile={{ install_dir }}/.env
+   EnvironmentFile={{ app_dir }}/current/.env
 
    # Celery worker
-   ExecStart={{ install_dir }}/.venv/bin/celery \
+   ExecStart={{ app_dir }}/current/venv/bin/celery \
        -A config worker \
        --loglevel=info \
        --concurrency=4 \
@@ -525,12 +527,12 @@ Common Mistakes
    .. code-block:: jinja
 
       # Wrong: Missing backslash in multi-line command
-      ExecStart={{ app_dir }}/.venv/bin/gunicorn \
+      ExecStart={{ app_dir }}/current/venv/bin/gunicorn \
           --workers 4
           config.wsgi:application  # Missing backslash!
 
       # Correct:
-      ExecStart={{ app_dir }}/.venv/bin/gunicorn \
+      ExecStart={{ app_dir }}/current/venv/bin/gunicorn \
           --workers 4 \
           config.wsgi:application
 
@@ -542,7 +544,7 @@ Common Mistakes
       ExecStart=.venv/bin/gunicorn  # Won't work in systemd
 
        # Correct: Absolute path
-       ExecStart={{ install_dir }}/.venv/bin/gunicorn
+       ExecStart={{ app_dir }}/current/venv/bin/gunicorn
 
 Validate Systemd Units
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -576,7 +578,7 @@ Full Django Production Template
    WorkingDirectory={{ app_dir }}
 
    # Environment
-   EnvironmentFile={{ install_dir }}/.env
+   EnvironmentFile={{ app_dir }}/current/.env
    Environment="PYTHONUNBUFFERED=1"
    Environment="DJANGO_SETTINGS_MODULE=config.settings"
 
@@ -596,7 +598,7 @@ Full Django Production Template
    ExecStartPre=/bin/mkdir -p /run/{{ app_name }}
    ExecStartPre=/bin/chown {{ user }}:www-data /run/{{ app_name }}
 
-   ExecStart={{ install_dir }}/.venv/bin/gunicorn \
+   ExecStart={{ app_dir }}/current/venv/bin/gunicorn \
        config.wsgi:application \
        --name {{ app_name }} \
        --bind unix:/run/{{ app_name }}/{{ app_name }}.sock \

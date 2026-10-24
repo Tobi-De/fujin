@@ -40,3 +40,19 @@ Custom Adapters
 You can create your own secret adapter by implementing the adapter interface and registering it via Python entry points.
 
 See the `plugin packages source code <https://github.com/Tobi-De/fujin/tree/main/plugins>`_ for examples of how to implement custom adapters.
+
+Redaction and Fail-Closed Resolution
+------------------------------------
+
+.. tip:: Redaction and fail-closed resolution
+
+   Resolved secret values are registered for redaction at deploy time: any
+   secret value that would appear in command output, log messages or error
+   text is replaced with a ``<$REF>`` placeholder instead. The env file that
+   is signed into a release still contains the real values (that is its
+   purpose); only fujin's own output is scrubbed.
+
+   Resolution is fail-closed, before any server contact: a missing
+   reference, a failing adapter or a secret that the adapter left
+   unresolved aborts the deploy with a nonzero exit code and nothing is
+   uploaded.
