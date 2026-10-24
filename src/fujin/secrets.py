@@ -46,6 +46,33 @@ def get_adapter_registry() -> dict[str, secret_adapter]:
     return _adapter_registry
 
 
+def secret_refs(env_content: str) -> dict[str, str]:
+    """Return a mapping of env var key -> secret ref for ``$``-prefixed values.
+
+    ``API_KEY=$MY_SECRET`` yields ``{"API_KEY": "MY_SECRET"}``. Values that
+    do not start with ``$`` are not secrets and are omitted. Escaped
+    ``$$...`` values are treated as literals and omitted.
+    """
+    refs: dict[str, str] = {}
+    for line in env_content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        stripped = value.strip().strip("'\"")
+        if stripped.startswith("$$"):
+            continue
+        if stripped.startswith("$") and len(stripped) > 1:
+            refs[key.strip()] = stripped[1:]
+    return refs
+
+
+def env_values(env_content: str) -> dict[str, str]:
+    """Parse an env file (resolved or not) into ``{key: value}``."""
+    with closing(StringIO(env_content)) as buffer:
+        return {k: v for k, v in dotenv_values(stream=buffer).items() if v is not None}
+
+
 def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
     if not env_content:
         return ""
@@ -67,8 +94,18 @@ def resolve_secrets(env_content: str, secret_config: SecretConfig) -> str:
     try:
         return adapter_func(env_content, secret_config)
     except Exception as e:
+        # Never echo the env buffer in an adapter failure: an adapter's
+        # message may quote the file it was working on, and the buffer is
+        # only meaningful locally. Raw secret values are not in it yet
+        # (resolution failed), but the refs must not leak either.
+        detail = str(e)
+        for secret_line in env_content.splitlines():
+            if secret_line and secret_line in detail:
+                detail = detail.replace(secret_line, "").replace(
+                    secret_line.strip(), ""
+                )
         raise SecretResolutionError(
-            f"Adapter '{adapter_name}' failed: {e}", adapter=adapter_name
+            f"Adapter '{adapter_name}' failed: {detail.strip()}", adapter=adapter_name
         ) from e
 
 

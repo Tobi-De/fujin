@@ -14,12 +14,15 @@ import json
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 import fujin.commands.deploy as deploy_mod
 import fujin.connection
 import fujin.serverops
 import fujin.transfer
 from fujin.build import BuildResult
 from fujin.commands.deploy import Deploy
+from fujin.errors import DeploymentError
 from fujin.manifest import InputFile, build_manifest, manifest_to_dict
 from fujin.store import State
 
@@ -719,3 +722,218 @@ def test_auto_rollback_targets_release_live_before_this_deploy(
     assert "second" not in swap_digests
     written = spies["write_states"][0]
     assert written.current == "third"
+
+
+# ===========================================================================
+# Secrets redaction + fail-closed invariant (#87)
+# ===========================================================================
+
+from pathlib import Path  # noqa: E402  (appended for #87 tests)
+
+from fujin.config import SecretConfig  # noqa: E402  (appended for #87 tests)
+
+SENTINEL = "sentinel-hunter-4242d0"
+
+
+class _CapturingPrinter:
+    """Record every message an output object asks to display."""
+
+    def __init__(self):
+        self.lines: list[str] = []
+
+    def success(self, m):
+        print("OK:", m, file=sys.stderr)
+        self.lines.append(m)
+
+    def error(self, m):
+        print("ERR:", m, file=sys.stderr)
+        self.lines.append(m)
+
+    def warning(self, m):
+        print("WARN:", m, file=sys.stderr)
+        self.lines.append(m)
+
+    def info(self, m):
+        print("INFO:", m, file=sys.stderr)
+        self.lines.append(m)
+
+    def output(self, m):
+        print("OUT:", m, file=sys.stderr)
+        self.lines.append(m)
+
+    def critical(self, m):
+        print("CRIT:", m, file=sys.stderr)
+        self.lines.append(m)
+
+    def dim(self, text):
+        return text
+
+    def link(self, url, text=None):
+        return text or url
+
+
+def _secrets_setup(monkeypatch, minimal_config, tmp_path, **kwargs):
+    """Deploy harness with a sentinel secret resolved by the (faked) adapter.
+
+    Returns (cmd, spies, printer). The faked ``resolve_secrets`` is the only
+    place the raw sentinel value exists; everything else must see the
+    ``<$STRIPE_TOKEN>`` placeholder or silence.
+    """
+    monkeypatch.setattr(
+        deploy_mod,
+        "resolve_secrets",
+        lambda env, sc: env.replace("$STRIPE_TOKEN", SENTINEL),
+    )
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN\nDEBUG=1"
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, **kwargs)
+    printer = _CapturingPrinter()
+    cmd.output = printer
+    return cmd, spies, printer
+
+
+def _assert_no_sentinel(printer, capsys, expect_placeholder=False):
+    """No captured output (ours or pytest's) may contain the sentinel."""
+    displayed = "\n".join(printer.lines)
+    out, err = capsys.readouterr()
+    assert SENTINEL not in displayed
+    assert SENTINEL not in out
+    assert SENTINEL not in err
+    if expect_placeholder:
+        assert "<$STRIPE_TOKEN>" in displayed
+
+
+def test_secrets_never_leak_on_successful_deploy(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    cmd, spies, printer = _secrets_setup(
+        monkeypatch, minimal_config, tmp_path, state=State()
+    )
+    assert invoke(cmd) == 0
+    _assert_no_sentinel(printer, capsys)
+
+
+def test_secrets_reach_staging_but_not_cache_or_output(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    """The .env must still carry the real value for the server; everything
+    user-visible and the local build cache must not contain it."""
+    cmd, spies, printer = _secrets_setup(monkeypatch, minimal_config, tmp_path)
+    cmd.force = True
+    captured = {}
+
+    def fake_rsync(_conn, staging, *_a, **_k):
+        captured["env"] = (Path(staging) / ".env").read_bytes()
+        return []
+
+    monkeypatch.setattr(fujin.transfer, "rsync_to_staging", fake_rsync)
+    assert invoke(cmd) == 0
+
+    _assert_no_sentinel(printer, capsys)
+    assert captured["env"] == f"STRIPE_TOKEN={SENTINEL}\nDEBUG=1".encode()
+    for path in Path(spies["staging_dir"]).rglob("*"):
+        if path.is_file():
+            assert SENTINEL.encode() not in path.read_bytes(), path
+
+
+def test_secrets_never_leak_when_build_fails(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    cmd, spies, printer = _secrets_setup(monkeypatch, minimal_config, tmp_path)
+    monkeypatch.setattr(
+        deploy_mod.build,
+        "run_build",
+        MagicMock(side_effect=Exception(f"build blew up with {SENTINEL} everywhere")),
+    )
+    with pytest.raises(DeploymentError) as excinfo:
+        cmd()
+    assert excinfo.value.code != 0
+    _assert_no_sentinel(printer, capsys)
+    assert "<$STRIPE_TOKEN>" in str(excinfo.value.message)
+    # Nothing became active on the server before the failure.
+    spies["rsync"].assert_not_called()
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_not_called()
+
+
+def test_secrets_never_leak_when_verify_fails(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    from fujin.transfer import VerifyResult
+
+    cmd, spies, printer = _secrets_setup(monkeypatch, minimal_config, tmp_path)
+    monkeypatch.setattr(
+        fujin.transfer, "verify_report", lambda *a, **k: f"bad {SENTINEL}"
+    )
+    monkeypatch.setattr(
+        fujin.transfer,
+        "verify_staging",
+        MagicMock(
+            return_value=VerifyResult(
+                ok=False, missing=[], mismatch={}, link_mismatch={}, mode_mismatch={}
+            )
+        ),
+    )
+    with pytest.raises(DeploymentError) as excinfo:
+        cmd()
+    _assert_no_sentinel(printer, capsys)
+    assert "<$STRIPE_TOKEN>" in str(excinfo.value.message)
+    spies["commit"].assert_not_called()
+
+
+def test_secrets_never_leak_when_staging_commit_fails(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    """A failure whose own exception text contains the secret must still exit
+    with a redacted message (cappa shows only the wrapped message, but the
+    printed exception chain is part of the invariant surface)."""
+    cmd, spies, printer = _secrets_setup(monkeypatch, minimal_config, tmp_path)
+    spies["commit"].side_effect = Exception(f"fs blew up: {SENTINEL}")
+    with pytest.raises(DeploymentError) as excinfo:
+        cmd()
+    assert SENTINEL not in str(excinfo.value.message)
+    assert SENTINEL not in str(excinfo.value.__cause__)
+    assert "<$STRIPE_TOKEN>" in str(excinfo.value.message)
+    spies["swap"].assert_not_called()
+
+
+def test_secrets_never_leak_during_auto_rollback(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    state = State(current="prev", previous=[])
+    cmd, spies, printer = _secrets_setup(
+        monkeypatch, minimal_config, tmp_path, state=state, is_failed="failed\nfailed\n"
+    )
+    spies["conn"].append_response(
+        "/opt/fujin/testapp/releases/prev/manifest.json",
+        manifest_json(version="0.9.0"),
+    )
+    assert invoke(cmd) == 3
+    _assert_no_sentinel(printer, capsys)
+
+
+def test_unresolved_secret_ref_aborts_before_any_upload(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    """Unresolved $REF -> exit != 0 and nothing uploaded."""
+    # An adapter that cannot resolve the ref returns the $-prefixed value.
+    monkeypatch.setattr(deploy_mod, "resolve_secrets", lambda env, sc: env)
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN"
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
+    )
+    printer = _CapturingPrinter()
+    cmd.output = printer
+
+    code = invoke(cmd)
+    assert code != 0
+    spies["rsync"].assert_not_called()
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_not_called()
+    assert not spies["events"]
+    joined = "\n".join(printer.lines)
+    assert "<$STRIPE_TOKEN>" in joined
+    out, err = capsys.readouterr()
+    all_out = "\n".join([joined, out, err])
+    assert "STRIPE_TOKEN=$STRIPE_TOKEN" not in all_out

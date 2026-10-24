@@ -29,6 +29,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### ⚙️ Miscellaneous Tasks
 
+- Apply pre-commit
 - Apply changelog hook
 - Stop tracking fujin build cache artifacts (ignored since .gitignore update)
 - Apply pre-commit (fmt, changelog)
