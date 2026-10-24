@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- *(secrets)* Per-host secret adapter config (75)
 - *(config,secrets)* Per-host overrides (83) + secret redaction invariant (87)
 - *(deploy)* Content-addressed release tree with manifest store and build cache
 

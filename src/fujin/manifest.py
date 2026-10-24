@@ -431,6 +431,7 @@ def bundle_key(
     caddyfile: str | bytes | None = None,
     build_env: dict[str, str] | None = None,
     requirements: str | bytes | None = None,
+    pyproject: str | bytes | None = None,
 ) -> str:
     """Content-addressed key over build inputs.
 
@@ -451,6 +452,12 @@ def bundle_key(
         )
     if caddyfile is not None:
         sources["caddy"] = hash_bytes(caddyfile)
+    if pyproject is not None:
+        # pyproject.toml is the source that drives generated requirements
+        # (uv pip compile ...) and general dist contents; hashing it covers
+        # the window where build_command regenerates requirements.txt
+        # between bundle keys being computed (generated-requirements mode).
+        sources["pyproject"] = hash_bytes(pyproject)
     payload = {
         "bundle": MANIFEST_SCHEMA,
         "config_fingerprint": config_fingerprint(config),
