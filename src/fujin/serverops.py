@@ -111,7 +111,11 @@ def read_remote_file(conn: Any, path: str, *, fatal: str | None = None) -> str |
         with open(tmp_path, "rb") as fh:
             return fh.read().decode("utf-8", errors="replace")
     finally:
-        os.unlink(tmp_path)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            # conn.get unlinks the file itself when the download fails.
+            pass
 
 
 def expand_dropins(
