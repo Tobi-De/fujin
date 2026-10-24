@@ -303,13 +303,12 @@ class Migrate(BaseCommand):
                     rest_of_cmd = parts[1] if len(parts) > 1 else ""
                     if installation_mode == "python-package":
                         # Use python -m for python packages
-                        full_cmd = (
-                            f"{{install_dir}}/.venv/bin/python -m {{app_name}}"
-                            + (f" {rest_of_cmd}" if rest_of_cmd else "")
+                        full_cmd = "{install_dir}/.venv/bin/python -m {app_name}" + (
+                            f" {rest_of_cmd}" if rest_of_cmd else ""
                         )
                     else:
                         # For binary mode, use {install_dir}/{app_name}
-                        full_cmd = f"{{install_dir}}/{{app_name}}" + (
+                        full_cmd = "{install_dir}/{app_name}" + (
                             f" {rest_of_cmd}" if rest_of_cmd else ""
                         )
                 else:

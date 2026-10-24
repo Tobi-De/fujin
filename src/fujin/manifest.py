@@ -433,7 +433,9 @@ def bundle_key(
 
     sha256 over canonical JSON of: the config fingerprint, ``build_command``,
     the build environment, the requirements file content, and the hashes of
-    every bundled unit/dropin/Caddyfile/asset source. Rendered ``.env``
+    every bundled unit/dropin/Caddyfile/asset source. The version IS a cache
+    input (the built dist embeds it: wheel names/metadata, binary build
+    metadata) even though ``config_fingerprint`` excludes it. Rendered ``.env``
     content is deliberately NOT an input: env is applied after the cache
     lookup and secret values never reach build artifacts (#81 hard boundary).
     """
@@ -453,6 +455,7 @@ def bundle_key(
         "build_env": build_env or {},
         "installation_mode": str(config.installation_mode),
         "python_version": config.python_version,
+        "version": config.version,
         "requirements": None if requirements is None else hash_bytes(requirements),
         "sources": sources,
     }

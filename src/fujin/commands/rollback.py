@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import configparser
-import shlex
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, overload
+from typing import Annotated
 
 import cappa
 from rich.prompt import IntPrompt
@@ -22,56 +20,6 @@ from fujin.store import (
     record_rollback,
     restart_set,
 )
-
-
-def _q(path: str) -> str:
-    return shlex.quote(path)
-
-
-@overload
-def _read_remote_file(conn, path: str, *, fatal: None = None) -> str | None: ...
-
-
-@overload
-def _read_remote_file(conn, path: str, *, fatal: str) -> str: ...
-
-
-def _read_remote_file(conn, path: str, *, fatal: str | None = None) -> str | None:
-    """Read a remote file; ``fatal`` makes failure abort with that message.
-
-    Uses SCP (not ``cat``): release manifests can be hundreds of KB and big
-    exec-channel reads can trickle forever (see SSH2Connection.get).
-    """
-    import os
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        try:
-            conn.get(path, tmp_path)
-        except Exception:
-            if fatal:
-                raise cappa.Exit(fatal, code=1) from None
-            return None
-        with open(tmp_path, "rb") as fh:
-            return fh.read().decode("utf-8", errors="replace")
-    finally:
-        os.unlink(tmp_path)
-
-
-def _unit_rel_name(path: str) -> str:
-    """Strip the ``systemd/`` prefix from a manifest entry path."""
-    return path.split("/", 1)[1] if path.startswith("systemd/") else path
-
-
-def _is_oneshot(service_content: str) -> bool:
-    """Type=oneshot detection from a service unit file body."""
-    parser = configparser.RawConfigParser(strict=False)
-    parser.read_string(service_content)
-    if not parser.has_option("Service", "Type"):
-        return False
-    return parser.get("Service", "Type").strip().lower() == "oneshot"
 
 
 @cappa.command(
@@ -121,11 +69,13 @@ class Rollback(BaseCommand):
     def _ensure_new_layout(self, conn) -> None:
         """Old-layout detection: ``store/`` missing -> user must deploy once."""
         app_dir = self.config.app_dir
-        _, ok = conn.run(f"test -d {_q(f'{app_dir}/store')}", warn=True, hide=True)
+        _, ok = conn.run(
+            f"test -d {serverops.q(f'{app_dir}/store')}", warn=True, hide=True
+        )
         if ok:
             return
         _, has_old = conn.run(
-            f"test -d {_q(self.config.install_dir)}", warn=True, hide=True
+            f"test -d {serverops.q(self.config.install_dir)}", warn=True, hide=True
         )
         old_note = (
             " Your application still uses the old .install/ layout - it is kept"
@@ -146,16 +96,7 @@ class Rollback(BaseCommand):
 
     def _list_releases(self, conn) -> list[str]:
         """Digests present under releases/, newest (mtime) first."""
-        out, _ok = conn.run(
-            f"cd {_q(self.config.app_dir)} && ls -1t releases/ 2>/dev/null || true",
-            warn=True,
-            hide=True,
-        )
-        return [
-            line.strip()
-            for line in out.splitlines()
-            if line.strip() and not line.strip().startswith(".staging-")
-        ]
+        return serverops.list_releases(conn, self.config.app_dir)
 
     # ------------------------------------------------------------------
     # Target resolution
@@ -186,7 +127,7 @@ class Rollback(BaseCommand):
                 )
                 raise cappa.Exit(code=0)
             _, exists = conn.run(
-                f"test -f {_q(f'{self._release_path(target)}/manifest.json')}",
+                f"test -f {serverops.q(f'{self._release_path(target)}/manifest.json')}",
                 warn=True,
                 hide=True,
             )
@@ -314,7 +255,7 @@ class Rollback(BaseCommand):
         self.output.success(f"Rollback to release {target} completed successfully!")
 
     def _read_target_manifest(self, conn, target: str, target_path: str) -> Manifest:
-        raw = _read_remote_file(
+        raw = serverops.read_remote_file(
             conn,
             f"{target_path}/manifest.json",
             fatal=(
@@ -323,7 +264,7 @@ class Rollback(BaseCommand):
             ),
         )
         try:
-            return decode_manifest(raw) if raw is not None else None
+            return decode_manifest(raw)
         except Exception as exc:
             raise cappa.Exit(
                 f"Release '{target}' manifest is corrupt: {exc}", code=1
@@ -335,24 +276,8 @@ class Rollback(BaseCommand):
         result = transfer.verify_staging(
             conn, target_path, manifest_to_dict(manifest, include_created_at=False)
         )
-        if result.ok:
-            return
-        parts = [f"Release tree {target_path} failed verification:"]
-        for path in result.missing:
-            parts.append(f"  missing: {path}")
-        for path, mismatch in result.mismatch.items():
-            parts.append(
-                f"  hash mismatch: {path}"
-                f" (expected {mismatch.expected}, got {mismatch.actual})"
-            )
-        for path, want in result.link_mismatch.items():
-            parts.append(f"  symlink mismatch: {path} (expected link to {want})")
-        for path, mismatch in result.mode_mismatch.items():
-            parts.append(
-                f"  mode mismatch: {path}"
-                f" (expected {mismatch.expected}, got {mismatch.actual})"
-            )
-        raise cappa.Exit("\n".join(parts), code=1)
+        if not result.ok:
+            raise cappa.Exit(transfer.verify_report(target_path, result), code=1)
 
     # ------------------------------------------------------------------
     # Units + services
@@ -363,48 +288,19 @@ class Rollback(BaseCommand):
     ) -> tuple[dict[str, str], dict[str, dict[str, str]], set[str]]:
         """Unit files + dropins of the target release, read from its systemd/ tree.
 
-        Returns ``(unit_files, dropins, oneshots)``; ``dropins`` expands
-        ``common.d`` per service unit (install_units' contract).
+        An unreadable unit aborts the rollback (a silently partial unit set
+        would install a broken application state).
         """
-        unit_files: dict[str, str] = {}
-        service_dropins: dict[str, dict[str, str]] = {}
-        common_dropins: dict[str, str] = {}
-        systemd_path = f"{target_path}/systemd"
-
-        unit_paths = sorted(
-            path for path, entry in manifest.entries.items() if entry.kind == "unit"
+        unit_files, dropins, oneshots, failed = serverops.collect_release_units(
+            conn, target_path, manifest
         )
-        for path in unit_paths:
-            rel = _unit_rel_name(path)
-            content = _read_remote_file(
-                conn,
-                f"{systemd_path}/{rel}",
-                fatal=f"Cannot read unit file '{rel}' from the target release tree.",
+        if failed:
+            raise cappa.Exit(
+                "Cannot read unit file(s) "
+                f"'{', '.join(failed)}' from the target release tree.",
+                code=1,
             )
-            if rel.startswith("common.d/"):
-                common_dropins[rel.split("/", 1)[1]] = content
-            elif ".d/" in rel and rel.endswith(".conf"):
-                # Generic dropin: any unit type (``*.service.d/``,
-                # ``*.socket.d/``, ``*.timer.d/``) -> dropins dict keyed by
-                # the full unit name, same contract as deploy-side
-                # collect_remote_units.
-                unit_dir, _, dropin_name = rel.rpartition("/")
-                unit = unit_dir.removesuffix(".d")
-                service_dropins.setdefault(unit, {})[dropin_name] = content
-            else:
-                unit_files[rel] = content
-
-        for unit in list(unit_files):
-            if unit.endswith(".service"):
-                for name, content in common_dropins.items():
-                    service_dropins.setdefault(unit, {}).setdefault(name, content)
-
-        oneshots = {
-            unit
-            for unit, content in unit_files.items()
-            if unit.endswith(".service") and _is_oneshot(content)
-        }
-        return unit_files, service_dropins, oneshots
+        return unit_files, dropins, oneshots
 
     def _desired_units(self, manifest: Manifest) -> list[str]:
         """Desired instance/unit names implied by the target release tree."""
@@ -415,7 +311,7 @@ class Rollback(BaseCommand):
             entry = manifest.entries[path]
             if entry.kind != "unit":
                 continue
-            name = _unit_rel_name(path)
+            name = serverops.unit_rel_name(path)
             if name.endswith("@.service") and name.startswith(prefix):
                 base = name[len(prefix) : -len("@.service")]
                 replicas = self.config.replicas.get(base, 1)
@@ -484,7 +380,7 @@ class Rollback(BaseCommand):
             self.output.info("No unit needs a restart for this rollback.")
             return
         _out, ok = conn.run(
-            f"sudo systemctl restart --quiet {' '.join(_q(s) for s in specs)}",
+            f"sudo systemctl restart --quiet {' '.join(serverops.q(s) for s in specs)}",
             warn=True,
         )
         if not ok:
@@ -498,7 +394,7 @@ class Rollback(BaseCommand):
         caddy_entry = manifest.entries.get("Caddyfile")
         if caddy_entry is None or caddy_entry.kind != "caddy":
             return
-        content = _read_remote_file(conn, f"{target_path}/Caddyfile")
+        content = serverops.read_remote_file(conn, f"{target_path}/Caddyfile")
         if content is None:
             self.output.warning(
                 "Target release declares a Caddyfile but it could not be read;"
@@ -523,13 +419,11 @@ class Rollback(BaseCommand):
     # ------------------------------------------------------------------
 
     def _gc(self, conn, new_state: store.State, releases: list[str]) -> None:
-        kill = gc_plan(
-            new_state.current,
-            new_state.previous,
+        serverops.collect_garbage(
+            conn,
+            self.config.app_dir,
+            new_state,
             releases,
             self.config.versions_to_keep,
+            self.output,
         )
-        for digest in kill:
-            conn.run(f"rm -rf {_q(self._release_path(digest))}", warn=True, hide=True)
-        if kill:
-            self.output.info(f"Garbage-collected {len(kill)} old release(s).")

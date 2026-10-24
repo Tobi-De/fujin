@@ -579,12 +579,18 @@ class TestBundleKey:
         k2 = self.make(make_config(env_content="SECRET_TOKEN=rotated-secret"))
         assert k1 == k2
 
-    def test_excludes_version_and_replicas(self):
+    def test_version_busts_key_not_replicas(self):
+        """The version must bust the key: the built dist embeds it (wheel
+        names/metadata), so a version bump cannot silently deploy a stale
+        dist file. ``replicas`` stays out (#79 handles scaling separately)."""
+        config = make_config()
+        k_current = self.make(config)
+        config.replicas = {"web": 10}
+        assert self.make(config) == k_current
         config = make_config()
         k1 = self.make(config)
         config.version = "9.9.9"
-        config.replicas = {"web": 10}
-        assert self.make(config) == k1
+        assert self.make(config) != k1
 
     def test_key_is_hex_sha256(self):
         assert len(self.make()) == 64

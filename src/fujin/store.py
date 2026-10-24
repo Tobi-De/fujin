@@ -3,8 +3,8 @@
 No I/O here except the tiny ``write_state`` helper, which the command layer
 calls with either a path or an open file object. No SSH types, no subprocess.
 
-See the Tier-1 contract, fujin #77/#79 #76, and design docs
-``../kaze/docs/02-store.md`` / ``03-bundle.md``.
+See the Tier-1 contract, fujin #77/#79 #76, and the bundle/store design
+notes in the linked issues.
 """
 
 from __future__ import annotations
@@ -450,17 +450,14 @@ def gc_plan(
 def is_noop(
     client_digest: str,
     state: State,
-    force: bool = False,
 ) -> bool:
     """No-op deploy check (#78): client digest equals the live release's.
 
     Compares against ``state.client_digest`` (the client-side pre-merge
     digest recorded at last deploy); older state files without the field
-    fall back to ``current``. ``--force`` overrides; a missing current
-    (first deploy) is never a no-op.
+    fall back to ``current``. A missing current (first deploy) is never a
+    no-op; ``--force`` bypasses this check at the call site.
     """
-    if force:
-        return False
     recorded = state.client_digest or state.current
     if not recorded:
         return False

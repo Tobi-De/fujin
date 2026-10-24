@@ -155,13 +155,13 @@ All commands inherit from `BaseCommand` which provides `config`, `output`, and `
 
 **Main commands:**
 - `init`: Initialize fujin.toml and `.fujin/` directory structure for a new project
-- `deploy`: Build → create zipapp → upload → execute installer (the core deployment workflow)
+- `deploy`: Build → rsync staging tree → verify → commit release → swap `current` symlink → diff restart (the core deployment workflow)
 - `up`: Alias for `server bootstrap`
-- `rollback`: Roll back to previous version using stored `.pyz` bundles
+- `rollback`: Roll back to a previous release in the release tree (`--previous` / `--to <digest>`)
 - `app`: Manage application (status, start/stop/restart, logs, shell, exec, scale)
 - `server`: Server-level operations (bootstrap, create-user, setup-ssh, status, exec)
 - `down`: Tear down project (stop services, remove files, delete app user)
-- `prune`: Remove old version bundles (keeps N versions based on config)
+- `prune`: Remove old release directories (keeps `versions_to_keep` most recent)
 - `new`: Create new systemd service, timer, or dropin files
 - `migrate`: Migrate old fujin.toml format to file-based structure
 - `audit`: View deployment audit log
@@ -193,29 +193,33 @@ Templates use `{variable}` placeholders for Python string formatting and `{{vari
 
 ### Deployment Flow
 
-1. **Build** (`deploy.py`): Run build_command locally
-2. **Resolve secrets**: Parse env file and fetch secrets from configured adapter
-3. **Create bundle** (in temp directory):
-   - Copy distfile and requirements.txt
-   - Create `.env` with resolved variables
-   - Copy systemd units from `.fujin/systemd/`
-   - Copy dropins (common.d/ and service-specific)
-   - Copy Caddyfile if exists
-   - Create `config.json` with deployment metadata
-4. **Create zipapp**: Bundle everything with `_installer/__main__.py` into `.pyz` file
-5. **Upload**: SCP zipapp to `/opt/fujin/{app_name}/.versions/{app_name}-{version}.pyz`
-6. **Verify**: SHA256 checksum verification
-7. **Execute**: Run `python3 installer.pyz install` on server
-8. **Prune**: Remove old versions (keeps `versions_to_keep` most recent)
+1. **Build** (`build.py`): run `build_command` locally; stage unit trees
+   (interpolated), Caddyfile, assets and the distfile in a local staging
+   tree, reusing the content-addressed build cache keyed by `bundle_key`
+   (`manifest.py`, hash over build inputs incl. version).
+2. **Resolve secrets**: parse env file and fetch secrets from the configured
+   adapter; render `.env` into the staging tree.
+3. **Manifest**: build a deterministic file inventory (sha256/mode/kind) and
+   a release digest (`manifest.py`), merge server-built entries (`venv/**`),
+   diff against the live release (`store.restart_set`).
+4. **Upload**: rsync the staging tree into `releases/.staging-<pid>` with
+   hardlink dedup unchanged files from the live release
+   (`transfer.py`, `serverops.link_unchanged`).
+5. **Verify + activate**: verify staged files against the manifest, commit
+   `releases/<digest>/`, atomically swap the `current` symlink.
+6. **Restart**: diff-based restart of exactly the changed units
+   (`deploy._restart`), converge replica instances, wait for units; failed
+   units trigger interactive auto-rollback (`_auto_rollback`).
+7. **Record + GC**: write server-side `state.json`
+   (`store.py` state machine), garbage-collect old releases
+   (`store.gc_plan`, keeps current + previous + `versions_to_keep`).
 
-**Installer actions** (`_installer/__main__.py`):
-- Create app user if needed
-- Set up `/opt/fujin/{app_name}` directory
-- Install Python package (via uv) or copy binary
-- Create `.appenv` shell script for environment setup
-- Install systemd units and dropins
-- Enable and start services
-- Configure Caddy if enabled
+**Server-side state** (`serverops.py` exports the I/O port layer):
+- app user, layout, lock (deploy/rollback mutual exclusion)
+- unit/dropin install and enable, Caddyfile install
+- state.json registry (`releases/<digest>`, `current` symlink target)
+- local build cache under `.fujin/cache/bundles/<bundle_key>/` (`fujin cache clean`)
+
 
 ### Testing
 

@@ -279,7 +279,7 @@ def find_python_version():
     py_version_file = Path(".python-version")
     if not py_version_file.exists():
         raise msgspec.ValidationError(
-            f"Add a python_version key or a .python-version file"
+            "Add a python_version key or a .python-version file"
         )
     return py_version_file.read_text().strip()
 

@@ -23,7 +23,6 @@ from fujin import manifest as m
 from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
-from fujin.commands.rollback import _is_oneshot, _unit_rel_name
 from fujin.config import get_git_short_hash
 from fujin.errors import DeploymentError
 from fujin.formatting import safe_format
@@ -33,43 +32,6 @@ from rich.prompt import Confirm
 logger = logging.getLogger(__name__)
 
 EXIT_SERVICE_START_FAILED = 3
-
-
-def _q(*paths: str) -> str:
-    """Quote each path and join with spaces (for remote systemctl commands)."""
-    return " ".join(shlex.quote(p) for p in paths)
-
-
-def _read_remote_file(conn, path: str) -> str | None:
-    out, ok = conn.run(f"cat {_q(path)}", warn=True, hide=True)
-    return out if ok else None
-
-
-def _expand_patterns(unit_names: Iterable[str]) -> list[str]:
-    """Expand template units to ``@*.service`` glob patterns for systemctl."""
-    return sorted(
-        name.replace("@.service", "@*.service") if name.endswith("@.service") else name
-        for name in unit_names
-        if name
-    )
-
-
-def _service_unit_names(manifest: m.Manifest) -> list[str]:
-    return [
-        _unit_rel_name(path)
-        for path in sorted(manifest.entries)
-        if manifest.entries[path].kind is m.EntryKind.UNIT
-        and _unit_rel_name(path).endswith(".service")
-    ]
-
-
-def _socket_timer_unit_names(manifest: m.Manifest) -> set[str]:
-    return {
-        _unit_rel_name(path)
-        for path in manifest.entries
-        if manifest.entries[path].kind is m.EntryKind.UNIT
-        and _unit_rel_name(path).endswith((".socket", ".timer"))
-    }
 
 
 def _resolve_live_digest(conn, app_dir: str, state: store.State | None) -> str | None:
@@ -94,83 +56,14 @@ def collect_local_units(
 ) -> tuple[dict[str, str], dict[str, dict[str, str]], set[str]]:
     """Unit files + dropins + oneshot units from the local staging tree.
 
-    ``unit_files`` maps unit file names (e.g. ``myapp-web@.service``) to their
-    content; ``dropins`` maps unit names to ``{name.conf: content}`` with
-    ``common.d`` expanded per service unit (``install_units`` contract).
-    Returns ``(unit_files, dropins, oneshots)``.
+    See :func:`serverops.expand_dropins` for the return contract.
     """
-    unit_files: dict[str, str] = {}
-    service_dropins: dict[str, dict[str, str]] = {}
-    common_dropins: dict[str, str] = {}
-
-    for path, spec in files.items():
-        if not path.startswith("systemd/"):
-            continue
-        content = (spec.content or b"").decode("utf-8") if spec.content else ""
-        rel = _unit_rel_name(path)
-        if rel.startswith("common.d/"):
-            common_dropins[rel.split("/", 1)[1]] = content
-        elif rel.endswith(".conf") and ".d/" in rel:
-            unit_dir, _, dropin_name = rel.rpartition("/")
-            unit, _, _ = unit_dir.partition(".d/")
-            service_dropins.setdefault(unit, {})[dropin_name] = content
-        else:
-            unit_files[rel] = content
-
-    for unit in list(unit_files):
-        if unit.endswith(".service"):
-            for name, content in common_dropins.items():
-                service_dropins.setdefault(unit, {}).setdefault(name, content)
-
-    oneshots = {
-        unit
-        for unit, content in unit_files.items()
-        if unit.endswith(".service") and _is_oneshot(content)
-    }
-    return unit_files, service_dropins, oneshots
-
-
-def collect_remote_units(
-    conn, release_path: str, manifest: m.Manifest
-) -> tuple[dict[str, str], dict[str, dict[str, str]], set[str]]:
-    """Unit files + dropins + oneshots of a committed release tree."""
-    unit_files: dict[str, str] = {}
-    service_dropins: dict[str, dict[str, str]] = {}
-    common_dropins: dict[str, str] = {}
-    systemd_path = f"{release_path}/systemd"
-
-    unit_paths = sorted(
-        path
-        for path, entry in manifest.entries.items()
-        if entry.kind is m.EntryKind.UNIT
-    )
-    for path in unit_paths:
-        rel = _unit_rel_name(path)
-        content = _read_remote_file(conn, f"{systemd_path}/{rel}")
-        if content is None:
-            logger.warning("Cannot read unit file '%s' from the release tree", rel)
-            continue
-        if rel.startswith("common.d/"):
-            common_dropins[rel.split("/", 1)[1]] = content
-        elif ".d/" in rel and rel.endswith(".conf"):
-            unit_dir, _, dropin_name = rel.rpartition("/")
-            # Flat dropin dirs: "testapp-web.socket.d" -> "testapp-web.socket".
-            unit = unit_dir.removesuffix(".d")
-            service_dropins.setdefault(unit, {})[dropin_name] = content
-        else:
-            unit_files[rel] = content
-
-    for unit in list(unit_files):
-        if unit.endswith(".service"):
-            for name, content in common_dropins.items():
-                service_dropins.setdefault(unit, {}).setdefault(name, content)
-
-    oneshots = {
-        unit
-        for unit, content in unit_files.items()
-        if unit.endswith(".service") and _is_oneshot(content)
-    }
-    return unit_files, service_dropins, oneshots
+    unit_contents = [
+        (serverops.unit_rel_name(path), (spec.content or b"").decode("utf-8"))
+        for path, spec in sorted(files.items())
+        if path.startswith("systemd/")
+    ]
+    return serverops.expand_dropins(unit_contents)
 
 
 def merge_server_built(
@@ -202,25 +95,6 @@ def merge_server_built(
     return m.manifest_from_dict(payload)
 
 
-def _verify_report(staging: str, verify: transfer.VerifyResult) -> str:
-    parts = [f"The staged release tree {staging} failed verification:"]
-    for path in verify.missing:
-        parts.append(f"  missing: {path}")
-    for path, mismatch in verify.mismatch.items():
-        parts.append(
-            f"  hash mismatch: {path}"
-            f" (expected {mismatch.expected}, got {mismatch.actual})"
-        )
-    for path, want in verify.link_mismatch.items():
-        parts.append(f"  symlink mismatch: {path} (expected link to {want})")
-    for path, mismatch in verify.mode_mismatch.items():
-        parts.append(
-            f"  mode mismatch: {path}"
-            f" (expected {mismatch.expected}, got {mismatch.actual})"
-        )
-    return "\n".join(parts)
-
-
 @cappa.command(
     help="Deploy your application to the server",
 )
@@ -238,13 +112,6 @@ class Deploy(BaseCommand):
         cappa.Arg(
             long="--full-restart",
             help="Restart every unit instead of reload-or-restart",
-        ),
-    ] = False
-    restart_on_env_change: Annotated[
-        bool,
-        cappa.Arg(
-            long="--restart-on-env-change",
-            help="Restart every unit (not just env-fed ones) when the environment changed",
         ),
     ] = False
     no_rollback: Annotated[
@@ -303,10 +170,11 @@ class Deploy(BaseCommand):
             serverops.ensure_layout(
                 conn, app_dir, config.app_user or config.app_name, host.user
             )
-            transfer.sweep_stale_staging(conn, app_dir)
-
             lock = serverops.acquire_lock(conn, app_dir)
             try:
+                # Inside the lock: a concurrent deploy's staging dir is not
+                # ours to delete.
+                transfer.sweep_stale_staging(conn, app_dir)
                 self._deploy(conn, resolved_env, context)
             finally:
                 serverops.release_lock(conn, app_dir, lock)
@@ -419,7 +287,7 @@ class Deploy(BaseCommand):
         first_deploy = live_digest is None and prev_manifest is None
 
         remote_staging = f"{app_dir}/releases/.staging-{os.getpid()}"
-        conn.run(f"mkdir -p {_q(remote_staging)}", warn=True, hide=True)
+        conn.run(f"mkdir -p {serverops.q(remote_staging)}", warn=True, hide=True)
 
         mfile = m.CADDYFILE_PATH
         try:
@@ -504,7 +372,7 @@ class Deploy(BaseCommand):
                 conn, remote_staging, m.manifest_to_dict(final_manifest)
             )
             if not verify.ok:
-                raise DeploymentError(_verify_report(remote_staging, verify))
+                raise DeploymentError(transfer.verify_report(remote_staging, verify))
 
             # Pre-install hooks: the old release is still live.
             self._run_hooks(conn, "pre_install", context, release_path=None)
@@ -529,20 +397,12 @@ class Deploy(BaseCommand):
             self.output.info("Activating release...")
             transfer.swap_current(conn, app_dir, final_digest)
 
-            env_changed = bool(
-                prev_manifest is not None
-                and m.diff_manifests(prev_manifest, final_manifest).by_kind(
-                    m.EntryKind.ENV
-                )
-            )
             self._restart(
                 conn,
                 prev_manifest,
                 final_manifest,
                 oneshots,
-                force_full_restart=self.full_restart
-                or first_deploy
-                or (self.restart_on_env_change and env_changed),
+                force_full_restart=self.full_restart or first_deploy,
             )
             self._converge(conn, final_manifest)
             self._wait_for_units(conn, final_manifest, oneshots)
@@ -621,17 +481,19 @@ class Deploy(BaseCommand):
             # Full restart covers every app unit incl. sockets/timers (a
             # restarted timer starts; the old installer did the same).
             unit_names: Iterable[str] = sorted(
-                set(_service_unit_names(final_manifest))
-                | _socket_timer_unit_names(final_manifest)
+                set(serverops.service_unit_names(final_manifest))
+                | serverops.socket_timer_unit_names(final_manifest)
             )
         else:
             unit_names = store.restart_set(
                 prev_manifest,
                 final_manifest,
-                env_fed_units=[name for name in _service_unit_names(final_manifest)],
+                env_fed_units=[
+                    name for name in serverops.service_unit_names(final_manifest)
+                ],
                 oneshot_units=oneshots,
             )
-        specs = _expand_patterns(unit_names)
+        specs = serverops.expand_patterns(unit_names)
         if not specs:
             self.output.info("No unit needs a restart for this deploy.")
             return
@@ -642,13 +504,13 @@ class Deploy(BaseCommand):
         # template instances are enabled by the convergence step right after.
         enable_specs = sorted(
             name
-            for name in set(_service_unit_names(final_manifest))
-            | _socket_timer_unit_names(final_manifest)
+            for name in set(serverops.service_unit_names(final_manifest))
+            | serverops.socket_timer_unit_names(final_manifest)
             if not name.endswith("@.service") and name not in oneshots
         )
         if enable_specs:
             _, enable_ok = conn.run(
-                f"sudo systemctl enable {_q(*enable_specs)}", warn=True
+                f"sudo systemctl enable {serverops.q(*enable_specs)}", warn=True
             )
             if not enable_ok:
                 self.output.warning(
@@ -656,13 +518,13 @@ class Deploy(BaseCommand):
                     "they will not start on boot."
                 )
         _, ok = conn.run(
-            f"sudo systemctl {verb} {_q(*specs)}",
+            f"sudo systemctl {verb} {serverops.q(*specs)}",
             warn=True,
         )
         if not ok:
-            raise DeploymentError(
-                "Services failed to restart after activation; inspect the server."
-            )
+            # Activation steps declare restart failure -> rollback (#76);
+            # _handle_failed_units raises a cappa.Exit in all paths.
+            self._handle_failed_units(conn, specs)
 
     def _converge(self, conn, manifest: m.Manifest) -> None:
         """Start missing / stop extra replica instances, both directions.
@@ -676,7 +538,7 @@ class Deploy(BaseCommand):
             entry = manifest.entries[path]
             if entry.kind is not m.EntryKind.UNIT:
                 continue
-            name = _unit_rel_name(path)
+            name = serverops.unit_rel_name(path)
             if not name.endswith("@.service"):
                 continue
             if not name.startswith(f"{app_name}-"):
@@ -707,15 +569,21 @@ class Deploy(BaseCommand):
         if stop and not serverops.stop_and_disable(
             conn, sorted(f"{u}.service" for u in stop)
         ):
-            raise DeploymentError(
-                "Failed while stopping extra service instances; inspect the server."
-            )
+            if getattr(self, "_rolling_back", False):
+                # Convergence failure while rolling back: state.current still
+                # points at the target, another rollback would be a no-op loop.
+                raise DeploymentError(
+                    "Failed while stopping extra service instances; inspect the server."
+                )
+            self._handle_failed_units(conn, sorted(f"{u}.service" for u in stop))
         if start and not serverops.enable_and_start(
             conn, sorted(f"{u}.service" for u in start)
         ):
-            raise DeploymentError(
-                "Failed while starting missing service instances; inspect the server."
-            )
+            if getattr(self, "_rolling_back", False):
+                raise DeploymentError(
+                    "Failed while starting missing service instances; inspect the server."
+                )
+            self._handle_failed_units(conn, sorted(f"{u}.service" for u in start))
 
     def _readiness_units(self, manifest: m.Manifest, oneshots: set[str]) -> list[str]:
         """Runtime service units to health-check, derived from the release
@@ -763,7 +631,7 @@ class Deploy(BaseCommand):
             return
         for attempt in range(10):
             out, ok = conn.run(
-                f"systemctl is-failed {' '.join(_q(u) for u in sorted(units_to_check))}",
+                f"systemctl is-failed {' '.join(serverops.q(u) for u in sorted(units_to_check))}",
                 warn=True,
                 hide=True,
             )
@@ -791,7 +659,7 @@ class Deploy(BaseCommand):
         for unit in failed:
             self.output.error(f"{unit} failed to start")
             log_out, _ = conn.run(
-                f"journalctl -u {_q(unit)} -n 30 --no-pager || true",
+                f"journalctl -u {serverops.q(unit)} -n 30 --no-pager || true",
                 warn=True,
                 hide=True,
             )
@@ -838,11 +706,12 @@ class Deploy(BaseCommand):
     def _auto_rollback(self, conn, prev_digest: str) -> None:
         """Swap back to the previous release, reinstall its units, restart it,
         record the failure in state, and exit 3."""
+        self._rolling_back = True
         self.output.warning("Rolling back to the previous release...")
         app_dir = self.config.app_dir
         prev_path = f"{app_dir}/releases/{prev_digest}"
 
-        prev_raw = _read_remote_file(conn, f"{prev_path}/manifest.json")
+        prev_raw = serverops.read_remote_file(conn, f"{prev_path}/manifest.json")
         if prev_raw is None:
             raise cappa.Exit(
                 f"Auto-rollback failed: previous release {prev_digest} is"
@@ -853,20 +722,50 @@ class Deploy(BaseCommand):
 
         transfer.swap_current(conn, app_dir, prev_digest)
 
-        unit_files, dropins, _oneshots = collect_remote_units(
+        unit_files, dropins, _oneshots, failed_units = serverops.collect_release_units(
             conn, prev_path, prev_manifest
         )
+        if failed_units:
+            # Best effort during auto-rollback: install what was readable.
+            self.output.warning(
+                "Could not read unit file(s) from the previous release: "
+                + ", ".join(failed_units)
+            )
         if unit_files or dropins:
             serverops.install_units(conn, self.config.app_name, unit_files, dropins)
-        specs = _expand_patterns(
+        caddy_entry = prev_manifest.entries.get(m.CADDYFILE_PATH)
+        if caddy_entry is not None and caddy_entry.kind is m.EntryKind.CADDY:
+            # Caddy is running the new release's config; restore the previous
+            # one before the restart (#80: env/units/code always restored
+            # together).
+            caddy_raw = serverops.read_remote_file(conn, f"{prev_path}/Caddyfile")
+            if caddy_raw is None:
+                self.output.warning(
+                    "Previous release declares a Caddyfile but it could not be"
+                    " read; caddy config unchanged."
+                )
+            else:
+                installed = serverops.install_caddyfile(
+                    conn, caddy_raw, self.config.caddy_config_path
+                )
+                if installed:
+                    self.output.info(
+                        "Caddy reloaded with the previous release's Caddyfile."
+                    )
+                else:
+                    self.output.warning(
+                        "Failed to apply the previous release's Caddyfile;"
+                        " caddy config unchanged."
+                    )
+        specs = serverops.expand_patterns(
             name
             for path, entry in prev_manifest.entries.items()
             if entry.kind is m.EntryKind.UNIT
-            and (name := _unit_rel_name(path)).endswith(".service")
+            and (name := serverops.unit_rel_name(path)).endswith(".service")
         )
         if specs:
             conn.run(
-                f"sudo systemctl restart --quiet {' '.join(_q(s) for s in specs)}",
+                f"sudo systemctl restart --quiet {' '.join(serverops.q(s) for s in specs)}",
                 warn=True,
             )
             self._converge(conn, prev_manifest)
@@ -918,33 +817,18 @@ class Deploy(BaseCommand):
 
     def _list_releases(self, conn) -> list[str]:
         """Digests under releases/, newest (mtime) first; staging excluded."""
-        app_dir = self.config.app_dir
-        out, _ok = conn.run(
-            f"cd {_q(app_dir)} && ls -1t releases/ 2>/dev/null || true",
-            warn=True,
-            hide=True,
-        )
-        return [
-            line.strip()
-            for line in out.splitlines()
-            if line.strip() and not line.strip().startswith(".staging-")
-        ]
+        return serverops.list_releases(conn, self.config.app_dir)
 
     def _gc(self, conn, state: store.State, releases: list[str]) -> None:
         """GC via store.gc_plan: keep current + previous[0] + newest releases."""
-        keep_budget = self.config.versions_to_keep
-        if keep_budget is not None:
-            # Rollback needs at least current + previous[0] kept.
-            keep_budget = max(keep_budget, 2)
-        kill = store.gc_plan(state.current, state.previous, releases, keep_budget)
-        for digest in kill:
-            conn.run(
-                f"rm -rf {_q(f'{self.config.app_dir}/releases/{digest}')}",
-                warn=True,
-                hide=True,
-            )
-        if kill:
-            self.output.info(f"Garbage-collected {len(kill)} old release(s).")
+        serverops.collect_garbage(
+            conn,
+            self.config.app_dir,
+            state,
+            releases,
+            self.config.versions_to_keep,
+            self.output,
+        )
 
     # =======================================================================================
     # Hooks
@@ -977,13 +861,13 @@ class Deploy(BaseCommand):
         if release_path is None:
             app_dir = self.config.app_dir
             select_env = (
-                f"if [ -f {_q(f'{app_dir}/current/.env')} ]; then "
-                f"source {_q(f'{app_dir}/current/.env')}; else "
-                f"source {_q(f'{self.config.install_dir}/.env')} 2>/dev/null; fi"
+                f"if [ -f {serverops.q(f'{app_dir}/current/.env')} ]; then "
+                f"source {serverops.q(f'{app_dir}/current/.env')}; else "
+                f"source {serverops.q(f'{self.config.install_dir}/.env')} 2>/dev/null; fi"
             )
             cwd: str | None = None
         else:
-            select_env = f"source {_q(f'{release_path}/.env')}"
+            select_env = f"source {serverops.q(f'{release_path}/.env')}"
             cwd = release_path
             context = {
                 **context,
@@ -996,7 +880,7 @@ class Deploy(BaseCommand):
             self.output.info(f"  [{label}] {cmd}")
             full_cmd = f"set -a; {select_env}; set +a; "
             if cwd:
-                full_cmd += f"cd {_q(cwd)} && "
+                full_cmd += f"cd {serverops.q(cwd)} && "
             full_cmd += cmd
             conn.run(full_cmd, pty=True)
 
@@ -1036,10 +920,12 @@ class Deploy(BaseCommand):
     def _notice_old_layout(self, conn) -> None:
         """Non-destructive old-layout notice: `.install/` present, `store/` absent."""
         _, has_old = conn.run(
-            f"test -d {_q(self.config.install_dir)}", warn=True, hide=True
+            f"test -d {serverops.q(self.config.install_dir)}", warn=True, hide=True
         )
         _, has_store = conn.run(
-            f"test -d {_q(f'{self.config.app_dir}/store')}", warn=True, hide=True
+            f"test -d {serverops.q(f'{self.config.app_dir}/store')}",
+            warn=True,
+            hide=True,
         )
         if has_old and not has_store:
             self.output.warning(

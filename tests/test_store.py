@@ -340,11 +340,6 @@ class TestNoop:
         state = store.record_deploy(state, "r1", at="t")
         assert store.is_noop("r1", state) is True
 
-    def test_force_overrides_noop(self):
-        state = store.parse_state(b"{}")
-        state = store.record_deploy(state, "r1", at="t")
-        assert store.is_noop("r1", state, force=True) is False
-
     def test_differs_not_noop(self):
         state = store.parse_state(b"{}")
         state = store.record_deploy(state, "r1", at="t")

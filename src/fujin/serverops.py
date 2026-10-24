@@ -2,23 +2,26 @@
 
 Everything here mutates the server through :class:`SSH2Connection.run` /
 :meth:`~SSH2Connection.put`, reusing the sudo/pty conventions of
-``commands/server.py`` and the ``_installer.py`` phase logic. Pure
+``commands/server.py``. Pure
 decision-making lives in ``store.py``; this module is the I/O port layer.
 """
 
 from __future__ import annotations
 
 import base64
+import configparser
 import json
 import secrets
 import logging
 import shlex
 import msgspec
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+import cappa
+
 from fujin import manifest as m
-from fujin.store import State, parse_state, serialize_state
+from fujin.store import State, parse_state, serialize_state, gc_plan
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +43,184 @@ class ServerOpsError(RuntimeError):
     """A server-side operation failed."""
 
 
-def _q(*parts: str) -> str:
-    return " ".join(shlex.quote(p) for p in parts)
+def q(*parts: str) -> str:
+    return " ".join(shlex.quote(str(p)) for p in parts)
+
+
+def unit_rel_name(path: str) -> str:
+    """Strip the ``systemd/`` prefix from a manifest entry path."""
+    return path.split("/", 1)[1] if path.startswith("systemd/") else path
+
+
+def expand_patterns(unit_names: Iterable[str]) -> list[str]:
+    """Expand template units to ``@*.service`` glob patterns for systemctl."""
+    return sorted(
+        unit_rel_name(unit).replace("@.service", "@*.service")
+        if unit.endswith("@.service")
+        else unit_rel_name(unit)
+        for unit in unit_names
+        if unit
+    )
+
+
+def is_oneshot(service_content: str) -> bool:
+    """Type=oneshot detection from a service unit file body."""
+    parser = configparser.RawConfigParser(strict=False)
+    parser.read_string(service_content)
+    if not parser.has_option("Service", "Type"):
+        return False
+    return parser.get("Service", "Type").strip().lower() == "oneshot"
+
+
+def service_unit_names(manifest: m.Manifest) -> list[str]:
+    return sorted(
+        unit_rel_name(path)
+        for path, entry in manifest.entries.items()
+        if entry.kind is m.EntryKind.UNIT and unit_rel_name(path).endswith(".service")
+    )
+
+
+def socket_timer_unit_names(manifest: m.Manifest) -> set[str]:
+    return {
+        unit_rel_name(path)
+        for path, entry in manifest.entries.items()
+        if entry.kind is m.EntryKind.UNIT
+        and unit_rel_name(path).endswith((".socket", ".timer"))
+    }
+
+
+def read_remote_file(conn: Any, path: str, *, fatal: str | None = None) -> str | None:
+    """Read a small remote file; ``fatal`` makes failure abort with that
+    message instead of returning None.
+
+    Uses SCP (not ``cat``): release manifests can be hundreds of KB and big
+    exec-channel reads can trickle forever (see SSH2Connection.get).
+    """
+    import os
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        try:
+            conn.get(path, tmp_path)
+        except Exception:
+            if fatal:
+                raise cappa.Exit(fatal, code=1) from None
+            return None
+        with open(tmp_path, "rb") as fh:
+            return fh.read().decode("utf-8", errors="replace")
+    finally:
+        os.unlink(tmp_path)
+
+
+def expand_dropins(
+    unit_contents: Iterable[tuple[str, str]],
+) -> tuple[dict[str, str], dict[str, dict[str, str]], set[str]]:
+    """Partition systemd tree entries into unit files / per-unit dropins /
+    oneshots.
+
+    ``unit_contents`` yields ``(unit_rel_name, content)`` pairs of a ``systemd``
+    tree. ``dropins`` maps unit names to ``{name.conf: content}`` with
+    ``common.d`` expanded per service unit (``install_units`` contract).
+    """
+    unit_files: dict[str, str] = {}
+    service_dropins: dict[str, dict[str, str]] = {}
+    common_dropins: dict[str, str] = {}
+
+    for rel, content in unit_contents:
+        if rel.startswith("common.d/"):
+            common_dropins[rel.split("/", 1)[1]] = content
+        elif rel.endswith(".conf") and ".d/" in rel:
+            continue  # handled below (flat dropin dir)
+        else:
+            unit_files[rel] = content
+
+    for unit in list(unit_files):
+        if unit.endswith(".service"):
+            for name, content in common_dropins.items():
+                service_dropins.setdefault(unit, {}).setdefault(name, content)
+
+    # Flat dropin dirs: any unit type ("svc.d/", "svc.socket.d/",
+    # "svc.timer.d/") -> dropins keyed by the full unit name.
+    for rel, content in unit_contents:
+        if rel.endswith(".conf") and ".d/" in rel and not rel.startswith("common.d/"):
+            unit_dir, _, dropin_name = rel.rpartition("/")
+            unit = unit_dir.removesuffix(".d")
+            service_dropins.setdefault(unit, {})[dropin_name] = content
+
+    oneshots = {
+        unit
+        for unit, content in unit_files.items()
+        if unit.endswith(".service") and is_oneshot(content)
+    }
+    return unit_files, service_dropins, oneshots
+
+
+def collect_release_units(
+    conn: Any, release_path: str, manifest: m.Manifest
+) -> tuple[dict[str, str], dict[str, dict[str, str]], set[str], list[str]]:
+    """Unit files + dropins + oneshots of a committed release tree.
+
+    Reads the release tree's ``systemd/`` files. Returns
+    ``(unit_files, dropins, oneshots, failed_rels)`` -- the caller decides how
+    to treat unreadable units.
+    """
+    systemd_path = f"{release_path}/systemd"
+    unit_contents: list[tuple[str, str]] = []
+    failed: list[str] = []
+
+    unit_paths = sorted(
+        path
+        for path, entry in manifest.entries.items()
+        if entry.kind is m.EntryKind.UNIT
+    )
+    for path in unit_paths:
+        rel = unit_rel_name(path)
+        content = read_remote_file(conn, f"{systemd_path}/{rel}")
+        if content is None:
+            logger.warning("Cannot read unit file '%s' from the release tree", rel)
+            failed.append(rel)
+            continue
+        unit_contents.append((rel, content))
+
+    unit_files, dropins, oneshots = expand_dropins(unit_contents)
+    return unit_files, dropins, oneshots, failed
+
+
+def list_releases(conn: Any, app_dir: str) -> list[str]:
+    """Digests under releases/, newest (mtime) first; staging dirs excluded."""
+    out, _ok = conn.run(
+        f"cd {shlex.quote(app_dir)} && ls -1t releases/ 2>/dev/null || true",
+        warn=True,
+        hide=True,
+    )
+    return [
+        line.strip()
+        for line in out.splitlines()
+        if line.strip() and not line.strip().startswith(".staging-")
+    ]
+
+
+def collect_garbage(
+    conn: Any,
+    app_dir: str,
+    state: State,
+    releases: list[str],
+    keep_budget: int | None,
+    output: Any,
+) -> tuple[str, ...]:
+    """Delete releases outside ``store.gc_plan``'s keep-set; returns digest list."""
+    kill = gc_plan(state.current, state.previous, releases, keep_budget)
+    for digest in kill:
+        conn.run(
+            f"rm -rf {shlex.quote(f'{app_dir}/releases/{digest}')}",
+            warn=True,
+            hide=True,
+        )
+    if kill:
+        output.info(f"Garbage-collected {len(kill)} old release(s).")
+    return kill
 
 
 def _b64(content: bytes | str) -> str:
@@ -275,7 +454,7 @@ def parse_holder_pid(output: str) -> str | None:
 
 
 # =============================================================================
-# Code install (into staging; wave: deploy step 4, replaces _installer PHASE 2)
+# Code install (into staging; deploy step 4)
 # =============================================================================
 
 
@@ -424,9 +603,14 @@ def link_unchanged(
             "    src = os.path.join(prev, rel)",
             "    dst = os.path.join(staging, rel)",
             "    try:",
+            "        # A chmod on a hardlink mutates the shared inode, i.e. the"
+            " live release. Only link files whose on-disk mode already"
+            " matches; anything else is left for rsync to copy privately.",
+            "        if (os.stat(src).st_mode & 0o777) != mode:",
+            "            failed.append(rel)",
+            "            continue",
             "        os.makedirs(os.path.dirname(dst), exist_ok=True)",
             "        os.link(src, dst)",
-            "        os.chmod(dst, mode)",
             "        linked += 1",
             "    except OSError:",
             "        failed.append(rel)",
@@ -446,18 +630,20 @@ def link_unchanged(
 def normalize_staging_ownership(conn: Any, staging_dir: str, app_user: str) -> None:
     """Force the staged tree into the deploy permission model.
 
-    Files pre-hardlinked by ``link_unchanged`` and files created by rsync can
-    otherwise land in the deploy user's group, which would leave the app user
-    unable to read its own ``.env``. Make the group assignment explicit
-    instead of hoping the filesystem did it: group everything ``{app_user}``,
-    make everything group-traversable/readable, and set setgid on every
-    directory so late writes (hooks, runtime) keep inheriting the group.
+    Files hardlinked from the previous release (``link_unchanged``) share
+    their inode with the live tree, so a blindly bit-adding ``chmod -R`` would
+    mutate the live release (immutability violation). chgrp covers them (the live
+    release's group is already ``{app_user}``) and chmod is applied only to
+    directories and to files private to the staging tree.
     """
     staging_q = shlex.quote(staging_dir)
     _, ok = conn.run(
         f"sudo chgrp -R {shlex.quote(app_user)} {staging_q} && "
-        f"sudo chmod -R g+rX {staging_q} && "
-        f"sudo find {staging_q} -type d -exec chmod g+s {{}} +",
+        # Directories: group-traversable, and setgid so late writes (hooks,
+        # runtime) keep inheriting the group.
+        f"sudo find {staging_q} -type d -exec chmod g+rxs {{}} + && "
+        # Non-hardlinked files only.
+        f"sudo find {staging_q} -links 1 -type f -exec chmod g+rX {{}} +",
         warn=True,
     )
     if not ok:
@@ -465,7 +651,7 @@ def normalize_staging_ownership(conn: Any, staging_dir: str, app_user: str) -> N
 
 
 # =============================================================================
-# Systemd units (adapted _installer PHASE 3, client-driven)
+# Systemd units
 # =============================================================================
 
 
@@ -523,13 +709,11 @@ def _remove_stale_units(conn: Any, app_name: str, valid: set[str]) -> None:
     template = [u for u in stale if u.endswith("@.service")]
     if regular:
         conn.run(
-            f"sudo systemctl disable --now --quiet {_q(*regular)}", warn=True, hide=True
+            f"sudo systemctl disable --now --quiet {q(*regular)}", warn=True, hide=True
         )
     if template:
-        conn.run(
-            f"sudo systemctl disable --quiet {_q(*template)}", warn=True, hide=True
-        )
-    conn.run(f"sudo systemctl reset-failed {_q(*stale)}", warn=True, hide=True)
+        conn.run(f"sudo systemctl disable --quiet {q(*template)}", warn=True, hide=True)
+    conn.run(f"sudo systemctl reset-failed {q(*stale)}", warn=True, hide=True)
     targets = " ".join(shlex.quote(f"/etc/systemd/system/{name}") for name in stale)
     conn.run(f"sudo rm -rf {targets}", warn=True, hide=True)
 
@@ -631,20 +815,14 @@ def read_current_manifest(conn: Any, app_dir: str) -> m.Manifest | None:
     Uses SCP (not ``cat``): the merged manifest can be hundreds of KB and
     big exec-channel reads can trickle forever (see SSH2Connection.get).
     """
-    import os
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp_path = tmp.name
+    raw = read_remote_file(conn, f"{app_dir}/current/{MANIFEST_PATH}")
+    if raw is None:
+        return None
     try:
-        try:
-            conn.get(f"{app_dir}/current/{MANIFEST_PATH}", tmp_path)
-        except Exception:
-            return None
-        with open(tmp_path, "rb") as fh:
-            return m.decode_manifest(fh.read())
-    finally:
-        os.unlink(tmp_path)
+        return m.decode_manifest(raw)
+    except Exception:
+        logger.warning("Undecodable manifest in %s/current", app_dir)
+        return None
 
 
 # =============================================================================
@@ -675,7 +853,7 @@ def enable_and_start(conn: Any, units: Sequence[str]) -> bool:
     empty input."""
     if not units:
         return True
-    _, ok = conn.run(f"sudo systemctl enable --now {_q(*units)}", warn=True)
+    _, ok = conn.run(f"sudo systemctl enable --now {q(*units)}", warn=True)
     return ok
 
 
@@ -684,7 +862,7 @@ def stop_and_disable(conn: Any, units: Sequence[str]) -> bool:
     input; template instances converge through the same command."""
     if not units:
         return True
-    _, ok = conn.run(f"sudo systemctl disable --now {_q(*units)}", warn=True)
+    _, ok = conn.run(f"sudo systemctl disable --now {q(*units)}", warn=True)
     if ok:
-        conn.run(f"sudo systemctl reset-failed {_q(*units)}", warn=True, hide=True)
+        conn.run(f"sudo systemctl reset-failed {q(*units)}", warn=True, hide=True)
     return ok
