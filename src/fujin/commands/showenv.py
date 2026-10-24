@@ -12,10 +12,10 @@ from fujin.secrets import resolve_secrets
 @dataclass
 class Showenv(BaseCommand):
     def __call__(self):
-        if self.config.secret_config:
-            parsed_env = resolve_secrets(
-                self.selected_host.env_content, self.config.secret_config
-            )
+        host = self.selected_host
+        secret_config = self.config.effective_secrets(host)
+        if secret_config:
+            parsed_env = resolve_secrets(host.env_content, secret_config)
         else:
-            parsed_env = self.selected_host.env_content
+            parsed_env = host.env_content
         self.output.output(parsed_env)

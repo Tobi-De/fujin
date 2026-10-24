@@ -55,6 +55,22 @@ password_env
 ~~~~~~~~~~~~
 Environment variable containing the password for the service account. This is only required for certain adapters.
 
+Per-host override
+~~~~~~~~~~~~~~~~~
+A host may declare its own ``secrets`` block inside its ``[[hosts]]`` entry (or in a per-host override file, see `Per-Host Overrides`_); it replaces the global one for that host only. A host env file without any ``$REF`` secret reference never contacts the adapter at all, so e.g. a staging host with only literal values works even with a global Bitwarden/1Password adapter configured.
+
+.. code-block:: toml
+
+   [[hosts]]
+   name = "staging"
+   address = "staging.example.com"
+   env = """
+   DEBUG=True
+   SECRET_KEY=not-so-secret
+   """
+   [hosts.secrets]
+   adapter = "system"
+
 replicas
 --------
 
@@ -302,7 +318,7 @@ Beyond connection details, hosts can differ in settings such as replica counts, 
 
 Merge semantics are simple: scalars replace, tables (maps) merge key-by-key recursively, and arrays replace entirely (no appending or delta semantics).
 
-**Host fields vs app-level keys:** Keys in the override file that are valid host fields (e.g. ``address``, ``port``) override only that host. Other app-level keys (e.g. ``replicas``, ``versions_to_keep``, ``hooks``) override the app configuration **when that host is selected** (e.g. with ``fujin deploy -H staging``). Overrides never leak into a different host's config.
+**Host fields vs app-level keys:** Keys in the override file that are valid host fields (e.g. ``address``, ``port``, ``secrets``) override only that host. Other app-level keys (e.g. ``replicas``, ``versions_to_keep``, ``hooks``) override the app configuration **when that host is selected** (e.g. with ``fujin deploy -H staging``). Overrides never leak into a different host's config.
 
 **Map form:** Instead of the ``[[hosts]]`` array, hosts may be declared as TOML tables keyed by name (a TOML file cannot mix the two forms):
 

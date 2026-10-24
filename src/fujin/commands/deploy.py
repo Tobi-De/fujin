@@ -159,9 +159,10 @@ class Deploy(BaseCommand):
         logger.debug("Starting deployment for %s", config.app_name)
         logger.debug("Target host: %s", host.address)
 
-        if config.secret_config:
+        secret_config = config.effective_secrets(host)
+        if secret_config:
             self.output.info("Resolving secrets from configuration...")
-            parsed_env = resolve_secrets(host.env_content, config.secret_config)
+            parsed_env = resolve_secrets(host.env_content, secret_config)
             # Track every resolved secret value so all output paths render it
             # as `<$REF>` instead of the raw value (never registered in the
             # build cache; #77).
