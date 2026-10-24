@@ -12,6 +12,9 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
+import cappa
 
 import fujin.commands.rollback as rollback
 import fujin.connection
@@ -65,6 +68,17 @@ class FakeConn:
         for marker, (out, ok) in self.responses:
             if marker in cmd:
                 return out, ok
+        # Existence checks follow the manifest marker registry: a test
+        # -d/-f target exists iff some marker is that path or inside it.
+        # A blind ok=True default would break digest-vs-version targeting;
+        # a blind False would break the layout gate.
+        if cmd.startswith("test -d ") or cmd.startswith("test -f "):
+            target = cmd.split(" ", 2)[2].split()[0].strip("'\"")
+            return "", bool(
+                any(
+                    m == target or m.startswith(target + "/") for m, _ in self.responses
+                )
+            )
         return "", True
 
     def get(self, remote, local, verify=False):
@@ -106,7 +120,13 @@ MANIFEST_RESPONSES = [
     manifest_response("c-digest", "1.0.2", "dist-ccc"),
 ]
 
+LAYOUT_RESPONSES = [
+    ("test -d /opt/fujin/testapp/store", ("", True)),
+    ("test -d /opt/fujin/testapp/.install", ("", False)),
+]
+
 DEFAULT_CONN_RESPONSES = [
+    *LAYOUT_RESPONSES,
     ("ls -1t releases/", ("b-digest\na-digest\nc-digest\n", True)),
     *MANIFEST_RESPONSES,
     *unit_responses_for("a-digest", default_files()),
@@ -356,6 +376,7 @@ def test_interactive_prompt_lists_kept_releases_only(monkeypatch, minimal_config
 def test_no_targets_info_message_non_strict(monkeypatch, minimal_config):
     conn = FakeConn(
         [
+            *LAYOUT_RESPONSES,
             ("ls -1t releases/", ("b-digest\n", True)),
             *MANIFEST_RESPONSES,
         ]
@@ -376,6 +397,7 @@ def test_no_targets_info_message_non_strict(monkeypatch, minimal_config):
 def test_strict_no_targets_errors(monkeypatch, minimal_config):
     conn = FakeConn(
         [
+            *LAYOUT_RESPONSES,
             ("ls -1t releases/", ("b-digest\n", True)),
             *MANIFEST_RESPONSES,
         ]
@@ -444,6 +466,7 @@ def test_verify_failure_aborts_before_swap(monkeypatch, minimal_config):
 def test_restart_failure_is_loud_and_no_recursion(monkeypatch, minimal_config):
     conn = FakeConn(
         [
+            *LAYOUT_RESPONSES,
             *DEFAULT_CONN_RESPONSES,
             ("systemctl restart --quiet", ("", False)),
         ]
@@ -523,6 +546,7 @@ def test_socket_and_timer_dropins_collected_as_dropins(monkeypatch, minimal_conf
     )
     conn = FakeConn(
         [
+            *LAYOUT_RESPONSES,
             manifest_response("a-digest", "1.0.0", "dist-aaa", files=files),
             ("ls -1t releases/", ("b-digest\na-digest\n", True)),
             *[
@@ -583,3 +607,57 @@ def test_rollback_audit_log_records_real_host(monkeypatch, minimal_config):
     assert log_calls
     assert log_calls[0][1]["host"] == "example.com"
     assert log_calls[0][0][2] == "rollback"
+
+
+def test_to_version_resolves_manifest_version(monkeypatch, minimal_config):
+    """--to <version>: find the kept release whose manifest version matches."""
+    conn = FakeConn(DEFAULT_CONN_RESPONSES)
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, _ws, swap_current, _v, _iu = setup_rollback(
+        monkeypatch,
+        minimal_config,
+        conn,
+        state=state,
+        current_manifest=current,
+        to="1.0.0",
+    )
+    cmd()
+    swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "a-digest")
+
+
+def test_to_unknown_version_hard_errors(monkeypatch, minimal_config):
+    conn = FakeConn(DEFAULT_CONN_RESPONSES)
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, _ws, swap_current, _v, _iu = setup_rollback(
+        monkeypatch,
+        minimal_config,
+        conn,
+        state=state,
+        current_manifest=current,
+        to="9.9.9",
+    )
+    with pytest.raises(cappa.output.Exit) as excinfo:
+        cmd()
+    assert excinfo.value.code == 1
+    swap_current.assert_not_called()
+
+
+def test_to_version_uses_digest_dir_hint(monkeypatch, minimal_config):
+    """A value that is neither digest-shaped nor a manifest version but does
+    name an existing release dir resolves as that digest (release dirs are
+    digest-named in practice)."""
+    conn = FakeConn(DEFAULT_CONN_RESPONSES)
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, _ws, swap_current, _v, _iu = setup_rollback(
+        monkeypatch,
+        minimal_config,
+        conn,
+        state=state,
+        current_manifest=current,
+        to="a-digest",
+    )
+    cmd()
+    swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "a-digest")

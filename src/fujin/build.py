@@ -399,12 +399,15 @@ def run_build(
 
     pre_build_requirements = _requirements_content(config, after_build=False)
     sources: dict[str, str | bytes] = dict(unit_sources)
+    pyproject_path = Path("pyproject.toml")
+    pyproject_text = pyproject_path.read_text() if pyproject_path.exists() else None
     key = bundle_key(
         config,
         unit_sources=sources,
         assets=assets,
         caddyfile=None if caddyfile is None else config.caddyfile_path.read_text(),
         requirements=pre_build_requirements,
+        pyproject=pyproject_text,
     )
 
     cache_dir = config.local_config_dir / "cache" / CACHE_ROOT_DIR / key
@@ -446,6 +449,25 @@ def run_build(
     logger.debug("Build cache miss; building")
     _run_build_command(config)
     requirements = _requirements_content(config, after_build=True)
+    # The build may have generated the requirements file (or changed it):
+    # rebuild the key from the post-build content so the cache is stored
+    # under the key a subsequent deploy will actually compute (a generated
+    # file that did not exist pre-build hashes to nothing in the pre-key).
+    if requirements != pre_build_requirements and pyproject_path.exists():
+        repaired_key = bundle_key(
+            config,
+            unit_sources=sources,
+            assets=assets,
+            caddyfile=None if caddyfile is None else config.caddyfile_path.read_text(),
+            requirements=requirements,
+            pyproject=pyproject_text,
+        )
+        if repaired_key != key:
+            logger.info(
+                "Requirements changed during build; caching under the post-build key"
+            )
+            key = repaired_key
+            cache_dir = config.local_config_dir / "cache" / CACHE_ROOT_DIR / key
     files, dist_path, dist_sha256 = _assemble_staging(
         cache_dir,
         config,

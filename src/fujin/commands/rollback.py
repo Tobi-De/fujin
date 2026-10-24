@@ -11,6 +11,18 @@ from fujin import connection
 from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
+
+
+def _is_digest(value: str) -> bool:
+    """64 hex lowercase chars: a release digest, not a version string."""
+    return bool(
+        value
+        and len(value) == 64
+        and all(c in "0123456789abcdef" for c in value.lower())
+    )
+
+
+from fujin import serverops, store, transfer
 from fujin.manifest import Manifest, decode_manifest, manifest_to_dict
 from fujin.store import (
     convergence,
@@ -120,24 +132,18 @@ class Rollback(BaseCommand):
         current_digest: str,
     ) -> str:
         if self.to is not None:
-            target = normalize_digest(self.to)
+            raw = normalize_digest(self.to)
+            # Digests only exist under releases/<digest>/; anything else is
+            # tried as a version string against kept release manifests.
+            if _is_digest(raw) or self._digest_dir_exists(conn, raw):
+                target = self._check_digest_target(conn, raw)
+            else:
+                target = self._target_by_version(conn, releases, raw)
             if target == normalize_digest(current_digest):
                 self.output.info(
                     "The requested release is already the current release."
                 )
                 raise cappa.Exit(code=0)
-            _, exists = conn.run(
-                f"test -f {serverops.q(f'{self._release_path(target)}/manifest.json')}",
-                warn=True,
-                hide=True,
-            )
-            if not exists:
-                raise cappa.Exit(
-                    f"Release '{target}' is not available on the server - it was"
-                    " pruned when old releases were garbage-collected.\nRedeploy"
-                    " the old commit/tag instead.",
-                    code=1,
-                )
             return target
 
         if self.previous:
@@ -150,6 +156,63 @@ class Rollback(BaseCommand):
             return state.previous[0]
 
         return self._prompt_target(state, releases, current_digest)
+
+    def _digest_dir_exists(self, conn, value: str) -> bool:
+        """Digest-vs-version discrimination: a release dir exists per digest."""
+        _, is_dir = conn.run(
+            f"test -d {serverops.q(self._release_path(value))}",
+            warn=True,
+            hide=True,
+        )
+        return bool(is_dir)
+
+    def _check_digest_target(self, conn, target: str) -> str:
+        """Discriminate presence of an exact digest target on the server."""
+        _, exists = conn.run(
+            f"test -f {serverops.q(f'{self._release_path(target)}/manifest.json')}",
+            warn=True,
+            hide=True,
+        )
+        if not exists:
+            raise cappa.Exit(
+                f"Release '{target}' is not available on the server - it was"
+                " pruned when old releases were garbage-collected.\nRedeploy"
+                " the old commit/tag instead.",
+                code=1,
+            )
+        return target
+
+    def _target_by_version(self, conn, releases: list[str], version: str) -> str:
+        """Resolve a ``--to <version>`` against kept release manifests.
+
+        Reading every kept release's manifest is cheap (few releases kept);
+        the target discrimen is ambiguous on no or multiple matches.
+        """
+        candidates: list[str] = []
+        for digest in releases:
+            raw = serverops.read_remote_file(
+                conn, f"{self._release_path(digest)}/manifest.json"
+            )
+            if raw is None:
+                continue  # staging residue or corrupt dir: not a candidate
+            try:
+                if decode_manifest(raw).version == version:
+                    candidates.append(normalize_digest(digest))
+            except Exception:
+                continue
+        if not candidates:
+            raise cappa.Exit(
+                f"No kept release with version '{version}' on the server"
+                " (it may be garbage-collected).",
+                code=1,
+            )
+        if len(candidates) > 1:
+            raise cappa.Exit(
+                f"Version '{version}' is ambiguous; multiple releases carry it:"
+                f" {', '.join(candidates)} -- pass the digest instead.",
+                code=1,
+            )
+        return self._check_digest_target(conn, candidates[0])
 
     def _prompt_target(
         self,
