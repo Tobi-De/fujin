@@ -238,3 +238,92 @@ def test_down_with_full_flag_uninstalls_caddy(minimal_config_dict):
         assert any(
             "systemctl stop caddy" in cmd and "apt remove" in cmd for cmd in calls
         )
+
+
+# ============================================================================
+# Release-tree teardown: Caddy config + app user (parity with old installer)
+# ============================================================================
+
+
+def _release_tree_config(minimal_config_dict):
+    import msgspec
+
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    # force the release-tree branch: no legacy bundle on the server
+    return config
+
+
+class _RecordingConn:
+    def __init__(self):
+        self.runs: list[str] = []
+
+    def run(self, cmd, **kw):
+        self.runs.append(cmd)
+        # There is no legacy bundle in the release-tree branch.
+        if "test -f " in cmd and ".pyz" in cmd:
+            return "", False
+        return "", True
+
+
+def test_down_release_tree_removes_caddy_config_and_app_user(
+    minimal_config_dict, monkeypatch
+):
+    """The release-tree branch unlinks the per-app Caddy config, reloads
+    caddy, and deletes the app user (old-installer parity)."""
+    config = _release_tree_config(minimal_config_dict)
+    fake_conn = _RecordingConn()
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch("fujin.connection.connection") as mock_connection,
+        patch("fujin.commands.down.Confirm") as mock_confirm,
+        patch("fujin.commands.down.log_operation"),
+        patch.object(Down, "output", MagicMock()),
+    ):
+        mock_connection.return_value.__enter__.return_value = fake_conn
+        mock_connection.return_value.__exit__.return_value = None
+        mock_confirm.ask.return_value = True
+
+        down = Down()
+        down.config = config
+        monkeypatch.setattr(
+            type(config), "caddyfile_exists", property(lambda self: True)
+        )
+
+        down()
+
+    calls = fake_conn.runs
+    assert any(f"/etc/caddy/conf.d/{config.app_name}.caddy" in cmd for cmd in calls), (
+        calls
+    )
+    assert any("systemctl reload caddy" in cmd for cmd in calls)
+    joined = "\n".join(calls)
+    assert f"userdel {config.app_user}" in joined
+    assert f"pkill -u {config.app_user}" in joined
+
+
+def test_down_release_tree_survives_missing_app_user(minimal_config_dict, monkeypatch):
+    """`userdel` on an already-absent app user is non-fatal (|| true)."""
+    config = _release_tree_config(minimal_config_dict)
+    fake_conn = _RecordingConn()
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch("fujin.connection.connection") as mock_connection,
+        patch("fujin.commands.down.Confirm") as mock_confirm,
+        patch("fujin.commands.down.log_operation"),
+        patch.object(Down, "output", MagicMock()),
+    ):
+        mock_connection.return_value.__enter__.return_value = fake_conn
+        mock_connection.return_value.__exit__.return_value = None
+        mock_confirm.ask.return_value = True
+
+        down = Down()
+        down.config = config
+        monkeypatch.setattr(
+            type(config), "caddyfile_exists", property(lambda self: False)
+        )
+
+        down()
+
+    joined = "\n".join(fake_conn.runs)
+    assert "userdel" in joined
+    assert "|| true" in joined

@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### 🚀 Features
+
+- Rollback --to <version>; generated-requirements cache repair
+- *(secrets)* Per-host secret adapter config (75)
+- *(config,secrets)* Per-host overrides (83) + secret redaction invariant (87)
+- *(deploy)* Content-addressed release tree with manifest store and build cache
+
+### 🐛 Bug Fixes
+
+- Adversarial review round 2 - 8 behavior fixes
+- *(ssh)* File downloads via ssh exec subprocess (remote scp binary/sftp missing on targets); drop leftover instrumentation
+- *(ssh)* Idle deadline on remote commands, system-scp downloads, kill holder process group (#82)
+- *(transfer)* Replace --link-dest with explicit server-side hardlink dedup (rsync #715 CVE-hardening breaks basis files, exit 23) (#82)
+- *(release-tree)* Real-deploy quirks — staged-dist install, relocatable venv, group normalize, soft enable, manifest via scp (#76 #77 #79)
+- *(serverops)* Include remote pip output in staging-install failure error
+- *(ops)* Release-tree paths and SSH channel detach across runtime commands
+
+### 📚 Documentation
+
+- Add fujin cache page to commands reference
+
+### 🎨 Styling
+
+- *(tests)* Lint autofixes in integration tests
+
+### ⚙️ Miscellaneous Tasks
+
+- Untrack fujin cache artifacts (re-added by hook chore commit)
+- Apply pre-commit
+- Apply changelog hook
+- Stop tracking fujin build cache artifacts (ignored since .gitignore update)
+- Apply pre-commit (fmt, changelog)
+- Drop debug watchdog, keep SIGTERM lock-release handler
+- Revert uv.lock format churn from local uv runs
+
 ## [0.27.1] - 2026-06-25
 
 ### 🐛 Bug Fixes

@@ -62,7 +62,7 @@ Deployment Issues
 
       [[hosts]]
       user = "deploy"  # Correct username?
-      domain_name = "example.com"  # Correct domain?
+      # fujin derives the domain from the Caddyfile, not from fujin.toml
       key_filename = "~/.ssh/id_rsa"  # Correct key path?
 
 3. **Check server firewall:**
@@ -217,31 +217,18 @@ Services fail to start after deployment
 
    .. code-block:: bash
 
-      # Verify venv exists
-      ssh user@server ls ~/apps/yourapp/.venv
+      # Verify venv exists (release tree)
+      ssh user@server ls /opt/fujin/yourapp/current/venv
 
       # Check installed packages
-      ssh user@server ~/apps/yourapp/.venv/bin/pip list
+      ssh user@server /opt/fujin/yourapp/current/venv/bin/python -m pip list
 
-2. **Reinstall dependencies:**
-
-   .. code-block:: bash
-
-      # SSH to server
-      ssh user@server
-
-      # Navigate to app
-      cd ~/apps/yourapp
-
-      # Reinstall
-      .venv/bin/pip install -r requirements.txt
-
-3. **Check requirements.txt:**
+2. **Check requirements.txt:**
 
    .. code-block:: bash
 
-      # Verify requirements.txt was included in deployment
-      ssh user@server cat ~/apps/yourapp/requirements.txt
+      # Verify requirements.txt was included in the deployment
+      ssh user@server cat /opt/fujin/yourapp/current/requirements.txt
 
 "Gunicorn bind failed" errors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -602,7 +589,7 @@ Configuration Issues
       # These are required
       app = "myapp"  # App name
       [[hosts]]  # At least one host
-      domain_name = "example.com"  # Domain required
+      address = "example.com"  # Where to connect
       user = "deploy"  # User required
 
 Secrets not resolving

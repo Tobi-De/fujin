@@ -33,7 +33,7 @@ class InstallationMode(StrEnum):
     BINARY = "binary"
 
 
-class SecretConfig(msgspec.Struct):
+class SecretConfig(msgspec.Struct, forbid_unknown_fields=True):
     adapter: str
     options: dict[str, str] = msgspec.field(default_factory=dict)
 
@@ -45,13 +45,13 @@ class SecretConfig(msgspec.Struct):
             )
 
 
-class HooksConfig(msgspec.Struct):
+class HooksConfig(msgspec.Struct, forbid_unknown_fields=True):
     pre_install: list[str] = msgspec.field(default_factory=list)
     post_install: list[str] = msgspec.field(default_factory=list)
     post_start: list[str] = msgspec.field(default_factory=list)
 
 
-class Config(msgspec.Struct, kw_only=True, dict=True):
+class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True):
     app_name: str = msgspec.field(name="app")
     app_user: str | None = None  # User to run the app as (defaults to app_name)
     version: str = msgspec.field(default_factory=lambda: read_version_from_pyproject())
@@ -128,11 +128,16 @@ class Config(msgspec.Struct, kw_only=True, dict=True):
                 f"Host '{host_name}' not found. No named hosts configured."
             )
 
+    def effective_secrets(self, host: HostConfig) -> SecretConfig | None:
+        """Secret config for *this* host: host override (#75) or the global."""
+        return host.secrets or self.secret_config
+
     @property
     def app_bin(self) -> str:
+        """Path (relative to ``app_dir``) of the app binary in the release tree."""
         if self.installation_mode == InstallationMode.PY_PACKAGE:
-            return f".install/.venv/bin/{self.app_name}"
-        return f".install/{self.app_name}"
+            return f"current/venv/bin/{self.app_name}"
+        return f"current/bin/{self.app_name}"
 
     @property
     def local_version(self) -> str:
@@ -153,16 +158,21 @@ class Config(msgspec.Struct, kw_only=True, dict=True):
         return Path(self.distfile.format(version=version))
 
     @classmethod
-    def read(cls) -> Config:
+    def read(cls, host_name: str | None = None) -> Config:
         fujin_toml = Path("fujin.toml")
         if not fujin_toml.exists():
             raise ImproperlyConfiguredError(
                 "No fujin.toml file found in the current directory"
             )
         try:
-            return msgspec.toml.decode(fujin_toml.read_text(), type=cls)
-        except msgspec.ValidationError as e:
-            raise ImproperlyConfiguredError(f"Improperly configured, {e}") from e
+            raw = tomllib.loads(fujin_toml.read_text())
+        except tomllib.TOMLDecodeError as e:
+            raise ImproperlyConfiguredError(f"Failed to parse fujin.toml: {e}") from e
+
+        local_config_dir = Path(raw.get("local_config_dir", ".fujin"))
+        return merge_host_layers(
+            raw, _read_local_overrides(local_config_dir), host_name
+        )
 
     @property
     def caddyfile_path(self) -> Path:
@@ -214,17 +224,252 @@ class Config(msgspec.Struct, kw_only=True, dict=True):
         return units
 
 
-class HostConfig(msgspec.Struct, kw_only=True):
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Merge ``override`` onto ``base`` and return a new dict.
+
+    Scalars replace, dicts deep-merge recursively, arrays and everything
+    else replace. Arrays do not append.
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _decode_config_dict(data: dict) -> Config:
+    """Decode raw config data into a typed Config (strict, unknown keys error)."""
+    try:
+        return msgspec.convert(data, type=Config, strict=True)
+    except msgspec.ValidationError as e:
+        raise ImproperlyConfiguredError(f"Improperly configured, {e}") from e
+
+
+def _read_local_overrides(local_config_dir: Path) -> dict[str, dict]:
+    """Read per-host override files from ``<local_config_dir>/hosts/``."""
+    hosts_dir = local_config_dir / "hosts"
+    overrides: dict[str, dict] = {}
+    if hosts_dir.is_dir():
+        for path in sorted(hosts_dir.glob("*.toml")):
+            try:
+                overrides[path.stem] = tomllib.loads(path.read_text())
+            except tomllib.TOMLDecodeError as e:
+                raise ImproperlyConfiguredError(f"Failed to parse {path}: {e}") from e
+    return overrides
+
+
+def merge_host_layers(
+    raw: dict, file_overrides: dict[str, dict], host_name: str | None = None
+) -> Config:
+    """Merge the four configuration layers and decode the typed result.
+
+    Layers (later wins):
+      1. msgspec schema defaults
+      2. ``fujin.toml`` (``[[hosts]]`` list as the primary host source)
+      3. ``[hosts.<name>]`` map blocks in fujin.toml (alternative map form
+         for ``hosts``, keyed by host name)
+      4. ``.fujin/hosts/<name>.toml`` per-machine-local override files
+
+    ``host_name`` (or, when ``None``, the first host) selects whose layer-4
+    override file is applied. Top-level keys in that file override app-level
+    settings for the selected host; its ``hosts`` entry overrides that
+    host's connection/behaviour fields.
+
+    Merge semantics: scalars replace, maps deep-merge recursively, arrays
+    replace. Overrides are applied per host name, so one host's override
+    never leaks into another host. The merged value tree is decoded once
+    into a typed :class:`Config`.
+
+    Raises :class:`ImproperlyConfiguredError` if an override file targets a
+    host name that is not defined in fujin.toml, or if ``hosts`` mixes the
+    ``[[hosts]]`` list form with ``[hosts.<name>]`` map blocks.
+    """
+    hosts_value = raw.get("hosts")
+    if isinstance(hosts_value, dict):
+        # Layer 3 map form: [hosts.<name>] blocks; each entry is a host.
+        bad = sorted(k for k, v in hosts_value.items() if not isinstance(v, dict))
+        if bad:
+            raise ImproperlyConfiguredError(
+                f"Each 'hosts' entry must define a host table; "
+                f"these [hosts.<name>] blocks are not tables: {', '.join(bad)}."
+            )
+        hosts_list = [dict(v, name=name) for name, v in hosts_value.items()]
+    elif isinstance(hosts_value, list):
+        for i, entry in enumerate(hosts_value):
+            if not isinstance(entry, dict):
+                raise ImproperlyConfiguredError(
+                    f"Each 'hosts' entry must define a host table ([[hosts]]); "
+                    f"entry {i} is {type(entry).__name__}, not a table."
+                )
+        _validate_hosts_list_form(hosts_value)
+        hosts_list = hosts_value
+    else:
+        hosts_list = None
+    if not hosts_list:
+        raise ImproperlyConfiguredError(
+            "At least one host must be defined in 'hosts' array"
+        )
+
+    names_in_config = [h.get("name") for h in hosts_list]
+    known = {n for n in names_in_config if n}
+    unknown = set(file_overrides) - known
+    if unknown:
+        available = ", ".join(sorted(n for n in known if n)) or "none"
+        raise ImproperlyConfiguredError(
+            f"Host override file(s) found for unknown host(s): "
+            f"{', '.join(sorted(unknown))}. "
+            f"The host must be defined in fujin.toml first (available: {available})."
+        )
+
+    if host_name and host_name not in known:
+        available = ", ".join(sorted(n for n in known if n)) or "none"
+        raise ImproperlyConfiguredError(
+            f"Host '{host_name}' not found. Available hosts: {available}"
+        )
+
+    selected = host_name or next((n for n in names_in_config if n), None)
+
+    # Layer 4: file override splits into host-level and app-level keys.
+    # Keys that are HostConfig fields are host-level; anything else is an
+    # app-level override applied for the selected host only.
+    selected_file_override: dict = dict(file_overrides.get(selected, {}))
+    override_hosts: dict | list | None = selected_file_override.pop("hosts", None)
+    override_host_data = _extract_override_host(override_hosts, selected)
+    host_keys = {
+        k: v for k, v in selected_file_override.items() if k in _HOST_OVERRIDE_KEYS
+    }
+    app_keys = {
+        k: v for k, v in selected_file_override.items() if k not in _HOST_OVERRIDE_KEYS
+    }
+    override_host_data = _deep_merge(host_keys, override_host_data)
+
+    app_data = {k: v for k, v in raw.items() if k != "hosts"}
+    app_data = _deep_merge(app_data, app_keys)
+
+    merged_hosts = []
+    for host in hosts_list:
+        host_data = dict(host)
+        if host.get("name") == selected and override_host_data:
+            had_env, had_envfile = "env" in host_data, "envfile" in host_data
+            host_data = _deep_merge(host_data, override_host_data)
+            # An override that introduces one of env/envfile must quash the
+            # BASE's counterpart key: TOML has no null, so it could never be
+            # unset again and would trip the "both set" conflict check
+            # forever after. Keys the override itself set are left alone.
+            if (
+                "env" in override_host_data
+                and had_envfile
+                and "envfile" not in override_host_data
+            ):
+                host_data.pop("envfile", None)
+            elif (
+                "envfile" in override_host_data
+                and had_env
+                and "env" not in override_host_data
+            ):
+                host_data.pop("env", None)
+        merged_hosts.append(host_data)
+
+    app_data["hosts"] = merged_hosts
+    return _decode_config_dict(app_data)
+
+
+# TOML keys of HostConfig (host-level override file fields).
+_HOST_OVERRIDE_KEYS = frozenset(
+    {
+        "name",
+        "address",
+        "user",
+        "envfile",
+        "env",
+        "port",
+        "key_filename",
+        "key_passphrase_env",
+        "native_ssh_auth",
+        "secrets",
+    }
+)
+
+
+def _validate_hosts_list_form(hosts_value: list[dict]) -> None:
+    """Detect a ``hosts`` list entry containing keys that are not host fields.
+
+    TOML allows ``[hosts.<name>]`` map blocks after ``[[hosts]]`` entries, in
+    which case the block nests into the last list entry as a table-valued
+    key. That almost always means the two forms were mixed (the map block
+    silently rewrites the last host otherwise); a scalar-valued unknown key
+    is an unknown-field typo. Both hard-error, with distinct messages.
+    """
+    for entry in hosts_value:
+        unknown = {k: v for k, v in entry.items() if k not in _HOST_OVERRIDE_KEYS}
+        if not unknown:
+            continue
+        mixed = sorted(k for k, v in unknown.items() if isinstance(v, dict))
+        if mixed:
+            raise ImproperlyConfiguredError(
+                "hosts mixes the list form [[hosts]] with the map form "
+                f"[hosts.{mixed[0]}]; the block nests into the last [[hosts]] "
+                "entry and silently rewrites it. Use one form: either an "
+                "array of [[hosts]] tables or named [hosts.<name>] blocks."
+            )
+        typos = sorted(unknown)
+        raise ImproperlyConfiguredError(
+            f"Unknown host field(s) in hosts: {', '.join(typos)}. "
+            f"Valid fields: {', '.join(sorted(_HOST_OVERRIDE_KEYS))}."
+        )
+
+
+def _extract_override_host(
+    override_hosts: dict | list | None, selected: str | None
+) -> dict:
+    """Pull the selected host entry out of a layer-4 override ``hosts`` value."""
+    if not override_hosts:
+        return {}
+    target = selected if selected else "(unnamed host)"
+    if isinstance(override_hosts, dict):
+        mismatched = [n for n in override_hosts if n != selected]
+        if mismatched:
+            raise ImproperlyConfiguredError(
+                f"Override file for '{target}' may not describe other hosts: "
+                f"{', '.join(sorted(mismatched))}. Each per-host override file "
+                "must only contain its own host."
+            )
+        return next(iter(override_hosts.values()), {})
+    # List form: [[hosts]] with name = "..."
+    for entry in override_hosts:
+        if not isinstance(entry, dict):
+            raise ImproperlyConfiguredError(
+                "Host override file 'hosts' entries must be TOML tables"
+            )
+        entry_name = entry.get("name")
+        if entry_name != selected:
+            name = entry_name if entry_name else "(unnamed entry)"
+            raise ImproperlyConfiguredError(
+                f"Override file for '{target}' may not describe other hosts: "
+                f"{name}. Each per-host override file must only contain its "
+                "own host."
+            )
+        return {k: v for k, v in entry.items() if k != "name"}
+    raise ImproperlyConfiguredError(
+        f"Host override file 'hosts' entries must include the host name '{selected}'"
+    )
+
+
+class HostConfig(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     name: str | None = None
     address: str
     user: str
     _env_file: str | None = msgspec.field(name="envfile", default=None)
     env_content: str = msgspec.field(name="env", default="")
-    password_env: str | None = None
     port: int = 22
     _key_filename: str | None = msgspec.field(name="key_filename", default=None)
     key_passphrase_env: str | None = None
     native_ssh_auth: bool = False  # Use native ssh for auth (for Tailscale, etc.)
+    #: Per-host secret adapter override (#75); None = use the global
+    #: ``[secrets]`` / ``Config.secret_config``.
+    secrets: SecretConfig | None = None
 
     def __post_init__(self):
         if self._env_file and self.env_content:
@@ -242,16 +487,6 @@ class HostConfig(msgspec.Struct, kw_only=True):
     def key_filename(self) -> Path | None:
         if self._key_filename:
             return Path(self._key_filename)
-
-    @property
-    def password(self) -> str | None:
-        if not self.password_env:
-            return
-        password = os.getenv(self.password_env)
-        if password is None:
-            msg = f"Env {self.password_env} can not be found"
-            raise ImproperlyConfiguredError(msg)
-        return password
 
     @property
     def key_passphrase(self) -> str | None:
@@ -278,7 +513,7 @@ def find_python_version():
     py_version_file = Path(".python-version")
     if not py_version_file.exists():
         raise msgspec.ValidationError(
-            f"Add a python_version key or a .python-version file"
+            "Add a python_version key or a .python-version file"
         )
     return py_version_file.read_text().strip()
 

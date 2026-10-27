@@ -26,44 +26,75 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
 
 1. **Resolve Secrets**: If you have a ``secrets`` configuration, Fujin retrieves secrets defined in your environment file from the configured adapter (Bitwarden, 1Password, Doppler, etc.).
 
-2. **Build the Application**: Your application is built locally using the ``build_command`` specified in your configuration.
+2. **Build (with cache)**: Your application is built locally using the
+   ``build_command`` from the configuration. The result is stored under
+   ``.fujin/cache/bundles/<bundle_key>/``; a rebuild is skipped when the
+   bundle key (build command, build env, requirements, unit/Caddyfile/asset
+   sources, config fingerprint) is unchanged and the cached file hashes
+   still verify. Opt out with ``--no-cache``.
 
-3. **Create Deployment Bundle**: Fujin creates a Python zipapp (``.pyz`` file) containing:
+3. **Assemble the Release Tree**: Fujin assembles the client-known tree
+   (interpolated systemd unit files and dropins, Caddyfile, assets,
+   requirements.txt) plus the rendered ``.env``, and computes a client-side
+   manifest. Server-built entries (``venv/`` or ``bin/``) are hashed on the
+   server after installation and merged in. The release digest
+   (``releases/<digest>/``) is the sha256 of the canonical manifest.
 
-   - Your distribution file (wheel or binary)
-   - Optional ``requirements.txt`` (for Python packages)
-   - Resolved ``.env`` file with secrets
-   - Rendered systemd unit files (services, sockets, timers)
-   - Systemd dropin configurations
-   - Caddyfile (if available)
-   - Installer script (``_installer/__main__.py``)
-   - Installation metadata (``config.json``)
+4. **No-op Detection**: If the client digest matches the live release's
+   digest, nothing changed: transfer/install is skipped entirely (no
+   restart); replica counts are still converged. Use ``--force`` to perform
+   a full deploy anyway (e.g. to re-run hooks).
 
-4. **Upload Bundle**: The zipapp is uploaded to a staging file (``.staging.pyz``) in ``{app_dir}/.install/.versions/``, then hardlinked to the versioned filename (``{app_name}-{version}.pyz``).
+5. **Stage and Upload**: The tree is rsynced into
+   ``releases/.staging-<pid>/``; unchanged files (mostly dependencies) were
+   already server-side deduplicated by hardlinking every byte-identical
+   file from the live release, so only changed content is re-uploaded
+   (rsync requires key-based SSH auth).
 
-   - For bundles **≥1MB**: Fujin uses **rsync** if available on both local and remote machines. Rsync performs delta transfers, only uploading changed bytes—significantly faster for subsequent deployments where most content (dependencies) remains unchanged.
-   - For bundles **<1MB** or when rsync is unavailable: Fujin uses **SCP** with SHA256 checksum verification.
+6. **Verify and Commit**: The staging tree is verified on the server against
+   ``manifest.json`` (one file entry per path: sha256, mode, kind). Only then
+   is it renamed to its immutable release dir ``releases/<digest>/``.
+   A verification failure aborts the deploy, deletes the staging tree, and
+   leaves the previous release live.
 
-   The staging file approach ensures that rsync can benefit from previous uploads (even those done via SCP), as it compares against the same ``.staging.pyz`` file.
+7. **Install Units and Caddyfile**: Systemd unit files, dropins (including
+   ``common.d``) and the Caddyfile are installed into the usual system
+   locations (``/etc/systemd/system``, ``/etc/caddy/conf.d``).
 
-5. **Execute Installer**: The remote Python interpreter runs the zipapp (``python3 installer.pyz install``), which:
+8. **Activate**: ``current`` is atomically swapped to the new release
+   (``current.next`` + ``mv -T``), then services restart according to a
+   diff-based restart set (#see "Restart behaviour" below), buildings
+   replica counts are converged, and readiness is polled. If services fail
+   to start, Fujin automatically offers to roll back to the previously live
+   release (auto with ``--no-input``); if you decline, the swap stays in
+   place and the deploy exits with an error.
 
-   - Creates the app user if needed
-   - Sets up the ``.install/`` directory structure
-   - Installs the application (creates virtualenv for Python packages, copies binary for binary mode)
-   - Creates ``.appenv`` shell environment setup
-   - Installs systemd units and dropin configurations
-   - Cleans up stale units and dropins
-   - Enables and restarts services
-   - Configures and reloads Caddy (when enabled)
+9. **Record and Prune**: The release store (``store/state.json``) is updated,
+   old releases are garbage-collected according to ``versions_to_keep``,
+   and deployment metadata (version, timestamp, git commit) is appended to
+   the audit log.
 
-6. **Auto-Rollback on Failure**: If services fail to start after installation, Fujin automatically offers to roll back to the previous version. If you confirm (or use ``--no-input``), the previous bundle is re-executed and the failed bundle is removed.
+10. **Completion**: A success message is displayed with deployment details,
+   including the application URL if a Caddyfile is configured.
 
-7. **Prune Old Bundles**: Old zipapp bundles are removed from ``.install/.versions/`` according to ``versions_to_keep`` configuration.
+Restart behaviour
+~~~~~~~~~~~~~~~~~
 
-8. **Record Deployment**: Deployment metadata (version, timestamp, git commit) is appended to the audit log.
+The restart set is computed by diffing the previous live release manifest
+against the new one:
 
-9. **Completion**: A success message is displayed with deployment details, including the application URL if a Caddyfile is configured.
+- **Unit file changed**: restart that unit only (all of its instances).
+- **Environment changed**: all app service units are fed from ``.env``, so
+  every app service unit restarts.
+- **Code changed** (dist sha256 or code entries): restart all app units.
+- **Caddyfile changed**: reload Caddy only.
+- **Assets changed**: no restart.
+
+Pass ``--full-restart`` to restart every unit instead.
+
+Hooks run in three phases: ``pre_install`` (old release still live),
+``post_install`` (new release committed but not yet live; the hook's
+``{app_dir}`` resolves to the new release directory), and ``post_start``.
 
 Deployment Layout and Permissions
 ----------------------------------
@@ -73,39 +104,42 @@ All applications are deployed to ``/opt/fujin/{app_name}`` with a secure permiss
 Directory Structure
 ~~~~~~~~~~~~~~~~~~~
 
-.. tab-set::
+Every deploy creates an immutable, content-addressed release directory
+(``releases/<digest>/``, digest = sha256 of the release manifest), and the
+``current`` symlink is the only activation point:
 
-    .. tab-item:: python package
+.. code-block:: shell
 
-        .. code-block:: shell
+    /opt/fujin/{app_name}/
+    ├── current -> releases/<digest>      # atomic activation symlink
+    ├── releases/
+    │   ├── <digest>/                     # immutable release tree
+    │   │   ├── manifest.json             # file inventory (sha256, mode, kind)
+    │   │   ├── .env                      # rendered env file (640)
+    │   │   ├── venv/ | bin/              # installed app code
+    │   │   ├── systemd/                  # unit files as deployed
+    │   │   └── Caddyfile                 # when configured
+    │   └── .staging-<pid>/               # transfer target, removed after commit
+    ├── store/
+    │   ├── lock                          # deploy lock (flock)
+    │   └── state.json                    # current/previous digests, deploy log
+    ├── shared/                           # persistent app data
+    └── db.sqlite3, uploads/...           # app runtime data
 
-            /opt/fujin/{app_name}/
-            ├── .install/                         # Deployment infrastructure
-            │   ├── .env                          # Environment variables file (640)
-            │   ├── .appenv                       # Application-specific environment setup
-            │   ├── .version                      # Current deployed version
-            │   ├── .venv/                        # Virtual environment (Python from shared dir)
-            │   └── .versions/                    # Stored deployment bundles
-            │       ├── app-1.2.3.pyz
-            │       └── app-1.2.2.pyz
-            ├── db.sqlite3                        # App runtime data (owned by app user)
-            └── uploads/                          # App runtime data (owned by app user)
+``releases/``, ``store/`` and the app dir are setgid ``2755`` owned by
+``{deploy_user}:{app_user}``; ``shared/`` is ``2775``. The rendered ``.env``
+is mode ``0640`` (group-readable by the app user).
 
-    .. tab-item:: binary
+Unit files still live in ``/etc/systemd/system/`` and the Caddyfile in
+``/etc/caddy/conf.d/{app_name}.caddy``; unit templates should reference the
+release tree through the ``current`` symlink, e.g.
+``ExecStart={{ app_dir }}/current/venv/bin/myapp`` or
+``EnvironmentFile=-{{ app_dir }}/current/.env``, so the active release
+follows the symlink at start time.
 
-        .. code-block:: shell
-
-            /opt/fujin/{app_name}/
-            ├── .install/                         # Deployment infrastructure
-            │   ├── .env                          # Environment variables file (640)
-            │   ├── .appenv                       # Application-specific environment setup
-            │   ├── .version                      # Current deployed version
-            │   ├── app_binary                    # Installed binary (755)
-            │   └── .versions/                    # Stored deployment bundles
-            │       ├── app-1.2.3.pyz
-            │       └── app-1.2.2.pyz
-            ├── data/                             # App runtime data (owned by app user)
-            └── cache/                            # App runtime data (owned by app user)
+Because releases are immutable, application runtime data must live in
+``shared/`` (or the app directory root) rather than inside a release
+directory.
 
 Shared Python Directory
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -118,11 +152,10 @@ Python versions are installed in a shared directory accessible to all applicatio
     └── cpython-3.13.11-linux-x86_64-gnu/
         └── bin/python3.13
 
-This shared location (configured via ``UV_PYTHON_INSTALL_DIR``) allows:
-
-- Multiple applications to share Python installations
-- Systemd services to use ``ProtectHome=true`` security directive
-- Deploy users to change without breaking existing deployments
+This shared location (configured via ``UV_PYTHON_INSTALL_DIR``) allows
+multiple applications to share Python installations, keeps ``ProtectHome=true``
+safe, and survives deploy-user changes. The venv inside every release points
+at the shared interpreter.
 
 Permission Model
 ~~~~~~~~~~~~~~~~
@@ -139,20 +172,20 @@ Fujin uses a multi-user security model with three components:
 
    - Member of ``fujin`` group
    - Can deploy and manage applications
-   - Owns ``.install/`` directory (deployment infrastructure)
+   - Owns the ``releases/`` and ``store/`` infrastructure (setgid 2755)
 
 3. **App user** (e.g., ``bookstore``): Runs services
 
    - Non-privileged user created per-application
-   - Cannot modify application code or ``.venv``
+   - Cannot modify application code or ``current/venv``
    - Can write to database files and logs within app directory
    - Used automatically for ``fujin server exec --appenv`` and ``fujin app`` commands
 
-The ``.install/`` subdirectory isolates deployment infrastructure from application runtime data. This means:
+Immutable release directories and the setgid deployment infrastructure isolate deployment from application runtime data. This means:
 
-- Deployment operations (like ``chown``) only affect ``.install/``, not app data
+- Deployment operations (like ``chown``) only touch ``releases/``, ``store/`` and ``shared/``, not app data
 - App runtime files (databases, caches, uploads) remain owned by the app user
-- No risk of permission conflicts between deployment and runtime operations
+- Every deploy atomically swaps ``current``; a failed activation leaves the previous release live
 
 .. note::
 
@@ -172,18 +205,20 @@ The ``.install/`` subdirectory isolates deployment infrastructure from applicati
       # Plain server commands still run as deploy user
       fujin server exec ls -la           # Runs as 'tobi' (deploy user)
 
-   **Inside the shell**: The ``.appenv`` file contains a wrapper function that automatically runs the app binary (e.g., ``bookstore``) as the app user. This means when you're in ``fujin app shell``, you can simply type ``bookstore migrate`` and it will work correctly without manual ``sudo``.
-
 Example permissions:
 
 .. code-block:: shell
 
     /opt/fujin/                      root:fujin       drwxrwxr-x (775)
       ├── .python/                   root:fujin       drwxrwxr-x (775)
-      └── bookstore/                 tobi:bookstore   drwxrwxr-x (775)
-          ├── .install/              tobi:bookstore   drwxrwx--- (770)
-          │   ├── .env               tobi:bookstore   -rw-r----- (640)
-          │   └── .venv/             tobi:bookstore   drwxr-xr-x (755)
+      └── bookstore/                 tobi:bookstore   drwxrwxr-x (2755, setgid)
+          ├── current                tobi:bookstore   -> releases/<digest>
+          ├── releases/              tobi:bookstore   drwxrwsr-x (2755)
+          │   └── <digest>/
+          │       ├── .env           tobi:bookstore   -rw-r----- (640)
+          │       └── venv/          tobi:bookstore   drwxr-xr-x (755)
+          ├── store/                 tobi:bookstore   drwxrwsr-x (2755)
+          ├── shared/                tobi:bookstore   drwxrwxr-x (2775)
           └── db.sqlite3             bookstore:...    -rw-r--r-- (664)
 
 Security Benefits
@@ -192,7 +227,7 @@ Security Benefits
 This model provides defense-in-depth:
 
 - **Process isolation**: Services run as non-root app user
-- **Code protection**: App user cannot modify source code or ``.venv``
+- **Code protection**: App user cannot modify source code or ``current/venv``
 - **Database access**: App user can read/write database files
 - **Home directory isolation**: Systemd ``ProtectHome=true`` prevents access to ``/home``
 - **System protection**: Systemd ``ProtectSystem=strict`` makes most of filesystem read-only
@@ -206,70 +241,18 @@ If an application is compromised, the attacker:
 - ✓ Can only read/write within the app directory with group permissions
 
 Migrating Existing Deployments
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If you have applications deployed before the shared Python directory feature was added, you need to migrate them to use the new security model.
+Applications deployed with an older fujin (``.install/.venv/`` and
+``.install/.versions/*.pyz`` layout) migrate automatically and
+**non-destructively**:
 
-**Symptoms of unmigrated deployments:**
-
-- Services fail with exit code 203/EXEC
-- Python installed in ``~/.local/share/uv/python``
-- Systemd units using ``ProtectHome=read-only`` (old insecure setting)
-
-**Migration steps:**
-
-1. **Update systemd service files** in ``.fujin/systemd/*.service``:
-
-   .. code-block:: ini
-
-      # Change from:
-      ProtectHome=read-only
-      ReadWritePaths={app_dir}/.venv
-
-      # To:
-      ProtectHome=true
-      ReadWritePaths={app_dir}
-
-2. **Run bootstrap** to create shared Python directory:
-
-   .. code-block:: bash
-
-      fujin server bootstrap
-
-   This creates ``/opt/fujin/.python`` with proper permissions.
-
-3. **Redeploy your application**:
-
-   .. code-block:: bash
-
-      fujin deploy
-
-   The installer will automatically:
-
-   - Install Python to ``/opt/fujin/.python``
-   - Recreate the venv pointing to the shared Python
-   - Apply the updated systemd units with ``ProtectHome=true``
-
-**Verification:**
-
-After redeployment, verify the migration:
-
-.. code-block:: bash
-
-   # Check Python location
-   ssh user@host "readlink /opt/fujin/myapp/.venv/bin/python"
-   # Should show: /opt/fujin/.python/cpython-3.x.x-.../bin/python3.x
-
-   # Verify systemd security
-   ssh user@host "systemd-analyze security myapp-web.service | grep ProtectHome"
-   # Should show: ✓ ProtectHome=true
-
-   # Check services are running
-   fujin app status
-
-**Notes:**
-
-- Old Python installations in ``~/.local/share/uv/python`` are not automatically removed
-- They can be manually deleted to free disk space
-- Multiple applications share the same Python installation in ``/opt/fujin/.python``
-- If you have multiple apps, redeploy each one to migrate them all
+1. On the first deploy with the new fujin, you get a one-time notice that
+   the legacy layout is detected.
+2. A fresh release tree (``current``, ``releases/``, ``store/``, ``shared/``)
+   is created and deployed to; the old ``.install/`` and ``.versions/``
+   directories are kept in place until you clean them up.
+3. ``fujin rollback`` only works after that first release-tree deploy (the
+   old zipapp bundles are not used anymore).
+4. ``fujin down`` removes the release tree, the systemd units, the app user,
+   and any leftover legacy directories.

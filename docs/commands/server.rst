@@ -212,7 +212,7 @@ Execute commands on the server, with optional app environment.
 **Options:**
 
 ``--appenv``
-   Change to app directory and load environment from ``.appenv`` file. Runs as app user.
+   Change to app directory and load environment from the live release's ``.env``. Runs as the app user.
 
 ``-H, --host HOST``
    Target a specific host in multi-host setups.
@@ -251,7 +251,7 @@ This is equivalent to:
 
 .. code-block:: bash
 
-   cd /path/to/app && source .appenv && your-command
+   cd /path/to/app && source current/.env && your-command
 
 .. important::
 

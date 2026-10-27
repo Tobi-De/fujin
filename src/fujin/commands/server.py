@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import secrets
 import shlex
 import shutil
@@ -13,6 +15,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from fujin import caddy
+from fujin import serverops
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
 from fujin import connection
@@ -69,6 +72,39 @@ class Server(BaseCommand):
 
             self.output.info(f"Adding {self.selected_host.user} to fujin group...")
             conn.run(f"sudo usermod -aG fujin {self.selected_host.user}", pty=True)
+
+            # Set up app user, group, and directory
+            app_user = self.config.app_user
+            app_dir = self.config.app_dir
+            self.output.info(f"Setting up {app_user} user...")
+            conn.run(
+                f"sudo groupadd -f {app_user} && "
+                f"sudo useradd --system --no-create-home --shell /usr/sbin/nologin "
+                f"-g {app_user} {app_user} || true",
+                pty=True,
+            )
+            self.output.info(f"Setting up {app_dir} directory...")
+            conn.run(f"sudo mkdir -p {app_dir}", pty=True)
+            conn.run(f"sudo mkdir -p {app_dir}/shared", pty=True)
+            conn.run(
+                f"sudo chown -R {self.selected_host.user}:{app_user} {app_dir}",
+                pty=True,
+            )
+            conn.run(f"sudo chmod 775 {app_dir}", pty=True)
+
+            self.output.info(
+                "Setting up release-tree layout (releases, store, shared)..."
+            )
+            serverops.ensure_layout(conn, app_dir, app_user, self.selected_host.user)
+
+            # Add caddy to app group and restart to pick up group membership
+            self.output.info(f"Adding caddy to {app_user} group...")
+            conn.run(f"sudo usermod -aG {app_user} caddy", warn=True)
+            # Only restart caddy if it is actually installed; a fresh box gets
+            # Caddy further below, after the release-tree layout exists.
+            _, caddy_present = conn.run("command -v caddy", warn=True, hide=True)
+            if caddy_present:
+                conn.run("sudo systemctl restart caddy", warn=True)
 
             if self.config.caddyfile_exists:
                 self.output.info("Setting up Caddy web server...")
@@ -319,7 +355,7 @@ class Server(BaseCommand):
         config_data["hosts"] = hosts
 
         fujin_toml.write_text(tomli_w.dumps(config_data, multiline_strings=True))
-        self.output.success(f"Updated fujin.toml with connection details!")
+        self.output.success("Updated fujin.toml with connection details!")
 
         self.output.output("")
         self.output.success("SSH setup completed successfully!")
@@ -340,7 +376,7 @@ class Server(BaseCommand):
         with connection.connection(host=self.selected_host) as conn:
             if not appenv:
                 return conn.run(command, pty=True)
-            cmd = f"cd {self.config.app_dir} && source .install/.appenv && {command}"
+            cmd = f"cd {self.config.app_dir} && source current/.env && {command}"
             conn.run(
                 f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
                 pty=True,

@@ -43,7 +43,7 @@ Description=Web server
 
 [Service]
 Type=simple
-ExecStart={install_dir}/mgmtapp
+ExecStart={app_dir}/current/bin/mgmtapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -57,7 +57,7 @@ Description=Worker
 
 [Service]
 Type=simple
-ExecStart={install_dir}/mgmtapp
+ExecStart={app_dir}/current/bin/mgmtapp
 WorkingDirectory={app_dir}
 Restart=always
 
@@ -132,7 +132,7 @@ def test_service_lifecycle(deployed_app, vps_container, monkeypatch):
         "systemctl show mgmtapp-web.service --property=MainPID --value",
     )
     new_pid = stdout.strip()
-    assert new_pid != initial_pid, f"PID should change after restart"
+    assert new_pid != initial_pid, "PID should change after restart"
     assert new_pid != "0", "Service should have valid PID"
 
     # Part 2: Test stop and start
@@ -230,7 +230,7 @@ def test_app_introspection(deployed_app, vps_container, monkeypatch):
 
     stdout, success = exec_in_container(
         vps_container["name"],
-        "cat /opt/fujin/mgmtapp/.install/.env",
+        "cat /opt/fujin/mgmtapp/current/.env",
     )
     assert success, f"Reading .env should succeed: {stdout}"
     # Note: .env file exists but may be empty for binary installations

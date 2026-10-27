@@ -1,20 +1,37 @@
 from __future__ import annotations
 
-import shlex
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated
 
 import cappa
-from rich.console import Console
-from rich.prompt import Confirm, IntPrompt
+from rich.prompt import IntPrompt
 
+from fujin import connection
+from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
-from fujin import connection
+from fujin.manifest import Manifest, decode_manifest, manifest_to_dict
+from fujin.store import (
+    convergence,
+    desired_instances,
+    gc_plan,
+    normalize_digest,
+    record_rollback,
+    restart_set,
+)
+
+
+def _is_digest(value: str) -> bool:
+    """64 hex lowercase chars: a release digest, not a version string."""
+    return bool(
+        value and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
 
 
 @cappa.command(
-    help="Roll back application to a previous version",
+    help="Roll back application to a previous release"
+    " (single-level: a failed rollback never rolls back further)",
 )
 @dataclass
 class Rollback(BaseCommand):
@@ -23,9 +40,17 @@ class Rollback(BaseCommand):
         cappa.Arg(
             long="--previous",
             short="-p",
-            help="Automatically roll back to the most recent previous version without prompting",
+            help="Roll back to the immediately-previous release without prompting",
         ),
     ] = False
+    to: Annotated[
+        str | None,
+        cappa.Arg(
+            long="--to",
+            help="Roll back to a specific kept release digest"
+            " (sha256, optional 'sha256:' prefix)",
+        ),
+    ] = None
     strict: Annotated[
         bool,
         cappa.Arg(
@@ -37,115 +62,465 @@ class Rollback(BaseCommand):
 
     def __call__(self):
         with connection.connection(host=self.selected_host) as conn:
-            shlex.quote(self.config.app_dir)
-            fujin_dir = shlex.quote(self.config.install_dir)
-            result, _ = conn.run(
-                f"cat {fujin_dir}/.version 2>/dev/null; echo '---'; ls -1t {fujin_dir}/.versions",
-                warn=True,
-                hide=True,
-            )
+            self._ensure_new_layout(conn)
+            lock = serverops.acquire_lock(conn, self.config.app_dir)
+            try:
+                return self._perform_rollback(conn)
+            finally:
+                serverops.release_lock(conn, self.config.app_dir, lock)
 
-            parts = result.split("---\n", 1)
-            current_version = parts[0].strip()
-            filenames = parts[1].strip().splitlines() if len(parts) > 1 else []
+    # ------------------------------------------------------------------
+    # Layout / basic remote reads
+    # ------------------------------------------------------------------
 
-            versions = []
-            prefix = f"{self.config.app_name}-"
-            for fname in filenames:
-                if fname.startswith(prefix) and fname.endswith(".pyz"):
-                    v = fname[len(prefix) : -4]
-                    versions.append(v)
+    def _ensure_new_layout(self, conn) -> None:
+        """Old-layout detection: ``store/`` missing -> user must deploy once."""
+        app_dir = self.config.app_dir
+        _, ok = conn.run(
+            f"test -d {serverops.q(f'{app_dir}/store')}", warn=True, hide=True
+        )
+        if ok:
+            return
+        _, has_old = conn.run(
+            f"test -d {serverops.q(self.config.install_dir)}", warn=True, hide=True
+        )
+        old_note = (
+            " Your application still uses the old .install/ layout - it is kept"
+            " in place and is cleaned up by `fujin down`."
+            if has_old
+            else ""
+        )
+        raise cappa.Exit(
+            "This application was not yet deployed with the release-tree layout.\n"
+            "Deploy once with this version of fujin to migrate"
+            " (the migration is non-destructive).\n"
+            f"Then `fujin rollback` becomes available.{old_note}",
+            code=1,
+        )
 
-            # Filter out current version from choices
-            available_versions = [v for v in versions if v != current_version]
+    def _release_path(self, digest: str) -> str:
+        return f"{self.config.app_dir}/releases/{digest}"
 
-            if not available_versions:
-                msg = "No previous versions available for rollback"
-                if self.strict:
-                    raise cappa.Exit(msg, code=1)
-                return self.output.info(msg)
+    def _list_releases(self, conn) -> list[str]:
+        """Digests present under releases/, newest (mtime) first."""
+        return serverops.list_releases(conn, self.config.app_dir)
 
-            if self.previous:
-                version = available_versions[0]
-                self.output.info(f"Rolling back from {current_version} to {version}...")
+    # ------------------------------------------------------------------
+    # Target resolution
+    # ------------------------------------------------------------------
+
+    def _kept_releases(self, state: store.State, releases: list[str]) -> set[str]:
+        """Releases the server's GC keeps (users never see raw ls output)."""
+        kill = gc_plan(
+            state.current,
+            state.previous,
+            releases,
+            self.config.versions_to_keep,
+        )
+        return set(releases) - set(kill)
+
+    def _version_matches(self, manifest_version: str, version: str) -> bool:
+        """Exact match, or a git-suffixed manifest version's base version.
+
+        In git checkouts the manifest records ``"<version>-<short-hash>"``
+        (see ``Config.local_version``), so ``--to 1.2.3`` never exact-matches
+        ``1.2.3-4b8a2c1``. The prefix compare only kicks in when the manifest
+        version really carries a hex (optionally ``g``-prefixed) short-hash
+        suffix; any other ``<version>-<word>`` must match exactly.
+        """
+        if manifest_version == version:
+            return True
+        _, sep, suffix = manifest_version.rpartition("-")
+        if sep and suffix and all(c in "0123456789abcdefABCDEFg" for c in suffix):
+            return manifest_version.rpartition("-")[0] == version
+        return False
+
+    def _resolve_target(
+        self,
+        conn,
+        state: store.State,
+        releases: list[str],
+        current_digest: str,
+    ) -> str:
+        if self.to is not None:
+            raw = normalize_digest(self.to)
+            # Digests only exist under releases/<digest>/; anything else is
+            # probed as a release dir first (release dirs are digest-named
+            # in practice), then tried as a version string against kept
+            # release manifests.
+            # A digest-shaped value is case-normalized so the release path
+            # probe cannot silently miss an uppercase SHA (release dirs are
+            # always lowercase hex).
+            if _is_digest(raw.lower()):
+                raw = raw.lower()
+                target = self._check_digest_target(conn, raw)
+            elif self._digest_dir_exists(conn, raw):
+                target = self._check_digest_target(conn, raw)
             else:
-                console = Console()
-                console.print(f"\n[bold]Current version:[/bold] {current_version}\n")
-                console.print("[bold]Available versions:[/bold]")
-                for i, v in enumerate(available_versions, 1):
-                    console.print(f"  [cyan]{i}[/cyan]. {v}")
-                console.print()
-
-                try:
-                    choice = IntPrompt.ask(
-                        "Select version number",
-                        default=1,
-                    )
-                    if choice < 1 or choice > len(available_versions):
-                        self.output.error(
-                            f"Invalid choice. Please enter a number between 1 and {len(available_versions)}"
-                        )
-                        return
-                    version = available_versions[choice - 1]
-                except KeyboardInterrupt as e:
-                    raise cappa.Exit("\nRollback aborted by user.", code=0) from e
-
-                confirm = Confirm.ask(
-                    f"\n[bold yellow]Roll back to {version}?[/bold yellow]"
+                target = self._target_by_version(conn, state, releases, raw)
+            if target == normalize_digest(current_digest):
+                self.output.info(
+                    "The requested release is already the current release."
                 )
-                if not confirm:
-                    return
+                raise cappa.Exit(code=0)
+            return target
 
-            # Uninstall current
-            if current_version:
-                self.output.info(f"Uninstalling current version {current_version}...")
-                current_bundle = f"{fujin_dir}/.versions/{self.config.app_name}-{current_version}.pyz"
-                _, exists = conn.run(f"test -f {current_bundle}", warn=True, hide=True)
+        if self.previous:
+            if not state.previous:
+                raise cappa.Exit(
+                    "No previous release found in the release store.\n"
+                    "At least two deploys are required before a rollback.",
+                    code=1,
+                )
+            return state.previous[0]
 
-                if exists:
-                    verbose_flag = (
-                        f" --verbose {self.verbose}" if self.verbose > 0 else ""
-                    )
-                    uninstall_cmd = (
-                        f"sudo python3 {current_bundle} uninstall{verbose_flag}"
-                    )
-                    _, ok = conn.run(uninstall_cmd, warn=True)
-                    if not ok:
-                        self.output.warning(
-                            f"Warning: uninstall failed for version {current_version}."
-                        )
-                else:
-                    self.output.warning(
-                        f"Bundle for current version {current_version} not found. Skipping uninstall."
-                    )
+        return self._prompt_target(state, releases, current_digest)
 
-            # Install target
-            self.output.info(f"Installing version {version}...")
-            target_bundle = (
-                f"{fujin_dir}/.versions/{self.config.app_name}-{version}.pyz"
+    def _digest_dir_exists(self, conn, value: str) -> bool:
+        """Digest-vs-version discrimination: a release dir exists per digest."""
+        _, is_dir = conn.run(
+            f"test -d {serverops.q(self._release_path(value))}",
+            warn=True,
+            hide=True,
+        )
+        return bool(is_dir)
+
+    def _check_digest_target(self, conn, target: str) -> str:
+        """Discriminate presence of an exact digest target on the server."""
+        if not self._digest_dir_exists(conn, target):
+            raise cappa.Exit(
+                f"Release '{target}' is not available on the server - it was"
+                " pruned when old releases were garbage-collected.\nRedeploy"
+                " the old commit/tag instead.",
+                code=1,
             )
-            verbose_flag = f" --verbose {self.verbose}" if self.verbose > 0 else ""
-            install_cmd = f"sudo python3 {target_bundle} install{verbose_flag} || (echo 'install failed' >&2; exit 1)"
-
-            # delete all versions after new target
-            cleanup_cmd = (
-                f"cd {fujin_dir}/.versions && ls -1t | "
-                f"awk '/{self.config.app_name}-{version}\\.pyz/{{exit}} {{print}}' | "
-                "xargs -r rm"
+        _, exists = conn.run(
+            f"test -f {serverops.q(f'{self._release_path(target)}/manifest.json')}",
+            warn=True,
+            hide=True,
+        )
+        if not exists:
+            raise cappa.Exit(
+                f"Release directory '{target}' exists but is incomplete (no"
+                " manifest.json) - it cannot be activated. Re-run"
+                " `fujin deploy --force` to rebuild it.",
+                code=1,
             )
-            full_cmd = install_cmd + (
-                f" && echo '==> Cleaning up newer versions...' && {cleanup_cmd}"
-            )
-            conn.run(full_cmd, pty=True)
+        return target
 
-            log_operation(
-                connection=conn,
-                app_name=self.config.app_name,
-                operation="rollback",
-                host=self.selected_host.name or self.selected_host.address,
-                from_version=current_version,
-                to_version=version,
+    def _target_by_version(
+        self, conn, state: store.State, releases: list[str], version: str
+    ) -> str:
+        """Resolve a ``--to <version>`` against kept release manifests only.
+
+        Only releases the server's GC keeps are candidates (users never see
+        raw ``ls releases/`` output); reading every kept release's manifest
+        is cheap (few releases kept). The target discrimen is ambiguous on
+        no or multiple matches.
+        """
+        kept = self._kept_releases(state, releases)
+        candidates: list[str] = []
+        for digest in releases:
+            if digest not in kept:
+                continue  # garbage-collected releases are never targets
+            raw = serverops.read_remote_file(
+                conn, f"{self._release_path(digest)}/manifest.json"
+            )
+            if raw is None:
+                continue  # staging residue or corrupt dir: not a candidate
+            try:
+                manifest_version = decode_manifest(raw).version
+            except Exception:
+                continue
+            if self._version_matches(manifest_version, version):
+                candidates.append(normalize_digest(digest))
+        if not candidates:
+            raise cappa.Exit(
+                f"No kept release with version '{version}' on the server"
+                " (it may be garbage-collected).",
+                code=1,
+            )
+        if len(candidates) > 1:
+            raise cappa.Exit(
+                f"Version '{version}' is ambiguous; multiple releases carry it:"
+                f" {', '.join(candidates)} -- pass the digest instead.",
+                code=1,
+            )
+        return self._check_digest_target(conn, candidates[0])
+
+    def _prompt_target(
+        self,
+        state: store.State,
+        releases: list[str],
+        current_digest: str,
+    ) -> str:
+        """Interactive selection among kept releases (GC'd digests never offered)."""
+        keep = self._kept_releases(state, releases)
+        current_q = normalize_digest(current_digest)
+        candidates: list[str] = []
+        if state.previous and state.previous[0] in keep:
+            candidates.append(state.previous[0])
+        for release in releases:
+            release = normalize_digest(release)
+            if release == current_q or release in candidates:
+                continue
+            if release in keep:
+                candidates.append(release)
+        if not candidates:
+            if self.strict:
+                raise cappa.Exit(
+                    "No rollback targets are available (no kept releases besides"
+                    " the current one).",
+                    code=1,
+                )
+            self.output.info("No previous versions available for rollback")
+            raise cappa.Exit(code=0)
+
+        self.output.output("Available rollback targets:")
+        for i, digest in enumerate(candidates, 1):
+            self.output.output(f"  {i}. {digest}")
+
+        try:
+            index = IntPrompt.ask(
+                "Select release to roll back to",
+                choices=[str(i) for i in range(1, len(candidates) + 1)],
+                show_choices=False,
+                default=1,
+            )
+        except KeyboardInterrupt:
+            self.output.info("Rollback cancelled.")
+            raise cappa.Exit(code=1) from None
+        return candidates[index - 1]
+
+    # ------------------------------------------------------------------
+    # Rollback execution
+    # ------------------------------------------------------------------
+
+    def _perform_rollback(self, conn) -> None:
+        app_dir = self.config.app_dir
+
+        state = serverops.read_state(conn, app_dir)
+        if state is None or not state.current:
+            raise cappa.Exit(
+                "No release store state found (store/state.json missing or"
+                " empty). Deploy at least once with this version of fujin.",
+                code=1,
             )
 
-        self.output.success(f"Rollback to version {version} completed successfully!")
-        return 1
+        current_manifest = serverops.read_current_manifest(conn, app_dir)
+        if current_manifest is None:
+            raise cappa.Exit(
+                "The live release's manifest could not be read - the release"
+                " tree is incomplete.",
+                code=1,
+            )
+
+        releases = self._list_releases(conn)
+        target = self._resolve_target(conn, state, releases, state.current)
+        target_path = self._release_path(target)
+
+        target_manifest = self._read_target_manifest(conn, target, target_path)
+        self._verify_target(conn, target, target_path, target_manifest)
+
+        self.output.info(f"Rolling back to release {target}...")
+        log_operation(
+            conn,
+            self.config.app_name,
+            "rollback",
+            host=self.selected_host.name or self.selected_host.address,
+            from_version=current_manifest.version,
+            to_version=target_manifest.version,
+        )
+
+        transfer.swap_current(conn, app_dir, target)
+
+        unit_files, dropins, oneshots = self._collect_units(
+            conn, target_path, target_manifest
+        )
+        if unit_files or dropins:
+            serverops.install_units(conn, self.config.app_name, unit_files, dropins)
+
+        self._converge(conn, target_manifest)
+        self._restart(conn, current_manifest, target_manifest, unit_files, oneshots)
+        self._install_caddyfile(conn, target_path, target_manifest)
+
+        at = datetime.now(UTC).isoformat()
+        new_state = record_rollback(state, target, at)
+        serverops.write_state(conn, app_dir, new_state)
+        self._gc(conn, new_state, releases)
+
+        self.output.success(f"Rollback to release {target} completed successfully!")
+
+    def _read_target_manifest(self, conn, target: str, target_path: str) -> Manifest:
+        raw = serverops.read_remote_file(
+            conn,
+            f"{target_path}/manifest.json",
+            fatal=(
+                f"Release '{target}' is incomplete: its manifest.json is missing"
+                " or unreadable, so it cannot be rolled back to."
+            ),
+        )
+        try:
+            return decode_manifest(raw)
+        except Exception as exc:
+            raise cappa.Exit(
+                f"Release '{target}' manifest is corrupt: {exc}", code=1
+            ) from None
+
+    def _verify_target(
+        self, conn, target: str, target_path: str, manifest: Manifest
+    ) -> None:
+        result = transfer.verify_staging(
+            conn, target_path, manifest_to_dict(manifest, include_created_at=False)
+        )
+        if not result.ok:
+            raise cappa.Exit(transfer.verify_report(target_path, result), code=1)
+
+    # ------------------------------------------------------------------
+    # Units + services
+    # ------------------------------------------------------------------
+
+    def _collect_units(
+        self, conn, target_path: str, manifest: Manifest
+    ) -> tuple[dict[str, str], dict[str, dict[str, str]], set[str]]:
+        """Unit files + dropins of the target release, read from its systemd/ tree.
+
+        An unreadable unit aborts the rollback (a silently partial unit set
+        would install a broken application state).
+        """
+        unit_files, dropins, oneshots, failed = serverops.collect_release_units(
+            conn, target_path, manifest
+        )
+        if failed:
+            raise cappa.Exit(
+                "Cannot read unit file(s) "
+                f"'{', '.join(failed)}' from the target release tree.",
+                code=1,
+            )
+        return unit_files, dropins, oneshots
+
+    def _desired_units(self, manifest: Manifest) -> list[str]:
+        """Desired instance/unit names implied by the target release tree."""
+        app_name = self.config.app_name
+        prefix = f"{app_name}-"
+        desired: list[str] = []
+        for path in sorted(manifest.entries):
+            entry = manifest.entries[path]
+            if entry.kind != "unit":
+                continue
+            name = serverops.unit_rel_name(path)
+            if name.endswith("@.service") and name.startswith(prefix):
+                base = name[len(prefix) : -len("@.service")]
+                replicas = self.config.replicas.get(base, 1)
+                desired.extend(
+                    sorted(desired_instances(name.removesuffix("@.service"), replicas))
+                )
+            elif name.endswith(".service"):
+                desired.append(name)
+        return desired
+
+    def _converge(self, conn, target_manifest: Manifest) -> None:
+        """Start/stop template instances to the target release's replica counts.
+
+        Singular service units are enabled/started by the original deploy and
+        stay untouched here (they keep running across a rollback).
+        """
+        desired = [unit for unit in self._desired_units(target_manifest) if "@" in unit]
+        app_glob = self.config.app_name
+        out, _ok = conn.run(
+            f"systemctl list-unit-files --no-legend"
+            f" '{app_glob}-*@*.service' 2>/dev/null || true",
+            warn=True,
+            hide=True,
+        )
+        present: list[str] = []
+        for line in out.splitlines():
+            parts = line.split()
+            if parts and not parts[0].endswith("@.service"):
+                present.append(parts[0])
+
+        start, stop = convergence(desired, present)
+        if stop and not serverops.stop_and_disable(conn, sorted(stop)):
+            raise cappa.Exit(
+                "Rollback failed while stopping extra service instances"
+                " (no nested rollback is attempted); inspect the server state.",
+                code=1,
+            )
+        if start and not serverops.enable_and_start(conn, sorted(start)):
+            raise cappa.Exit(
+                "Rollback failed while starting missing service instances"
+                " (no nested rollback is attempted); inspect the server state.",
+                code=1,
+            )
+
+    def _restart(
+        self,
+        conn,
+        current_manifest: Manifest,
+        target_manifest: Manifest,
+        unit_files: dict[str, str],
+        oneshots: set[str],
+    ) -> None:
+        restart_units = restart_set(
+            current_manifest,
+            target_manifest,
+            env_fed_units=[name for name in unit_files if name.endswith(".service")],
+            oneshot_units=oneshots,
+        )
+        specs = sorted(
+            name.replace("@.service", "@*.service")
+            if name.endswith("@.service")
+            else name
+            for name in restart_units
+        )
+        if not specs:
+            self.output.info("No unit needs a restart for this rollback.")
+            return
+        _out, ok = conn.run(
+            f"sudo systemctl restart --quiet {' '.join(serverops.q(s) for s in specs)}",
+            warn=True,
+        )
+        if not ok:
+            raise cappa.Exit(
+                "Rollback failed while restarting services (no nested rollback is"
+                " attempted); inspect the application for a failed state.",
+                code=1,
+            )
+
+    def _install_caddyfile(self, conn, target_path: str, manifest: Manifest) -> None:
+        caddy_entry = manifest.entries.get("Caddyfile")
+        if caddy_entry is None or caddy_entry.kind != "caddy":
+            return
+        content = serverops.read_remote_file(conn, f"{target_path}/Caddyfile")
+        if content is None:
+            self.output.warning(
+                "Target release declares a Caddyfile but it could not be read;"
+                " caddy config unchanged."
+            )
+            return
+        try:
+            installed = serverops.install_caddyfile(
+                conn, content, self.config.caddy_config_path
+            )
+        except Exception:
+            self.output.warning(
+                "Failed to apply the target release's Caddyfile; caddy config"
+                " unchanged."
+            )
+        else:
+            if installed:
+                self.output.info("Caddy reloaded with the target release's Caddyfile.")
+
+    # ------------------------------------------------------------------
+    # GC
+    # ------------------------------------------------------------------
+
+    def _gc(self, conn, new_state: store.State, releases: list[str]) -> None:
+        serverops.collect_garbage(
+            conn,
+            self.config.app_dir,
+            new_state,
+            releases,
+            self.config.versions_to_keep,
+            self.output,
+        )

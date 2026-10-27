@@ -151,3 +151,9 @@ id_rsa.pub
 aws.pem
 .vagrant
 pocketbase
+
+# fujin local build cache
+**/.fujin/cache/
+
+# per-host machine-local config overrides
+**/.fujin/hosts/

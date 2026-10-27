@@ -8,6 +8,7 @@ import cappa
 from rich.prompt import Confirm
 
 from fujin import caddy
+from fujin import serverops
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin import connection
@@ -52,30 +53,87 @@ class Down(BaseCommand):
         with connection.connection(host=self.selected_host) as conn:
             self.output.info("Tearing down project...")
 
-            app_dir = shlex.quote(self.config.app_dir)
-            install_dir = shlex.quote(self.config.install_dir)
-            res, ok = conn.run(f"cat {install_dir}/.version", warn=True, hide=True)
+            app_dir_q = shlex.quote(self.config.app_dir)
+            install_dir_q = shlex.quote(self.config.install_dir)
+            res, ok = conn.run(f"cat {install_dir_q}/.version", warn=True, hide=True)
             version = res.strip() if ok else self.config.version
+
+            errors = False
+
+            # Stop and disable declared units.
+            units = [u for u in self.config.systemd_units if u]
+            if units:
+                _, stopped = conn.run(
+                    f"sudo systemctl disable --now {serverops.q(*units)}",
+                    warn=True,
+                    pty=True,
+                )
+                errors |= not stopped
+
+            # Legacy-layout apps uninstall via their stored .pyz installer.
             bundle_path = (
-                f"{install_dir}/.versions/{self.config.app_name}-{version}.pyz"
+                f"{install_dir_q}/.versions/{self.config.app_name}-{version}.pyz"
             )
-
             _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
-
-            uninstall_ok = False
             if bundle_exists:
                 verbose_flag = f" --verbose {self.verbose}" if self.verbose > 0 else ""
-                uninstall_cmd = f"sudo python3 {bundle_path} uninstall{verbose_flag} && sudo rm -rf {app_dir}"
+                uninstall_cmd = (
+                    f"sudo python3 {bundle_path} uninstall{verbose_flag}"
+                    f" && sudo rm -rf {app_dir_q}"
+                )
                 _, uninstall_ok = conn.run(uninstall_cmd, warn=True, pty=True)
+                errors |= not uninstall_ok
+            else:
+                # Release-tree teardown: remove this app's unit files (incl.
+                # stray instances), their dropin dirs and wants-symlinks,
+                # then the app dir.
+                app_q = shlex.quote(self.config.app_name)
+                _, removed = conn.run(
+                    f"sudo rm -rf /etc/systemd/system/{app_q}*"
+                    f" && sudo rm -f /etc/systemd/system/*.wants/{app_q}*"
+                    f" && sudo rm -rf {app_dir_q}"
+                    f" && sudo systemctl daemon-reload",
+                    warn=True,
+                    pty=True,
+                )
+                errors |= not removed
 
-            if not uninstall_ok:
+                # Remove this app's Caddy config and reload the proxy
+                # (reload failure is non-fatal: caddy may not be installed).
+                if self.config.caddyfile_exists:
+                    __, caddy_ok = conn.run(
+                        f"sudo rm -f {shlex.quote(self.config.caddy_config_path)}"
+                        f" && sudo systemctl reload caddy",
+                        warn=True,
+                        pty=True,
+                    )
+                    if not caddy_ok:
+                        self.output.warning(
+                            "Could not remove the Caddy config and/or reload"
+                            " caddy; the site config may need manual cleanup."
+                        )
+
+                # Terminate any leftover app-user processes and delete the
+                # app user (both non-fatal when nothing/left to remove).
+                app_user = self.config.app_user or self.config.app_name
+                user_q = shlex.quote(app_user)
+                _, userdel_ok = conn.run(
+                    f"sudo pkill -u {user_q} || true; sleep 1;"
+                    f" sudo pkill -9 -u {user_q} || true;"
+                    f" sudo userdel {user_q} || true",
+                    warn=True,
+                    pty=True,
+                )
+                errors |= not userdel_ok
+
+            if errors:
                 if not self.force:
                     raise cappa.Exit("Teardown failed", code=1)
 
                 self.output.warning(
                     "Teardown encountered errors but continuing due to --force"
                 )
-                conn.run(f"sudo rm -rf {app_dir}", warn=True, pty=True)
+                conn.run(f"sudo rm -rf {app_dir_q}", warn=True, pty=True)
 
             if self.full:
                 conn.run(

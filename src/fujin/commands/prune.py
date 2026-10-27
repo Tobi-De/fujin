@@ -1,15 +1,18 @@
+from __future__ import annotations
+
+import shlex
 from dataclasses import dataclass
 from typing import Annotated
 
 import cappa
 from rich.prompt import Confirm
 
+from fujin import connection, serverops, store
 from fujin.commands import BaseCommand
-from fujin import connection
 
 
 @cappa.command(
-    help="Prune old artifacts, keeping only the specified number of recent versions"
+    help="Prune old releases, keeping only the specified number of recent ones"
 )
 @dataclass
 class Prune(BaseCommand):
@@ -18,7 +21,8 @@ class Prune(BaseCommand):
         cappa.Arg(
             short="-k",
             long="--keep",
-            help="Number of version artifacts to retain (minimum 1). Defaults to versions_to_keep from config",
+            help="Number of releases to retain, including current and previous "
+            "(minimum 2). Defaults to versions_to_keep from config.",
         ),
     ] = None
 
@@ -27,51 +31,67 @@ class Prune(BaseCommand):
             self.keep if self.keep is not None else (self.config.versions_to_keep or 5)
         )
 
-        if keep < 1:
-            raise cappa.Exit("The minimum value for the --keep option is 1", code=1)
+        if keep < 2:
+            raise cappa.Exit(
+                "The minimum value for the --keep option is 2 (current + previous"
+                " are always kept)",
+                code=1,
+            )
 
-        versions_dir = f"{self.config.install_dir}/.versions"
+        app_dir = self.config.app_dir
+        releases_dir = f"{app_dir}/releases"
         with connection.connection(host=self.selected_host) as conn:
-            _, success = conn.run(f"test -d {versions_dir}", warn=True, hide=True)
-            if not success:
-                self.output.info("No versions directory found. Nothing to prune.")
-                return
-
-            # List files sorted by time (newest first)
-            result, _ = conn.run(f"ls -1t {versions_dir}", warn=True, hide=True)
-
-            if not result:
-                self.output.info("No versions found to prune")
-                return
-
-            filenames = result.strip().splitlines()
-            prefix = f"{self.config.app_name}-"
-            suffix = ".pyz"
-
-            valid_bundles = []
-            for fname in filenames:
-                if fname.startswith(prefix) and fname.endswith(suffix):
-                    valid_bundles.append(fname)
-
-            if len(valid_bundles) <= keep:
+            _, store_exists = conn.run(
+                f"test -d {shlex.quote(f'{app_dir}/store')}", warn=True, hide=True
+            )
+            if not store_exists:
                 self.output.info(
-                    f"Only {len(valid_bundles)} versions found. Nothing to prune (keep={keep})."
+                    "No release store found (pre-release-tree app). Nothing to prune."
                 )
                 return
 
-            to_delete = valid_bundles[keep:]
-            # Extract versions for display
-            versions_to_delete = []
-            for fname in to_delete:
-                v = fname[len(prefix) : -len(suffix)]
-                versions_to_delete.append(v)
+            state = serverops.read_state(conn, app_dir)
+            if state is None:
+                self.output.info("No release store state found. Nothing to prune.")
+                return
+
+            releases = self._list_releases(conn, releases_dir)
+            if not releases:
+                self.output.info("No releases found to prune.")
+                return
+
+            kill = store.gc_plan(
+                state.current,
+                state.previous,
+                releases,
+                keep,
+            )
+            if not kill:
+                self.output.info(
+                    f"Only {len(releases)} releases found. Nothing to prune (keep={keep})."
+                )
+                return
 
             if not Confirm.ask(
-                f"[red]The following versions will be permanently deleted: {', '.join(versions_to_delete)}.\\n"
+                f"[red]The following releases will be permanently deleted:"
+                f" {', '.join(kill)}.\\n"
                 f"This action is irreversible. Are you sure you want to proceed?[/red]"
             ):
                 return
 
-            cmd = f"cd {versions_dir} && rm -f {' '.join(to_delete)}"
-            conn.run(cmd)
+            for digest in kill:
+                conn.run(f"rm -rf {shlex.quote(f'{releases_dir}/{digest}')}", warn=True)
             self.output.success("Pruning completed successfully")
+
+    def _list_releases(self, conn, releases_dir: str) -> list[str]:
+        """Digests under releases/, newest (mtime) first; staging excluded."""
+        out, _ok = conn.run(
+            f"cd {shlex.quote(releases_dir)} && ls -1t 2>/dev/null || true",
+            warn=True,
+            hide=True,
+        )
+        return [
+            line.strip()
+            for line in out.splitlines()
+            if line.strip() and not line.strip().startswith(".staging-")
+        ]
