@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import closing
-from io import StringIO
-
-from dotenv import dotenv_values
 
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
+from fujin.secrets import render_env, split_env_template
 
 
 def env(env_content: str, secret_config: SecretConfig) -> str:
@@ -68,28 +65,18 @@ def env(env_content: str, secret_config: SecretConfig) -> str:
             adapter="env",
         )
 
-    # Parse env file
-    with closing(StringIO(env_content)) as buffer:
-        env_dict = dotenv_values(stream=buffer)
-
-    # Identify secrets (values starting with $)
-    secret_refs = {
-        key: value[1:]  # Strip the $ prefix
-        for key, value in env_dict.items()
-        if value and value.startswith("$")
-    }
-
-    if not secret_refs:
-        return env_content
+    # Parse the template: `$$` escapes are literals, `$REF` are secrets.
+    # Ref placeholders keep their template position while being resolved.
+    values, refs = split_env_template(env_content)
 
     # Resolve secrets
-    for key, secret_name in secret_refs.items():
+    for key, secret_name in refs.items():
         if secret_name not in secrets:
             raise SecretResolutionError(
                 f"Secret '{secret_name}' not found in '{source}'",
                 adapter="env",
                 key=key,
             )
-        env_dict[key] = secrets[secret_name]
+        values[key] = secrets[secret_name]
 
-    return "\n".join(f'{key}="{value}"' for key, value in env_dict.items())
+    return render_env(values)

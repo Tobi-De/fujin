@@ -951,6 +951,51 @@ def test_unresolved_secret_ref_aborts_before_any_upload(
     assert "STRIPE_TOKEN=$STRIPE_TOKEN" not in all_out
 
 
+def test_escaped_dollar_deploys_without_secret_adapter(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A `$$`-escaped value needs no adapter: it is unescaped into the staged
+    .env instead of aborting the deploy."""
+    minimal_config.secret_config = None
+    minimal_config.hosts[0].env_content = "ESCAPED=$$REF\nDEBUG=1"
+    cmd, _spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
+    )
+    captured = {}
+
+    def fake_rsync(_conn, staging, *_a, **_k):
+        captured["env"] = (Path(staging) / ".env").read_bytes()
+        return []
+
+    monkeypatch.setattr(fujin.transfer, "rsync_to_staging", fake_rsync)
+    assert invoke(cmd) == 0
+    assert captured["env"] == b'ESCAPED="$REF"\nDEBUG=1'
+
+
+def test_ref_without_secret_adapter_aborts_with_adapter_less_message(
+    monkeypatch, minimal_config, tmp_path
+):
+    """No adapter configured: fail closed, and do not blame an adapter that
+    does not exist."""
+    minimal_config.secret_config = None
+    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN"
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
+    )
+    printer = _CapturingPrinter()
+    cmd.output = printer
+
+    code = invoke(cmd)
+    assert code != 0
+    spies["rsync"].assert_not_called()
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_not_called()
+    joined = "\n".join(printer.lines)
+    assert "<$STRIPE_TOKEN>" in joined
+    assert "no secret adapter is configured" in joined
+    assert "configured secret adapter did not resolve" not in joined
+
+
 # ===========================================================================
 # Identical-release reuse (#88: --force / post-rollback no commit collision)
 # ===========================================================================

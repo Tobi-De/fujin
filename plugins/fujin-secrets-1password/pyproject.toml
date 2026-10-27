@@ -21,7 +21,6 @@ classifiers = [
 ]
 dependencies = [
   "fujin-cli>=0.27.1",
-  "python-dotenv>=1.0.1",
 ]
 
 urls.Homepage = "https://github.com/Tobi-De/fujin"

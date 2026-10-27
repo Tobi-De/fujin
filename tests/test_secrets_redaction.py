@@ -67,7 +67,11 @@ def test_logging_filter_redacts_records():
 
 
 def test_secret_refs_mapping():
-    content = "KEY=$REF_A\nKEY2=$REF_B\nLITERAL=plain\nCUDA=echo $$x\n"
+    content = (
+        "KEY=$REF_A\nKEY2=$REF_B\nLITERAL=plain\nCUDA=echo $$x\nESCAPED=$$NOT_A_REF\n"
+    )
+    # `$$...` values are literals and must not be registered/redacted as
+    # secrets; only genuine `$REF` entries are.
     assert secret_refs(content) == {"KEY": "REF_A", "KEY2": "REF_B"}
 
 
@@ -92,4 +96,4 @@ def test_adapter_failure_exposes_no_env_content(monkeypatch):
         resolve_secrets("KEY=$VERY_SECRET_REF", SecretConfig(adapter="test"))
     # The adapter's own message quoted the env buffer; the raised error must
     # not echo the secret line content.
-    assert "VERY_SECRET_REF" not in str(e.value)
+    assert "VERY_SECRET_REF" not in e.value.message

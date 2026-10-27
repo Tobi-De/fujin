@@ -27,7 +27,12 @@ from fujin.config import get_git_short_hash
 from fujin.errors import DeploymentError
 from fujin.formatting import safe_format
 from fujin.redaction import clear_secrets, redact, register_secrets
-from fujin.secrets import env_values, resolve_secrets, secret_refs
+from fujin.secrets import (
+    env_values,
+    render_template,
+    resolve_secrets,
+    secret_refs,
+)
 from rich.prompt import Confirm
 
 logger = logging.getLogger(__name__)
@@ -160,13 +165,15 @@ class Deploy(BaseCommand):
         logger.debug("Target host: %s", host.address)
 
         secret_config = config.effective_secrets(host)
+        # Refs come from the env *template*, not the rendered file: `$$REF`
+        # renders a literal `$REF` and must not be treated as unresolved.
+        secret_aliases = secret_refs(host.env_content)
         if secret_config:
             self.output.info("Resolving secrets from configuration...")
             parsed_env = resolve_secrets(host.env_content, secret_config)
             # Track every resolved secret value so all output paths render it
             # as `<$REF>` instead of the raw value (never registered in the
             # build cache; #77).
-            secret_aliases = secret_refs(host.env_content)
             # Register only values that really are secret references;
             # registering every env value would make unrelated output
             # (DEBUG=1, etc.) redact as a false positive.
@@ -176,8 +183,7 @@ class Deploy(BaseCommand):
                 secret_aliases,
             )
         else:
-            parsed_env = host.env_content
-            secret_aliases = {}
+            parsed_env = render_template(host.env_content)
 
         context = build._interpolation_context(config, host)
         resolved_env, unresolved = safe_format(parsed_env, **context)
@@ -191,7 +197,9 @@ class Deploy(BaseCommand):
                 f" {', '.join(sorted(unresolved))}. Deployment aborted"
                 " (fail-closed)."
             )
-        self._fail_closed_on_unresolved_secrets(resolved_env, secret_aliases)
+        self._fail_closed_on_unresolved_secrets(
+            resolved_env, secret_aliases, adapter_configured=secret_config is not None
+        )
 
         with connection.connection(host=host, compress=False) as conn:
             self._notice_old_layout(conn)
@@ -1050,41 +1058,59 @@ class Deploy(BaseCommand):
     # =======================================================================================
 
     def _fail_closed_on_unresolved_secrets(
-        self, env: str, secret_aliases: dict[str, str]
+        self,
+        env: str,
+        secret_aliases: dict[str, str],
+        *,
+        adapter_configured: bool,
     ) -> None:
         """Abort when a ``$REF`` secret line survived the adapters unresolved.
 
-        The ``system`` adapter resolves ``$VAR`` values from the environment;
-        an adapter returning a value still starting with ``$`` means the
-        secret was NOT resolved, and shipping it would leak the reference
-        into the release tree instead of removing it. This is fail-closed:
-        any unresolved secret ref aborts the deploy before any server I/O,
-        and only the key/ref name is reported (never the raw value).
+        The refs come from the env *template* (``secret_aliases``), not from
+        a scan of the rendered file: ``$$REF`` renders a literal ``$REF`` and
+        must not abort. The ``system`` adapter resolves ``$REF`` values from
+        the environment; a rendered value still starting with ``$`` (or a ref
+        key missing from the output) means the secret was NOT resolved, and
+        shipping it would leak the reference into the release tree instead of
+        removing it. This is fail-closed: any unresolved secret ref aborts
+        the deploy before any server I/O, and only the key/ref name is
+        reported (never the raw value).
+
+        ``adapter_configured`` distinguishes "the adapter left it unresolved"
+        from "this host has no secret adapter at all" so the message does not
+        blame a configuration that does not exist.
         """
-        for line in env.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
+        values = env_values(env)
+        for key, ref in secret_aliases.items():
+            value = values.get(key)
+            if value is not None and not value.startswith("$"):
                 continue
-            key, _, value = line.partition("=")
-            stripped = value.strip().strip("'\"")
-            if stripped.startswith("$$") or "{{" in stripped:
-                # `$$` = literal dollar; `{{...}}` = deploy-time template
-                # placeholder still to be rendered elsewhere.
-                continue
-            if stripped.startswith("$") and len(stripped) > 1:
-                ref = stripped[1:]
-                if ref.startswith("$"):
-                    ref = ref[1:]
-                self.output.error(
+            if adapter_configured:
+                shown = (
                     f"Unresolved secret reference '<${ref}>' for"
-                    f" '{key.strip()}': the configured secret adapter did"
+                    f" '{key}': the configured secret adapter did"
                     " not resolve it and deployment aborted (fail-closed)."
                 )
-                raise DeploymentError(
-                    f"Unresolved secret reference in '{key.strip()}':"
+                raised = (
+                    f"Unresolved secret reference in '{key}':"
                     f" '<${ref}>' could not be resolved by the configured"
                     " secret adapter. Deployment aborted (fail-closed)."
                 )
+            else:
+                shown = (
+                    f"Unresolved secret reference '<${ref}>' for"
+                    f" '{key}': no secret adapter is configured for this"
+                    " host, so a '$REF' value cannot be resolved (use '$$'"
+                    " for a literal '$'). Deployment aborted (fail-closed)."
+                )
+                raised = (
+                    f"Unresolved secret reference in '{key}':"
+                    f" '<${ref}>' cannot be resolved because no secret"
+                    " adapter is configured for this host (use '$$' for a"
+                    " literal '$'). Deployment aborted (fail-closed)."
+                )
+            self.output.error(shown)
+            raise DeploymentError(raised)
 
     # =======================================================================================
     # Presentation

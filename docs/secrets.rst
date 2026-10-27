@@ -25,6 +25,29 @@ Update your fujin.toml file with the following configuration:
 
 The system adapter will look for environment variables with the same name as the value after the $ sign.
 
+Secret References and Escaping
+------------------------------
+
+A few rules apply to every secret adapter and to plain ``.env`` files without
+one:
+
+* ``$REF`` (a value starting with a single ``$``) is a secret reference. The
+  ref runs from the ``$`` to the end of the line: ``API_KEY=$MY_REF`` asks the
+  adapter for ``MY_REF``. Everything after the ``$`` on that line is part of
+  the ref name, so trailing text is not "appended" to the value.
+* ``$$`` escapes a literal ``$``. ``PASSWORD=pa$$word`` deploys ``pa$word``,
+  ``DOLLAR=$$`` deploys ``$`` and ``PATTERN=$${HOME}`` deploys the literal
+  text ``${HOME}`` (it is not a secret reference and is not expanded). The
+  ``$$`` check happens *before* secret-ref parsing.
+* Beyond that, env files keep python-dotenv's normal interpolation:
+  ``${VAR}`` is expanded as before. Use ``$$`` when you need a literal ``$``
+  next to a brace expression.
+* An unresolved ``$REF`` is fail-closed. If the configured adapter (or, with
+  no adapter configured at all) does not produce a value, the deploy aborts
+  before anything is uploaded, naming only the key and the ref. If no secret
+  adapter is configured for the host, use ``$$`` for a literal ``$`` instead
+  of ``$REF``.
+
 Plugin Adapters
 --------------
 

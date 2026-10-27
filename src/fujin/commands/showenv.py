@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import cappa
 
 from fujin.commands import BaseCommand
-from fujin.secrets import resolve_secrets
+from fujin.secrets import render_template, resolve_secrets
 
 
 @cappa.command(
@@ -17,5 +17,5 @@ class Showenv(BaseCommand):
         if secret_config:
             parsed_env = resolve_secrets(host.env_content, secret_config)
         else:
-            parsed_env = host.env_content
+            parsed_env = render_template(host.env_content)
         self.output.output(parsed_env)

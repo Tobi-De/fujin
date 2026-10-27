@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import closing
-from io import StringIO
-
-from dotenv import dotenv_values
 
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
+from fujin.secrets import render_env, split_env_template
 
 
 def onepassword(env_content: str, secret_config: SecretConfig) -> str:
@@ -37,24 +34,15 @@ def onepassword(env_content: str, secret_config: SecretConfig) -> str:
     Raises:
         SecretResolutionError: If secret not found or CLI fails
     """
-    # Parse env file
-    with closing(StringIO(env_content)) as buffer:
-        env_dict = dotenv_values(stream=buffer)
-
-    # Identify secrets (values starting with $)
-    secrets = {
-        key: value for key, value in env_dict.items() if value and value.startswith("$")
-    }
-
-    if not secrets:
-        return env_content
+    # Parse the template: `$$` escapes are literals, `$REF` are secrets.
+    # Ref placeholders keep their template position while being resolved.
+    values, refs = split_env_template(env_content)
 
     # Resolve secrets concurrently
     resolved_secrets = {}
     with ThreadPoolExecutor() as executor:
         future_to_key = {
-            executor.submit(_read_secret, secret[1:]): key
-            for key, secret in secrets.items()
+            executor.submit(_read_secret, ref): key for key, ref in refs.items()
         }
 
         for future in as_completed(future_to_key):
@@ -68,10 +56,9 @@ def onepassword(env_content: str, secret_config: SecretConfig) -> str:
                     key=key,
                 ) from e
 
-    # Merge resolved secrets back into env dict
-    env_dict.update(resolved_secrets)
+    values.update(resolved_secrets)
 
-    return "\n".join(f'{key}="{value}"' for key, value in env_dict.items())
+    return render_env(values)
 
 
 def _read_secret(name: str) -> str:
