@@ -15,6 +15,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🐛 Bug Fixes
 
+- Adversarial review round 2 - 8 behavior fixes
 - *(ssh)* File downloads via ssh exec subprocess (remote scp binary/sftp missing on targets); drop leftover instrumentation
 - *(ssh)* Idle deadline on remote commands, system-scp downloads, kill holder process group (#82)
 - *(transfer)* Replace --link-dest with explicit server-side hardlink dedup (rsync #715 CVE-hardening breaks basis files, exit 23) (#82)
