@@ -343,13 +343,14 @@ def test_noop_still_runs_replica_convergence(monkeypatch, minimal_config, tmp_pa
     monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
     state = State(current="prev", client_digest="digest-x")
     cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=state)
-    spies["conn"].append_response(
-        "list-unit-files", "testapp-worker@1.service template"
-    )
+    spies["conn"].responses = [
+        ("list-unit-files", ("testapp-worker@1.service enabled\n", True)),
+        ("list-units", ("testapp-worker@1.service loaded active running\n", True)),
+    ]
     cmd()
 
-    started = [str(c) for c in spies["enable_and_start"].call_args_list]
-    assert any("testapp-worker@2.service" in u for u in started)
+    started = spies["enable_and_start"].call_args.args[1]
+    assert started == ["testapp-worker@2.service"]
     # the already-present instance is not touched, nothing to stop
     stopped = [str(c) for c in spies["stop_and_disable"].call_args_list]
     assert stopped == []
@@ -367,6 +368,172 @@ def test_force_bypasses_noop(monkeypatch, minimal_config, tmp_path):
     spies["rsync"].assert_called()
     spies["commit"].assert_called()
     spies["swap"].assert_called()
+
+
+def test_convergence_scale_down_stops_highest_first(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=state, replicas={"worker": 3}
+    )
+    spies["conn"].responses = [
+        (
+            "list-unit-files",
+            (
+                "\n".join(f"testapp-worker@{i}.service enabled" for i in range(1, 6)),
+                True,
+            ),
+        ),
+        (
+            "list-units",
+            (
+                "\n".join(
+                    f"testapp-worker@{i}.service loaded active running"
+                    for i in range(1, 6)
+                ),
+                True,
+            ),
+        ),
+    ]
+    cmd()
+
+    stopped = spies["stop_and_disable"].call_args.args[1]
+    assert stopped == ["testapp-worker@5.service", "testapp-worker@4.service"]
+    # nothing is missing/stopped-but-enabled: nothing to start
+    spies["enable_and_start"].assert_not_called()
+
+
+def test_noop_convergence_restarts_stopped_but_enabled_instance(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=state, replicas={"worker": 2}
+    )
+    spies["conn"].responses = [
+        (
+            "list-unit-files",
+            (
+                "testapp-worker@1.service enabled\ntestapp-worker@2.service enabled\n",
+                True,
+            ),
+        ),
+        # worker@1 was stopped by hand and is therefore not active
+        ("list-units", ("testapp-worker@2.service loaded active running\n", True)),
+    ]
+    cmd()
+
+    started = spies["enable_and_start"].call_args.args[1]
+    assert started == ["testapp-worker@1.service"]
+    spies["stop_and_disable"].assert_not_called()
+
+
+def test_convergence_scale_up_starts_only_missing_instances(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=state, replicas={"worker": 3}
+    )
+    spies["conn"].responses = [
+        (
+            "list-unit-files",
+            ("testapp-worker@1.service enabled\n", True),
+        ),
+        ("list-units", ("testapp-worker@1.service loaded active running\n", True)),
+    ]
+    cmd()
+
+    started = spies["enable_and_start"].call_args.args[1]
+    assert started == ["testapp-worker@2.service", "testapp-worker@3.service"]
+    spies["stop_and_disable"].assert_not_called()
+
+
+def test_convergence_stops_leftovers_when_template_removed(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        files={"systemd/testapp-web.service": WEB_UNIT},
+    )
+    spies["conn"].responses = [
+        ("list-unit-files", ("testapp-worker@1.service enabled\n", True)),
+        ("list-units", ("testapp-worker@2.service loaded active running\n", True)),
+    ]
+    cmd()
+
+    stopped = spies["stop_and_disable"].call_args.args[1]
+    assert stopped == ["testapp-worker@2.service", "testapp-worker@1.service"]
+    spies["enable_and_start"].assert_not_called()
+
+
+def test_convergence_starts_running_but_disabled_instance(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=state, replicas={"worker": 2}
+    )
+    spies["conn"].responses = [
+        # worker@2 runs but is not enabled -> needs `enable --now`
+        ("list-unit-files", ("testapp-worker@1.service enabled\n", True)),
+        (
+            "list-units",
+            (
+                "testapp-worker@1.service loaded active running\n"
+                "testapp-worker@2.service loaded active running\n",
+                True,
+            ),
+        ),
+    ]
+    cmd()
+
+    started = spies["enable_and_start"].call_args.args[1]
+    assert started == ["testapp-worker@2.service"]
+    spies["stop_and_disable"].assert_not_called()
+
+
+def test_convergence_stops_non_numeric_instance_without_crashing(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=state, replicas={"worker": 1}
+    )
+    spies["conn"].responses = [
+        (
+            "list-unit-files",
+            (
+                "testapp-worker@1.service enabled\n"
+                "testapp-worker@canary.service enabled\n",
+                True,
+            ),
+        ),
+        (
+            "list-units",
+            (
+                "testapp-worker@1.service loaded active running\n"
+                "testapp-worker@canary.service loaded active running\n",
+                True,
+            ),
+        ),
+    ]
+    cmd()
+
+    stopped = spies["stop_and_disable"].call_args.args[1]
+    assert stopped == ["testapp-worker@canary.service"]
+    spies["enable_and_start"].assert_not_called()
 
 
 # ===========================================================================

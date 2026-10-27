@@ -267,22 +267,34 @@ class TestRestartSet:
 
 class TestConvergence:
     def test_scale_up(self):
-        start, stop = store.convergence({"w@1", "w@2", "w@3"}, {"w@1"})
+        start, stop = store.convergence({"w@1", "w@2", "w@3"}, {"w@1"}, {"w@1"})
         assert start == {"w@2", "w@3"}
         assert stop == frozenset()
 
     def test_scale_down(self):
-        start, stop = store.convergence({"w@1"}, {"w@1", "w@2", "w@3"})
+        start, stop = store.convergence(
+            {"w@1"}, {"w@1", "w@2", "w@3"}, {"w@1", "w@2", "w@3"}
+        )
         assert start == frozenset()
         assert stop == {"w@2", "w@3"}
 
+    def test_stopped_but_enabled_is_started(self):
+        start, stop = store.convergence({"w@1"}, {"w@1"}, set())
+        assert start == {"w@1"}
+        assert stop == frozenset()
+
+    def test_active_but_disabled_is_started(self):
+        start, stop = store.convergence({"w@1", "w@2"}, {"w@1"}, {"w@1", "w@2"})
+        assert start == {"w@2"}
+        assert stop == frozenset()
+
     def test_normalization_drops_service_suffix(self):
-        start, stop = store.convergence({"w@1.service"}, {"w@1"})
+        start, stop = store.convergence({"w@1.service"}, {"w@1"}, {"w@1.service"})
         assert (start, stop) == (frozenset(), frozenset())
 
     def test_bare_template_never_desired(self):
         with pytest.raises(ValueError):
-            store.convergence(["worker@"], [])
+            store.convergence(["worker@"], [], [])
 
     def test_desired_instances_never_bare_template(self):
         want = store.desired_instances("fujin-worker", 3)
@@ -295,9 +307,27 @@ class TestConvergence:
             store.desired_instances("w", 0)
 
     def test_empty_desired_stops_everything(self):
-        start, stop = store.convergence([], ["w@1", "w@2"])
+        start, stop = store.convergence([], ["w@1", "w@2"], ["w@2"])
         assert start == frozenset()
         assert stop == {"w@1", "w@2"}
+
+    def test_instance_sort_key_parses_numeric_index(self):
+        assert store.instance_sort_key("worker@2") == 2
+        assert store.instance_sort_key("worker@10.service") == 10
+
+    def test_instance_sort_key_orders_numerically_not_lexically(self):
+        units = ["worker@2.service", "worker@10.service", "worker@1.service"]
+        assert sorted(units, key=lambda u: (-store.instance_sort_key(u), u)) == [
+            "worker@10.service",
+            "worker@2.service",
+            "worker@1.service",
+        ]
+
+    def test_instance_sort_key_non_numeric_is_zero(self):
+        assert store.instance_sort_key("x@canary") == 0
+        assert store.instance_sort_key("x@canary.service") == 0
+        assert store.instance_sort_key("worker@") == 0
+        assert store.instance_sort_key("worker.service") == 0
 
 
 class TestGCPlan:

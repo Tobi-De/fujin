@@ -13,7 +13,6 @@ from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin.manifest import Manifest, decode_manifest, manifest_to_dict
 from fujin.store import (
-    convergence,
     desired_instances,
     gc_plan,
     normalize_digest,
@@ -422,31 +421,22 @@ class Rollback(BaseCommand):
     def _converge(self, conn, target_manifest: Manifest) -> None:
         """Start/stop template instances to the target release's replica counts.
 
-        Singular service units are enabled/started by the original deploy and
-        stay untouched here (they keep running across a rollback).
+        Presence is the union of enabled and running instances (a manually
+        stopped instance is restarted); singular service units are enabled/
+        started by the original deploy and stay untouched here (they keep
+        running across a rollback).
         """
         desired = [unit for unit in self._desired_units(target_manifest) if "@" in unit]
-        app_glob = self.config.app_name
-        out, _ok = conn.run(
-            f"systemctl list-unit-files --no-legend"
-            f" '{app_glob}-*@*.service' 2>/dev/null || true",
-            warn=True,
-            hide=True,
+        start, stop = serverops.template_instance_plan(
+            conn, self.config.app_name, desired
         )
-        present: list[str] = []
-        for line in out.splitlines():
-            parts = line.split()
-            if parts and not parts[0].endswith("@.service"):
-                present.append(parts[0])
-
-        start, stop = convergence(desired, present)
-        if stop and not serverops.stop_and_disable(conn, sorted(stop)):
+        if stop and not serverops.stop_and_disable(conn, stop):
             raise cappa.Exit(
                 "Rollback failed while stopping extra service instances"
                 " (no nested rollback is attempted); inspect the server state.",
                 code=1,
             )
-        if start and not serverops.enable_and_start(conn, sorted(start)):
+        if start and not serverops.enable_and_start(conn, start):
             raise cappa.Exit(
                 "Rollback failed while starting missing service instances"
                 " (no nested rollback is attempted); inspect the server state.",

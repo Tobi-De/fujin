@@ -40,6 +40,7 @@ __all__ = [
     "restart_set",
     "unit_entry_name",
     "desired_instances",
+    "instance_sort_key",
     "convergence",
     "gc_plan",
     "is_noop",
@@ -391,6 +392,24 @@ def desired_instances(service_name: str, replica_count: int) -> frozenset[str]:
     return frozenset(f"{template}{i}" for i in range(1, replica_count + 1))
 
 
+_INSTANCE_INDEX_RE = re.compile(r"@(?P<index>\d+)$")
+
+
+def instance_sort_key(name: str) -> int:
+    """Numeric index of a template instance (``svc@3`` / ``svc@3.service``).
+
+    A total ordering helper, not a validator: any name without a trailing
+    numeric index - non-numeric instances (``svc@canary``), bare templates
+    (``svc@``) and singular units - maps to ``0``. Used to order instance
+    operations (stops go highest-first), so callers tie-break by name.
+    """
+    normalized = name.removesuffix(".service")
+    match = _INSTANCE_INDEX_RE.search(normalized)
+    if match is None:
+        return 0
+    return int(match.group("index"))
+
+
 def _norm_instance(name: str) -> str:
     """Normalize an instance id: drop a trailing ``.service``, reject the
     bare template (``svc@`` / ``svc@.service``)."""
@@ -402,19 +421,25 @@ def _norm_instance(name: str) -> str:
 
 def convergence(
     desired: Iterable[str],
-    present: Iterable[str],
+    enabled: Iterable[str],
+    active: Iterable[str],
 ) -> tuple[frozenset[str], frozenset[str]]:
-    """Diff desired vs present instance sets.
+    """Diff desired instances against the enabled and active views.
 
-    Returns ``(start, stop)``. Both directions converge: units to enable and
-    start (missing on the server) and units to stop and disable (extra on
-    the server). Instance names are normalized by dropping a trailing
-    ``.service`` so callers can pass either unit-file names or instance ids.
+    Returns ``(start, stop)``. An instance needs ``enable --now`` whenever it
+    is missing from EITHER view, so the start set is
+    ``desired - (enabled & active)``: that covers absent, stopped-but-enabled
+    and running-but-disabled instances. Everything visible in either view but
+    not desired is stopped and disabled. Instance names are normalized by
+    dropping a trailing ``.service`` so callers can pass either unit-file
+    names or instance ids.
     """
     desired_set = frozenset(_norm_instance(n) for n in desired)
-    present_set = frozenset(_norm_instance(n) for n in present)
-    start = frozenset(desired_set - present_set)
-    stop = frozenset(present_set - desired_set)
+    enabled_set = frozenset(_norm_instance(n) for n in enabled)
+    active_set = frozenset(_norm_instance(n) for n in active)
+    present = enabled_set | active_set
+    start = desired_set - (enabled_set & active_set)
+    stop = present - desired_set
     return start, stop
 
 

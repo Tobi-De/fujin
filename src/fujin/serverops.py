@@ -21,7 +21,14 @@ from typing import Any
 import cappa
 
 from fujin import manifest as m
-from fujin.store import State, parse_state, serialize_state, gc_plan
+from fujin.store import (
+    State,
+    convergence,
+    gc_plan,
+    instance_sort_key,
+    parse_state,
+    serialize_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -845,6 +852,72 @@ def set_envfile_mode(conn: Any, release_dir: str) -> None:
     )
     if not ok:
         raise ServerOpsError(f"Failed to chmod .env in {release_dir}")
+
+
+# =============================================================================
+# Template-instance convergence plan
+# =============================================================================
+
+
+def _list_template_instances(conn: Any, command: str, pattern: str) -> set[str]:
+    """Instance unit names reported by a ``systemctl`` listing (non-fatal).
+
+    Both the enabled and the active view are queried: enablement alone misses
+    an instance somebody stopped by hand, runtime state alone misses an
+    enabled instance that is not running. Bare templates are dropped.
+    """
+    out, _ok = conn.run(
+        f"{command} {shlex.quote(pattern)} 2>/dev/null || true",
+        warn=True,
+        hide=True,
+    )
+    instances: set[str] = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0]
+        if not name.endswith(".service") or name.endswith("@.service"):
+            continue
+        instances.add(name)
+    return instances
+
+
+def template_instance_plan(
+    conn: Any, app_name: str, desired: Iterable[str]
+) -> tuple[list[str], list[str]]:
+    """Converge plan for template instances of *app_name*.
+
+    *desired* holds instance ids (``svc@1``) or unit names
+    (``svc@1.service``). Returns ``(start_specs, stop_specs)`` as full unit
+    names: ``start_specs`` sorted ascending covers instances that are missing,
+    stopped-but-enabled or running-but-disabled; ``stop_specs`` are the
+    present instances not desired, highest instance number first.
+    """
+    pattern = f"{app_name}-*@*.service"
+    enabled = _list_template_instances(
+        conn, "systemctl list-unit-files --no-legend", pattern
+    )
+    active = _list_template_instances(
+        conn,
+        "systemctl list-units --type=service --state=active --no-legend",
+        pattern,
+    )
+
+    desired_units: set[str] = set()
+    for unit in desired:
+        name = unit.removesuffix(".service")
+        if "@" not in name or name.endswith("@"):
+            continue
+        desired_units.add(f"{name}.service")
+
+    start_ids, stop_ids = convergence(desired_units, enabled, active)
+    start = sorted(f"{name}.service" for name in start_ids)
+    stop = sorted(
+        (f"{name}.service" for name in stop_ids),
+        key=lambda unit: (-instance_sort_key(unit), unit),
+    )
+    return start, stop
 
 
 # =============================================================================

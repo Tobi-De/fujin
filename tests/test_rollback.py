@@ -508,9 +508,17 @@ def test_convergence_starts_missing_stops_extra(monkeypatch, minimal_config):
         (
             "systemctl list-unit-files",
             (
-                "testapp-worker@3.service enabled\ntestapp-worker@.service enabled\n",
+                "testapp-worker@2.service enabled\n"
+                "testapp-worker@3.service enabled\n"
+                "testapp-worker@.service enabled\n",
                 True,
             ),
+        )
+    )
+    conn.responses.append(
+        (
+            "systemctl list-units",
+            ("testapp-worker@2.service loaded active running\n", True),
         )
     )
     state = State(current="b-digest", previous=["a-digest"])
@@ -527,8 +535,9 @@ def test_convergence_starts_missing_stops_extra(monkeypatch, minimal_config):
 
     enable = fujin.serverops.enable_and_start.call_args.args[1]
     stop = fujin.serverops.stop_and_disable.call_args.args[1]
-    assert set(enable) == {"testapp-worker@1", "testapp-worker@2"}
-    assert set(stop) == {"testapp-worker@3"}
+    # worker@1 is missing entirely; worker@2 is enabled and running.
+    assert enable == ["testapp-worker@1.service"]
+    assert stop == ["testapp-worker@3.service"]
 
 
 # ===========================================================================

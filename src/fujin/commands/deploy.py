@@ -691,6 +691,9 @@ class Deploy(BaseCommand):
 
         Desired instances are ``svc@1..N`` from ``config.replicas``; singular
         service units keep running across deploys and are untouched here.
+        Presence is the union of enabled and running instances, so a manually
+        stopped (but still enabled) instance is started again on every deploy,
+        including a no-op deploy, and leftovers of a removed template stop.
         """
         app_name = self.config.app_name
         desired: list[str] = []
@@ -710,40 +713,21 @@ class Deploy(BaseCommand):
                     store.desired_instances(name.removesuffix("@.service"), replicas)
                 )
             )
-        if not desired:
-            return
-        out, _ok = conn.run(
-            f"systemctl list-unit-files --no-legend "
-            f"{shlex.quote(f'{app_name}-*@*.service')} 2>/dev/null || true",
-            warn=True,
-            hide=True,
-        )
-        present = [
-            parts[0]
-            for line in out.splitlines()
-            if (parts := line.split()) and not parts[0].endswith("@.service")
-        ]
-        start, stop = store.convergence(desired, present)
-        # store.convergence normalizes to instance ids ("svc@2"); systemctl
-        # needs the full unit name ("svc@2.service").
-        if stop and not serverops.stop_and_disable(
-            conn, sorted(f"{u}.service" for u in stop)
-        ):
+        start, stop = serverops.template_instance_plan(conn, app_name, desired)
+        if stop and not serverops.stop_and_disable(conn, stop):
             if getattr(self, "_rolling_back", False):
                 # Convergence failure while rolling back: state.current still
                 # points at the target, another rollback would be a no-op loop.
                 raise DeploymentError(
                     "Failed while stopping extra service instances; inspect the server."
                 )
-            self._handle_failed_units(conn, sorted(f"{u}.service" for u in stop))
-        if start and not serverops.enable_and_start(
-            conn, sorted(f"{u}.service" for u in start)
-        ):
+            self._handle_failed_units(conn, stop)
+        if start and not serverops.enable_and_start(conn, start):
             if getattr(self, "_rolling_back", False):
                 raise DeploymentError(
                     "Failed while starting missing service instances; inspect the server."
                 )
-            self._handle_failed_units(conn, sorted(f"{u}.service" for u in start))
+            self._handle_failed_units(conn, start)
 
     def _readiness_units(self, manifest: m.Manifest, oneshots: set[str]) -> list[str]:
         """Runtime service units to health-check, derived from the release
