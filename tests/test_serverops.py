@@ -678,3 +678,37 @@ def test_link_unchanged_script_failure_all_failed(conn):
     conn.run.return_value = ("boom", False)
     linked, failed = serverops.link_unchanged(conn, "/s", "/p", {"a": 420, "b": 420})
     assert (linked, failed) == (0, ["a", "b"])
+
+
+# =============================================================================
+# run_health_probe (#88)
+# =============================================================================
+
+
+def test_run_health_probe_success(conn):
+    conn.run.return_value = ("", True)
+
+    ok, output = serverops.run_health_probe(conn, "curl -sf http://x/health")
+
+    assert (ok, output) == (True, "")
+    cmd, kwargs = conn.run.call_args[0][0], conn.run.call_args[1]
+    assert cmd == "curl -sf http://x/health"
+    # non-fatal + quiet: a failing probe must not dump its output
+    assert kwargs == {"warn": True, "hide": True}
+
+
+def test_run_health_probe_is_single_shot_and_reports_output(conn):
+    conn.run.return_value = ("curl: (22) 500", False)
+
+    ok, output = serverops.run_health_probe(conn, "probe")
+
+    assert ok is False
+    assert output == "curl: (22) 500"
+    # No retry policy in the I/O layer: exactly one call.
+    assert conn.run.call_count == 1
+
+
+def test_run_health_probe_strips_output(conn):
+    conn.run.return_value = ("  trailing newline\n", True)
+
+    assert serverops.run_health_probe(conn, "probe") == (True, "trailing newline")

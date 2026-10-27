@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import signal
 import sys
@@ -24,7 +25,7 @@ from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin.config import get_git_short_hash
-from fujin.errors import DeploymentError
+from fujin.errors import DeploymentError, ImproperlyConfiguredError
 from fujin.formatting import safe_format
 from fujin.redaction import clear_secrets, redact, register_secrets
 from fujin.secrets import (
@@ -38,6 +39,28 @@ from rich.prompt import Confirm
 logger = logging.getLogger(__name__)
 
 EXIT_SERVICE_START_FAILED = 3
+
+#: Fallback readiness window (tier 1): a unit must reach ``active`` within
+#: this many seconds of the restart, regardless of any probe configuration.
+READINESS_TIMEOUT = 30.0
+READINESS_INTERVAL = 0.5
+
+#: Retry interval of the optional health-check probe (tier 3), in seconds.
+HEALTH_CHECK_INTERVAL = 1.0
+
+
+@dataclass(frozen=True)
+class HealthProbe:
+    """A ``[health_check]`` probe rendered once, before any server I/O.
+
+    ``command`` is the exact remote command (bounded by ``min(5, timeout)``),
+    ``timeout`` the overall retry window, ``display`` the redacted source
+    text for user-facing output.
+    """
+
+    command: str
+    timeout: int
+    display: str
 
 
 def _resolve_live_digest(conn, app_dir: str, state: store.State | None) -> str | None:
@@ -70,6 +93,72 @@ def collect_local_units(
         if path.startswith("systemd/")
     ]
     return serverops.expand_dropins(unit_contents)
+
+
+_TYPE_NOTIFY_RE = re.compile(r"^\s*Type\s*=\s*notify\s*$", re.IGNORECASE | re.MULTILINE)
+_LISTEN_STREAM_RE = re.compile(
+    r"^\s*ListenStream\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def notify_units(unit_files: Mapping[str, str]) -> set[str]:
+    """Service units in the staging tree that declare ``Type=notify``.
+
+    ``systemctl restart`` on a notify unit blocks until the unit sends
+    ``READY=1``; the command fails when that does not happen within its
+    timeout. A notify unit therefore never reaches the ``is-failed`` poll as
+    a "maybe still starting" unit: a hung notify unit has already failed the
+    restart, which routes through the same failure/rollback path. Polling it
+    again would only duplicate that verdict (and report a unit that systemd
+    may not even have marked ``failed`` yet).
+    """
+    return {
+        name
+        for name, content in unit_files.items()
+        if name.endswith(".service") and _TYPE_NOTIFY_RE.search(content)
+    }
+
+
+def socket_paths(
+    unit_files: Mapping[str, str],
+    dropins: Mapping[str, Mapping[str, str]] | None = None,
+) -> dict[str, str]:
+    """Absolute ``ListenStream=`` paths declared by socket units.
+
+    Scans the socket unit files *and* their ``*.socket.d/*.conf`` dropins
+    (``dropins`` is keyed by unit name, the :func:`serverops.expand_dropins`
+    contract). Returns ``{path: socket_unit_name}``. Abstract (``@...``) and
+    relative addresses are ignored: only an absolute filesystem path can be
+    probed with ``test -S``.
+    """
+    paths: dict[str, str] = {}
+
+    def scan(name: str, contents: Iterable[str]) -> None:
+        for content in contents:
+            for match in _LISTEN_STREAM_RE.finditer(content):
+                path = match.group(1)
+                if path.startswith("/"):
+                    paths[path] = name
+
+    for name, content in unit_files.items():
+        if name.endswith(".socket"):
+            scan(name, [content])
+    for unit, files in (dropins or {}).items():
+        if unit.endswith(".socket"):
+            scan(unit, files.values())
+    return paths
+
+
+def _is_notify(unit: str, notify: set[str]) -> bool:
+    """True when *unit* (a concrete instance) is backed by a ``Type=notify``
+    unit file, i.e. ``worker@1.service`` for ``worker@.service``."""
+    if unit in notify:
+        return True
+    if "@" in unit:
+        template = f"{unit.rsplit('@', 1)[0]}@.service"
+        if template in notify:
+            return True
+    return False
 
 
 def merge_server_built(
@@ -204,6 +293,11 @@ class Deploy(BaseCommand):
             resolved_env, secret_aliases, adapter_configured=secret_config is not None
         )
 
+        # The probe is configuration, not server state: validate/render it
+        # once here so a bad placeholder aborts before any SSH connection
+        # (fail-closed) and after activation there is nothing left to render.
+        probe = self._build_health_probe(context)
+
         with connection.connection(host=host, compress=False) as conn:
             self._notice_old_layout(conn)
             serverops.ensure_app_user(conn, config.app_user or config.app_name)
@@ -215,15 +309,50 @@ class Deploy(BaseCommand):
                 # Inside the lock: a concurrent deploy's staging dir is not
                 # ours to delete.
                 transfer.sweep_stale_staging(conn, app_dir)
-                self._deploy(conn, resolved_env, context)
+                self._deploy(conn, resolved_env, context, probe)
             finally:
                 serverops.release_lock(conn, app_dir, lock)
+
+    def _build_health_probe(self, context: Mapping[str, object]) -> HealthProbe | None:
+        """Render the configured ``[health_check]`` probe, or ``None``.
+
+        Unresolved placeholders raise :class:`ImproperlyConfiguredError`
+        naming them; this must happen before any server I/O.
+        """
+        health = self.config.health_check
+        if health is None:
+            return None
+        raw = health.http if health.http is not None else health.command
+        assert raw is not None  # guaranteed by HealthCheckConfig
+        rendered, unresolved = safe_format(raw, **context)
+        if unresolved:
+            raise ImproperlyConfiguredError(
+                "[health_check] references unknown variables:"
+                f" {', '.join(sorted(unresolved))}."
+            )
+        # Per-attempt bound: a hung probe must not eat the whole retry window.
+        budget = min(5, health.timeout)
+        if health.http is not None:
+            command = (
+                f"curl -sf -o /dev/null --max-time {budget} {serverops.q(rendered)}"
+            )
+        else:
+            command = f"timeout {budget} bash -lc {serverops.q(rendered)}"
+        return HealthProbe(
+            command=command, timeout=health.timeout, display=redact(rendered)
+        )
 
     # =======================================================================================
     # Orchestration
     # =======================================================================================
 
-    def _deploy(self, conn, resolved_env: str, context: Mapping[str, object]) -> None:
+    def _deploy(
+        self,
+        conn,
+        resolved_env: str,
+        context: Mapping[str, object],
+        probe: HealthProbe | None,
+    ) -> None:
         config = self.config
         app_dir = config.app_dir
 
@@ -289,7 +418,9 @@ class Deploy(BaseCommand):
                     oneshots,
                     force_full_restart=True,
                 )
-            self._converge(conn, client_manifest)
+                self._converge(conn, client_manifest)
+            else:
+                self._converge(conn, client_manifest)
             self._run_hooks(conn, "post_start", context, release_path=None)
             self._gc(conn, state, self._list_releases(conn))
             log_operation(
@@ -321,6 +452,7 @@ class Deploy(BaseCommand):
                 client_digest,
                 state,
                 context,
+                probe,
             )
         finally:
             for name in (m.MANIFEST_FILENAME, m.ENV_PATH):
@@ -339,6 +471,7 @@ class Deploy(BaseCommand):
         client_digest: str,
         state: store.State | None,
         context: Mapping[str, object],
+        probe: HealthProbe | None,
     ) -> None:
         config = self.config
         app_dir = config.app_dir
@@ -495,7 +628,19 @@ class Deploy(BaseCommand):
                 force_full_restart=self.full_restart or first_deploy,
             )
             self._converge(conn, final_manifest)
-            self._wait_for_units(conn, final_manifest, oneshots)
+            # Readiness tiers (#88): notify units were validated by the
+            # blocking restart above, ordinary units must reach `active` and
+            # socket units must be bound *and* active in the poll, and the
+            # optional [health_check] probe runs last - before post_start
+            # hooks, so a failing app never reaches hook side effects.
+            readiness_units = self._wait_for_units(
+                conn,
+                final_manifest,
+                oneshots,
+                notify=notify_units(unit_files),
+                sockets=socket_paths(unit_files, dropins),
+            )
+            self._run_health_check(conn, readiness_units, probe)
             self._run_hooks(conn, "post_start", context, release_path=release_path)
 
             at = datetime.now(UTC).isoformat()
@@ -631,7 +776,8 @@ class Deploy(BaseCommand):
         """Restart per the diff-based restart set (#79): a changed unit file
         restarts exactly that unit (its instances), env changes restart the
         env-fed service units, code changes restart all app units; sockets and
-        timers restart only when their own file changed; oneshots excluded."""
+        timers restart only when their own file changed; oneshots excluded.
+        """
         if force_full_restart:
             # Full restart covers every app unit incl. sockets/timers (a
             # restarted timer starts; the old installer did the same), but
@@ -729,12 +875,23 @@ class Deploy(BaseCommand):
                 )
             self._handle_failed_units(conn, start)
 
-    def _readiness_units(self, manifest: m.Manifest, oneshots: set[str]) -> list[str]:
+    def _readiness_units(
+        self,
+        manifest: m.Manifest,
+        oneshots: set[str],
+        notify: set[str] | None = None,
+    ) -> list[str]:
         """Runtime service units to health-check, derived from the release
         manifest (same semantics the old installer used): oneshots and
         services that have a socket or timer in the tree are exempt (the
         socket/timer governs their lifecycle); template services poll their
-        ``svc@1..N`` instances."""
+        ``svc@1..N`` instances.
+
+        ``Type=notify`` units are excluded: ``systemctl restart`` already
+        blocked on their ``READY=1``, so a failed/timed-out activation was
+        caught there. See :func:`notify_units`.
+        """
+        notify = notify or set()
         unit_names: set[str] = set()
         for path, entry in manifest.entries.items():
             if entry.kind is not m.EntryKind.UNIT:
@@ -747,6 +904,8 @@ class Deploy(BaseCommand):
             if not name.endswith(".service"):
                 continue
             if name in oneshots:
+                continue
+            if _is_notify(name, notify):
                 continue
             base = name.removesuffix(".service").removesuffix("@")
             if f"{base}.socket" in unit_names or f"{base}.timer" in unit_names:
@@ -766,33 +925,138 @@ class Deploy(BaseCommand):
                 units_to_check.append(name)
         return units_to_check
 
-    def _wait_for_units(self, conn, manifest: m.Manifest, oneshots: set[str]) -> None:
-        """Poll ``systemctl is-failed`` for immediately-running service units
-        until every unit reports a status; any unit reported ``failed``
-        triggers the failure/rollback path immediately."""
-        units_to_check = self._readiness_units(manifest, oneshots)
-        if not units_to_check:
-            return
-        for attempt in range(10):
-            out, ok = conn.run(
-                f"systemctl is-failed {' '.join(serverops.q(u) for u in sorted(units_to_check))}",
-                warn=True,
-                hide=True,
-            )
-            statuses = [line.strip() for line in out.splitlines() if line.strip()]
+    def _wait_for_units(
+        self,
+        conn,
+        manifest: m.Manifest,
+        oneshots: set[str],
+        *,
+        notify: set[str] | None = None,
+        sockets: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        """Wait until the restarted units are actually ready (tier 1 + 2).
+
+        A runtime service unit is ready only once ``systemctl is-failed``
+        reports ``active`` for it; ``activating``, ``inactive`` and empty
+        output all mean "not ready yet" and are retried. A ``failed`` unit
+        fails immediately.
+
+        For socket-activated services (``ListenStream=<abs path>``), readiness
+        requires BOTH the socket file to exist (``test -S``) and the owning
+        socket unit to report ``active``: the service itself only starts on
+        the first connection, so a unit-state poll of the service says nothing
+        about readiness there.
+
+        The window is :data:`READINESS_TIMEOUT` seconds; when it expires the
+        units that never became ready are failed through
+        :meth:`_handle_failed_units`. This poll runs whether or not a
+        ``[health_check]`` probe is configured: it is the explicit fallback.
+        Returns the unit list checked (used for the health-check journal dump).
+        """
+        notify = notify or set()
+        sockets = dict(sockets or {})
+        units_to_check = self._readiness_units(manifest, oneshots, notify)
+        if not units_to_check and not sockets:
+            return []
+        sorted_units = sorted(units_to_check)
+        deadline = time.monotonic() + READINESS_TIMEOUT
+        while True:
+            statuses: list[str] = []
+            if sorted_units:
+                out, _ok = conn.run(
+                    "systemctl is-failed "
+                    f"{' '.join(serverops.q(u) for u in sorted_units)}",
+                    warn=True,
+                    hide=True,
+                )
+                statuses = [line.strip() for line in out.splitlines() if line.strip()]
             failed = [
                 unit
-                for unit, status in zip(sorted(units_to_check), statuses, strict=False)
+                for unit, status in zip(sorted_units, statuses, strict=False)
                 if status == "failed"
             ]
             if failed:
                 self._handle_failed_units(conn, failed)
+                return units_to_check
+            not_ready = [
+                unit
+                for unit, status in zip(sorted_units, statuses, strict=False)
+                if status != "active"
+            ]
+            # A socket file legitimately appears only once the socket unit is
+            # active; the unit check below also covers socket units that are
+            # activating but not yet bound.
+            unready_sockets: list[str] = []
+            for path, unit in sockets.items():
+                _, exists = conn.run(
+                    f"test -S {serverops.q(path)}", warn=True, hide=True
+                )
+                socket_active = exists and (
+                    conn.run(
+                        f"systemctl is-active {serverops.q(unit)}",
+                        warn=True,
+                        hide=True,
+                    )[0].strip()
+                    == "active"
+                )
+                if not socket_active and unit not in unready_sockets:
+                    unready_sockets.append(unit)
+            if not not_ready and not unready_sockets:
+                return units_to_check
+            if time.monotonic() >= deadline:
+                # Report every unit that never reached active, services and
+                # socket units alike.
+                self._handle_failed_units(conn, [*not_ready, *unready_sockets])
+                return units_to_check
+            time.sleep(READINESS_INTERVAL)
+
+    def _run_health_check(
+        self,
+        conn,
+        readiness_units: list[str],
+        probe: HealthProbe | None,
+    ) -> None:
+        """Run the optional ``[health_check]`` probe (tier 3, #88).
+
+        The probe is already rendered (before any server I/O) and runs after
+        the readiness poll, before ``post_start`` hooks. It is retried once
+        per :data:`HEALTH_CHECK_INTERVAL` for ``timeout`` seconds; a probe that
+        never succeeds is a failed deploy: the readiness units' journal is
+        surfaced (via :meth:`_handle_failed_units`) and the existing
+        auto-rollback contract applies.
+        """
+        if probe is None:
+            return
+        self.output.info(
+            f"Running health check (up to {probe.timeout}s): {probe.display}"
+        )
+        deadline = time.monotonic() + probe.timeout
+        last_output = ""
+        while True:
+            ok, last_output = serverops.run_health_probe(conn, probe.command)
+            if ok:
+                self.output.info("Health check passed.")
                 return
-            if len(statuses) >= len(units_to_check):
-                return
-            if attempt < 9:
-                time.sleep(0.3)
-        self._handle_failed_units(conn, sorted(units_to_check))
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(HEALTH_CHECK_INTERVAL)
+
+        self.output.error("Health check failed.")
+        if last_output:
+            self.output.error(redact(last_output))
+        if readiness_units:
+            # _handle_failed_units dumps each unit's journal (-n 50) and then
+            # rolls back; nothing extra to dump here.
+            self._handle_failed_units(conn, readiness_units)
+            return
+        # No runtime service unit to attribute the failure to (socket-activated
+        # or notify-only app): surface the server's recent journal instead.
+        log_out, _ = conn.run(
+            "journalctl -n 50 --no-pager || true", warn=True, hide=True
+        )
+        if log_out:
+            self.output.output(log_out)
+        self._handle_failed_units(conn, [])
 
     # =======================================================================================
     # Failure handling / auto rollback
@@ -803,7 +1067,7 @@ class Deploy(BaseCommand):
         for unit in failed:
             self.output.error(f"{unit} failed to start")
             log_out, _ = conn.run(
-                f"journalctl -u {serverops.q(unit)} -n 30 --no-pager || true",
+                f"journalctl -u {serverops.q(unit)} -n 50 --no-pager || true",
                 warn=True,
                 hide=True,
             )

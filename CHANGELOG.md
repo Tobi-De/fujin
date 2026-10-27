@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- *(deploy)* Converge replica instances in both directions (#89)
 - *(config)* Project env template with host-scoped overlays (#84)
 - *(secrets)* $$ escape for literal $ in env values (#85)
 - *(deploy)* Content-addressed release tree with manifest store and build cache (#94)

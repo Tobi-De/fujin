@@ -10,6 +10,7 @@ from dotenv import dotenv_values
 
 from fujin.config import (
     Config,
+    HealthCheckConfig,
     InstallationMode,
     merge_env_templates,
     read_version_from_pyproject,
@@ -422,3 +423,75 @@ def test_override_value_containing_equals():
     assert merged == "URL=a=b\nB=2"
     with StringIO(merged) as buffer:
         assert dotenv_values(stream=buffer)["URL"] == "a=b"
+
+
+# ============================================================================
+# Health check configuration (#88)
+# ============================================================================
+
+
+def test_health_check_http_parsed(minimal_config_dict):
+    minimal_config_dict["health_check"] = {"http": "http://127.0.0.1:8000/health"}
+
+    config = msgspec.convert(minimal_config_dict, type=Config)
+
+    assert isinstance(config.health_check, HealthCheckConfig)
+    assert config.health_check.http == "http://127.0.0.1:8000/health"
+    assert config.health_check.command is None
+    assert config.health_check.timeout == 30
+
+
+def test_health_check_command_parsed(minimal_config_dict):
+    minimal_config_dict["health_check"] = {
+        "command": "test -f /opt/fujin/testapp/current/.env",
+        "timeout": 10,
+    }
+
+    config = msgspec.convert(minimal_config_dict, type=Config)
+
+    assert config.health_check.command.startswith("test -f")
+    assert config.health_check.http is None
+    assert config.health_check.timeout == 10
+
+
+def test_health_check_absent_is_none(minimal_config_dict):
+    config = msgspec.convert(minimal_config_dict, type=Config)
+
+    assert config.health_check is None
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        {},
+        {"timeout": 5},
+        {"http": "http://127.0.0.1:8000/health", "command": "true"},
+    ],
+)
+def test_health_check_requires_exactly_one_probe(minimal_config_dict, table):
+    minimal_config_dict["health_check"] = table
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(minimal_config_dict, type=Config)
+
+    assert "exactly one" in exc_info.value.message
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_health_check_timeout_must_be_positive(minimal_config_dict, timeout):
+    minimal_config_dict["health_check"] = {
+        "command": "true",
+        "timeout": timeout,
+    }
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(minimal_config_dict, type=Config)
+
+    assert "at least 1" in exc_info.value.message
+
+
+def test_health_check_forbids_unknown_keys(minimal_config_dict):
+    minimal_config_dict["health_check"] = {"http": "http://x/health", "retries": 3}
+
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.convert(minimal_config_dict, type=Config)

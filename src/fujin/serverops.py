@@ -943,3 +943,19 @@ def stop_and_disable(conn: Any, units: Sequence[str]) -> bool:
     if ok:
         conn.run(f"sudo systemctl reset-failed {q(*units)}", warn=True, hide=True)
     return ok
+
+
+# =============================================================================
+# Post-start health probe
+# =============================================================================
+
+
+def run_health_probe(conn: Any, probe: str) -> tuple[bool, str]:
+    """Run *probe* once and return ``(ok, output)``.
+
+    No retry policy here: the deploy command owns the polling window. Never
+    raises. No sudo: the probe runs as the deploy user against the app's own
+    listener.
+    """
+    out, ok = conn.run(probe, warn=True, hide=True)
+    return ok, (out.strip() if out else "")

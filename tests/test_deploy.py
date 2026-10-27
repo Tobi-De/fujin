@@ -23,7 +23,8 @@ import fujin.serverops
 import fujin.transfer
 from fujin.build import BuildResult
 from fujin.commands.deploy import Deploy
-from fujin.errors import DeploymentError
+from fujin.config import HealthCheckConfig
+from fujin.errors import DeploymentError, ImproperlyConfiguredError
 import fujin.redaction
 from fujin.manifest import InputFile, build_manifest, manifest_to_dict
 from fujin.store import State
@@ -284,6 +285,7 @@ def setup_deploy(
 
     spies = {
         "conn": conn,
+        "conn_ctx": conn_ctx,
         "events": events,
         "staging_dir": staging,
         "rsync": fujin.transfer.rsync_to_staging,
@@ -1409,3 +1411,390 @@ def test_build_failure_as_cappa_exit_preserves_code_and_redacts(
     assert SENTINEL not in str(excinfo.value.message)
     assert "<$STRIPE_TOKEN>" in str(excinfo.value.message)
     spies["rsync"].assert_not_called()
+
+
+# ===========================================================================
+# Deploy-time readiness tiers (#88)
+# ===========================================================================
+
+SOCKET_FILES = {
+    "systemd/testapp-web.socket": ("[Socket]\nListenStream=/run/testapp/web.sock\n"),
+    "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
+}
+
+SOCKET_DROPIN_FILES = {
+    "systemd/testapp-web.socket": "[Socket]\n",
+    "systemd/testapp-web.socket.d/listen.conf": (
+        "[Socket]\nListenStream=/run/testapp/dropin.sock\n"
+    ),
+    "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
+}
+
+NOTIFY_FILES = {
+    "systemd/testapp-web.service": ("[Service]\nType=notify\nExecStart=/bin/true\n"),
+    "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
+}
+
+
+class _FakeClock:
+    """Deterministic ``time`` replacement so poll loops never really sleep."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def _probe_calls(conn, prefix):
+    return [c for c, _ in conn.calls if c.startswith(prefix)]
+
+
+def test_notify_service_excluded_from_is_failed_poll(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Type=notify units were validated by the blocking restart; polling them
+    again with is-failed would only duplicate that verdict."""
+    minimal_config.replicas = {}
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, files=NOTIFY_FILES)
+    assert invoke(cmd) == 0
+
+    assert not any("is-failed" in c for c, _ in spies["conn"].calls)
+
+
+def test_notify_unit_restart_timeout_still_fails_and_rolls_back(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Acceptance: a notify unit that never sends READY=1 makes the blocking
+    `systemctl restart` fail; that already routes to rollback."""
+    minimal_config.replicas = {}
+    state = State(current="prev", previous=[])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=NOTIFY_FILES,
+        state=state,
+        prev_manifest=manifest_for(dist="dist-old", files=NOTIFY_FILES),
+    )
+    spies["conn"].append_response(
+        "/opt/fujin/testapp/releases/prev/manifest.json",
+        manifest_json(dist="dist-old", files=NOTIFY_FILES),
+    )
+    # Regression guard: the dist hash differs from the previous release, so
+    # the notify unit must actually be restarted (a no restart set would let
+    # this test pass without ever exercising the blocking restart).
+    spies["conn"].append_response("systemctl reload-or-restart", "", False)
+
+    assert invoke(cmd) == 3
+
+    restarts = _probe_calls(spies["conn"], "sudo systemctl reload-or-restart")
+    assert restarts and "testapp-web.service" in restarts[0]
+
+    swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
+    assert "prev" in swap_digests
+    assert spies["write_states"][0].deploys[-1].result == "rollback"
+
+
+def test_health_check_http_probe_runs(monkeypatch, minimal_config, tmp_path):
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
+    )
+    minimal_config.health_check = HealthCheckConfig(http="http://127.0.0.1:8000/health")
+
+    assert invoke(cmd) == 0
+
+    assert _probe_calls(spies["conn"], "curl") == [
+        "curl -sf -o /dev/null --max-time 5 http://127.0.0.1:8000/health"
+    ]
+
+
+def test_health_check_per_attempt_timeout_is_capped_by_config(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
+    )
+    minimal_config.health_check = HealthCheckConfig(
+        http="http://127.0.0.1:8000/health", timeout=2
+    )
+
+    assert invoke(cmd) == 0
+
+    assert _probe_calls(spies["conn"], "curl") == [
+        "curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8000/health"
+    ]
+
+
+def test_health_check_http_failure_rolls_back(monkeypatch, minimal_config, tmp_path):
+    """Acceptance: a 500-ing app fails the probe -> journal dump -> rollback."""
+    state = State(current="prev", previous=[])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        prev_manifest=manifest_for(),
+    )
+    spies["conn"].append_response(
+        "/opt/fujin/testapp/releases/prev/manifest.json",
+        manifest_json(version="0.9.0"),
+    )
+    minimal_config.health_check = HealthCheckConfig(
+        http="http://127.0.0.1:8000/health", timeout=2
+    )
+    spies["conn"].append_response("curl -sf", "curl: (22) 500", False)
+    clock = _FakeClock()
+    monkeypatch.setattr(deploy_mod, "time", clock)
+
+    assert invoke(cmd) == 3
+
+    # Retried across the configured window (behaviour, not an exact pin).
+    assert len(_probe_calls(spies["conn"], "curl -sf")) >= 2
+    assert clock.now >= 2
+    assert any(
+        "journalctl" in c and "testapp-web.service" in c and "-n 50" in c
+        for c, _ in spies["conn"].calls
+    )
+    swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
+    assert "prev" in swap_digests
+    assert spies["write_states"][0].deploys[-1].result == "rollback"
+
+
+def test_health_check_command_probe_is_bounded_and_shell_quoted(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
+    )
+    minimal_config.health_check = HealthCheckConfig(
+        command="test -f /opt/fujin/{app_name}/current/.env"
+    )
+
+    assert invoke(cmd) == 0
+
+    assert _probe_calls(spies["conn"], "timeout 5 bash -lc ") == [
+        "timeout 5 bash -lc 'test -f /opt/fujin/testapp/current/.env'"
+    ]
+
+
+def test_health_check_unresolved_placeholder_aborts_before_ssh(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Configuration errors are caught before the first SSH connection: no
+    server I/O, no build, no lock."""
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
+    )
+    minimal_config.health_check = HealthCheckConfig(
+        http="http://{nonexistent_variable}/health"
+    )
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        cmd()
+
+    assert "nonexistent_variable" in exc_info.value.message
+    # Not even the SSH connection is opened: validation precedes server I/O.
+    spies["conn_ctx"].assert_not_called()
+    assert spies["conn"].calls == []
+
+
+def test_health_check_failure_without_readiness_units_dumps_generic_journal(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Notify-only (or socket-activated) apps have no runtime service unit to
+    attribute a probe failure to: dump the recent journal instead."""
+    minimal_config.replicas = {}
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, files=NOTIFY_FILES)
+    minimal_config.health_check = HealthCheckConfig(
+        http="http://127.0.0.1:8000/health", timeout=1
+    )
+    spies["conn"].append_response("curl -sf", "connection refused", False)
+    monkeypatch.setattr(deploy_mod, "time", _FakeClock())
+
+    assert invoke(cmd) == 3
+
+    assert any(
+        c == "journalctl -n 50 --no-pager || true" for c, _ in spies["conn"].calls
+    )
+    assert not any(c.startswith("journalctl -u ") for c, _ in spies["conn"].calls)
+
+
+def test_socket_readiness_retries_until_file_appears(
+    monkeypatch, minimal_config, tmp_path
+):
+    minimal_config.replicas = {}
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, files=SOCKET_FILES)
+    conn = spies["conn"]
+    conn.append_response("systemctl is-active", "active\n")
+    original_run = conn.run
+    attempts = {"n": 0}
+
+    def flaky_run(command, **kwargs):
+        if command.startswith("test -S "):
+            attempts["n"] += 1
+            conn.calls.append((command, kwargs))
+            return "", attempts["n"] > 1
+        return original_run(command, **kwargs)
+
+    conn.run = flaky_run
+    monkeypatch.setattr(deploy_mod, "time", _FakeClock())
+
+    assert invoke(cmd) == 0
+
+    # the missing socket is retried within the poll loop, not failed at once
+    assert attempts["n"] >= 2
+    assert any(c == "test -S /run/testapp/web.sock" for c, _ in conn.calls)
+
+
+def test_missing_socket_file_retries_then_fails_readiness(
+    monkeypatch, minimal_config, tmp_path
+):
+    minimal_config.replicas = {}
+    state = State(current="prev", previous=[])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=SOCKET_FILES,
+        state=state,
+        prev_manifest=manifest_for(dist="dist-old", files=SOCKET_FILES),
+    )
+    spies["conn"].append_response(
+        "/opt/fujin/testapp/releases/prev/manifest.json",
+        manifest_json(dist="dist-old", files=SOCKET_FILES),
+    )
+    spies["conn"].append_response("test -S", "", False)
+    spies["conn"].append_response("systemctl is-active", "active\n")
+    clock = _FakeClock()
+    monkeypatch.setattr(deploy_mod, "time", clock)
+
+    assert invoke(cmd) == 3
+
+    checks = _probe_calls(spies["conn"], "test -S ")
+    assert len(checks) >= 2
+    # Exactly the command `serverops.q` renders for the ListenStream path.
+    assert checks[0] == f"test -S {fujin.serverops.q('/run/testapp/web.sock')}"
+    assert clock.now >= deploy_mod.READINESS_TIMEOUT
+    assert any(
+        "journalctl" in c and "testapp-web.socket" in c for c, _ in spies["conn"].calls
+    )
+    swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
+    assert "prev" in swap_digests
+    assert spies["write_states"][0].deploys[-1].result == "rollback"
+
+
+def test_socket_file_alone_is_not_ready_without_active_socket_unit(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Readiness = bound *and* connectable: an existing socket file whose
+    owning socket unit is still activating is not ready."""
+    minimal_config.replicas = {}
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, files=SOCKET_FILES)
+    spies["conn"].append_response("test -S", "", True)
+    spies["conn"].append_response("systemctl is-active", "activating\n", False)
+    clock = _FakeClock()
+    monkeypatch.setattr(deploy_mod, "time", clock)
+
+    assert invoke(cmd) == 3
+
+    active_calls = _probe_calls(spies["conn"], "systemctl is-active ")
+    assert active_calls
+    assert active_calls[0] == (
+        f"systemctl is-active {fujin.serverops.q('testapp-web.socket')}"
+    )
+    assert clock.now >= deploy_mod.READINESS_TIMEOUT
+    assert any(
+        "journalctl" in c and "testapp-web.socket" in c for c, _ in spies["conn"].calls
+    )
+
+
+def test_socket_dropin_listen_stream_is_discovered(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A ``ListenStream=`` in ``*.socket.d/*.conf`` counts like one in the
+    socket unit itself."""
+    minimal_config.replicas = {}
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, files=SOCKET_DROPIN_FILES
+    )
+    spies["conn"].append_response("test -S /run/testapp/dropin.sock", "", True)
+    spies["conn"].append_response("systemctl is-active", "active\n")
+
+    assert invoke(cmd) == 0
+
+    assert any(c == "test -S /run/testapp/dropin.sock" for c, _ in spies["conn"].calls)
+
+
+def test_readiness_waits_through_activating_then_active(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A unit that reports ``activating`` is retried, not failed; once it is
+    ``active`` the deploy passes."""
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=State())
+    conn = spies["conn"]
+    original_run = conn.run
+    attempts = {"n": 0}
+
+    def staged_run(command, **kwargs):
+        if command.startswith("systemctl is-failed"):
+            attempts["n"] += 1
+            conn.calls.append((command, kwargs))
+            status = "activating" if attempts["n"] == 1 else "active"
+            return f"{status}\n{status}\n{status}\n", True
+        return original_run(command, **kwargs)
+
+    conn.run = staged_run
+    clock = _FakeClock()
+    monkeypatch.setattr(deploy_mod, "time", clock)
+
+    assert invoke(cmd) == 0
+
+    assert attempts["n"] >= 2
+    assert clock.now >= deploy_mod.READINESS_INTERVAL
+
+
+def test_unit_stuck_activating_fails_after_fallback_window(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Acceptance: a unit that never leaves ``activating`` fails the deploy
+    once the explicit fallback window expires."""
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=State())
+    conn = spies["conn"]
+    original_run = conn.run
+    attempts = {"n": 0}
+
+    def stuck_run(command, **kwargs):
+        if command.startswith("systemctl is-failed"):
+            attempts["n"] += 1
+            conn.calls.append((command, kwargs))
+            return "activating\nactivating\nactivating\n", True
+        return original_run(command, **kwargs)
+
+    conn.run = stuck_run
+    clock = _FakeClock()
+    monkeypatch.setattr(deploy_mod, "time", clock)
+
+    assert invoke(cmd) == 3
+
+    assert attempts["n"] >= 2
+    assert clock.now >= deploy_mod.READINESS_TIMEOUT
+    assert any("journalctl" in c and "testapp-web.service" in c for c, _ in conn.calls)
+
+
+def test_noop_full_restart_does_not_probe(monkeypatch, minimal_config, tmp_path):
+    """A no-op deploy transfers nothing, so there is nothing new to probe."""
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=state)
+    cmd.full_restart = True
+    minimal_config.health_check = HealthCheckConfig(http="http://127.0.0.1:8000/health")
+
+    assert invoke(cmd) == 0
+
+    assert _probe_calls(spies["conn"], "curl") == []
+    operations = [k.get("operation") or a[2] for a, k in spies["log_calls"]]
+    assert "noop" in operations

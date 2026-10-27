@@ -342,6 +342,46 @@ Complete Example
         "python manage.py clearsessions",
     ]
 
+Deploy-time readiness
+---------------------
+
+After activating a release, ``fujin deploy`` confirms that the new release is actually serving before ``post_start`` hooks run and the release is recorded. Readiness has three tiers:
+
+1. **Notify services** (``Type=notify``) are validated by ``systemctl restart`` itself: the command blocks until the service sends ``READY=1`` and fails when it does not, which already triggers the failure/rollback path. Notify units are therefore not polled again.
+2. **Unit state and socket activation** use an explicit fallback window of **30 seconds**, polled every 0.5 seconds, whether or not a health-check probe is configured. A runtime service unit is ready only once ``systemctl is-failed`` reports ``active`` for it; ``activating``, ``inactive`` and missing status are retried, a ``failed`` unit fails the deploy immediately. For socket activation, every ``ListenStream=/absolute/path`` (declared in the ``.socket`` unit or in a ``*.socket.d/*.conf`` dropin) must both exist (``test -S``) and belong to a socket unit that reports ``active`` — bound *and* connectable. The service itself only starts on the first connection, so its own unit state says nothing about readiness. Units still not ``active`` when the window expires are failed.
+3. **Health check probe** (optional): the ``[health_check]`` probe described below.
+
+Any readiness failure dumps the affected units' journal and triggers the automatic rollback contract (or exits 3 with ``--no-rollback``).
+
+.. _health-check:
+
+health_check
+------------
+
+**(Optional)** A post-start probe that runs after the restart/readiness poll and **before** ``post_start`` hooks. Use it when systemd "active" is not enough (e.g. the app answers HTTP 500, or migrations were not applied).
+
+.. code-block:: toml
+    :caption: fujin.toml
+
+    [health_check]
+    http = "http://127.0.0.1:8000/healthz"
+    timeout = 30
+
+Exactly one probe kind is allowed:
+
+``http``
+    URL checked with ``curl -sf -o /dev/null``. Each attempt is bounded by ``--max-time min(5, timeout)`` seconds, so a hung request cannot consume the whole retry window. Any non-2xx/3xx response (or a connection failure) fails the attempt.
+
+``command``
+    Shell command run with ``bash -lc``, bounded per attempt by ``timeout min(5, timeout)``; exit status 0 is success.
+
+``timeout``
+    Seconds to keep retrying (the probe is retried once per second). Defaults to ``30`` and must be at least ``1``.
+
+Both values support the standard template context used for unit files (``{app_name}``, ``{app_user}``, ``{app_dir}``, ``{version}``, ``{install_dir}``, ``{user}`` and the discovered unit-name variables). An unresolved placeholder is a configuration error: the deploy aborts before any server connection is opened.
+
+A probe that never succeeds fails the deploy: the last probe output is printed (secrets redacted), the readiness units' journal is dumped (or, for apps with no polled runtime unit, the recent journal), and the normal automatic rollback applies (``--no-rollback`` disables the rollback and exits with code 3). A no-op deploy (including ``--full-restart`` without changes) transfers nothing and therefore does not run the probe.
+
 Host Configuration
 -------------------
 

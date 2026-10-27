@@ -51,6 +51,29 @@ class HooksConfig(msgspec.Struct, forbid_unknown_fields=True):
     post_start: list[str] = msgspec.field(default_factory=list)
 
 
+class HealthCheckConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Post-start readiness probe (``[health_check]`` table).
+
+    Exactly one probe kind is allowed: an HTTP URL (checked with ``curl -sf``,
+    any non-2xx/3xx is a failure) or a shell command (exit 0 is success).
+    Both support the deploy template placeholders.
+    """
+
+    http: str | None = None
+    command: str | None = None
+    timeout: int = 30
+
+    def __post_init__(self):
+        if (self.http is None) == (self.command is None):
+            raise ImproperlyConfiguredError(
+                "[health_check] requires exactly one of 'http' or 'command'."
+            )
+        if self.timeout < 1:
+            raise ImproperlyConfiguredError(
+                "[health_check] 'timeout' must be at least 1 second."
+            )
+
+
 class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True):
     app_name: str = msgspec.field(name="app")
     app_user: str | None = None  # User to run the app as (defaults to app_name)
@@ -84,6 +107,11 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
 
     hooks_config: HooksConfig | None = msgspec.field(
         name="hooks",
+        default=None,
+    )
+
+    health_check: HealthCheckConfig | None = msgspec.field(
+        name="health_check",
         default=None,
     )
 
