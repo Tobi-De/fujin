@@ -14,8 +14,9 @@ class Showenv(BaseCommand):
     def __call__(self):
         host = self.selected_host
         secret_config = self.config.effective_secrets(host)
+        env_template = self.config.effective_env(host)
         if secret_config:
-            parsed_env = resolve_secrets(host.env_content, secret_config)
+            parsed_env = resolve_secrets(env_template, secret_config)
         else:
-            parsed_env = render_template(host.env_content)
+            parsed_env = render_template(env_template)
         self.output.output(parsed_env)

@@ -33,6 +33,7 @@ from fujin.manifest import (
     sha256_hex,
 )
 from fujin.config import Config, HostConfig, InstallationMode, SecretConfig
+from fujin.secrets import resolve_secrets
 
 
 # =============================================================================================
@@ -58,7 +59,7 @@ def make_manifest(
     )
 
 
-def make_config(env_content: str = "") -> Config:
+def make_config(env_content: str = "", project_env: str = "") -> Config:
     return Config(
         app_name="testapp",
         version="1.0.0",
@@ -66,6 +67,7 @@ def make_config(env_content: str = "") -> Config:
         installation_mode=InstallationMode.PY_PACKAGE,
         python_version="3.11",
         distfile="dist/testapp-{version}-py3-none-any.whl",
+        env_content=project_env,
         hosts=[
             HostConfig(
                 name="primary",
@@ -517,6 +519,58 @@ class TestConfigFingerprint:
         fp1 = config_fingerprint(config)
         config.hosts[0].env_content = "A=1\nNEW_KEY=2"
         assert config_fingerprint(config) != fp1
+
+    def test_host_overlay_value_rotation_keeps_fingerprint(self):
+        """Values (secret carriers) never enter the config fingerprint."""
+        config = make_config(project_env="A=1", env_content="A=2")
+        fp1 = config_fingerprint(config)
+        config.hosts[0].env_content = "A=rotated"
+        assert config_fingerprint(config) == fp1
+
+    def test_secret_rotation_changes_release_digest_only(self, monkeypatch):
+        """Real pipeline: rotating the secret moves the .env digest, never the
+        config fingerprint or the build cache key."""
+        monkeypatch.setenv("TOKEN_REF", "first-secret")
+        config = make_config(
+            project_env="TOKEN=$TOKEN_REF\nBASE=1",
+            env_content="BASE=host\nEXTRA=2",
+        )
+        config.hosts[0].secrets = SecretConfig(adapter="system")
+        host = config.hosts[0]
+
+        fp1 = config_fingerprint(config)
+        bundle1 = bundle_key(config, unit_sources={"web.service": "[Unit]"})
+        env_before = resolve_secrets(
+            config.effective_env(host), config.effective_secrets(host)
+        )
+        before = make_manifest(files={".env": env_before}, config_fingerprint_=fp1)
+
+        monkeypatch.setenv("TOKEN_REF", "rotated-secret")
+        env_after = resolve_secrets(
+            config.effective_env(host), config.effective_secrets(host)
+        )
+        after = make_manifest(
+            files={".env": env_after},
+            config_fingerprint_=config_fingerprint(config),
+        )
+
+        assert "first-secret" in env_before
+        assert "first-secret" not in env_after
+        assert release_digest(before) != release_digest(after)
+        assert config_fingerprint(config) == fp1
+        assert bundle_key(config, unit_sources={"web.service": "[Unit]"}) == bundle1
+
+    def test_host_only_overlay_key_flips_fingerprint(self):
+        config = make_config(project_env="A=1")
+        fp1 = config_fingerprint(config)
+        config.hosts[0].env_content = "B=2"
+        assert config_fingerprint(config) != fp1
+
+    def test_deterministic_with_project_env(self):
+        def build():
+            return make_config(project_env="A=1\nB=2", env_content="B=3")
+
+        assert config_fingerprint(build()) == config_fingerprint(build())
 
     def test_fingerprint_is_sha256_of_canonical_json(self):
         config = make_config()

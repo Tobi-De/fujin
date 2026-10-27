@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+from io import StringIO
+
 import msgspec
 import pytest
+from dotenv import dotenv_values
 
 from fujin.config import (
     Config,
     InstallationMode,
+    merge_env_templates,
     read_version_from_pyproject,
 )
 from fujin.errors import ImproperlyConfiguredError
+from fujin.secrets import render_template
 
 # Fixtures are imported from conftest.py
 
@@ -271,3 +276,149 @@ def test_config_app_bin_for_binary(minimal_config_dict):
 
     config = msgspec.convert(minimal_config_dict, type=Config)
     assert config.app_bin == "current/bin/testapp"
+
+
+# ============================================================================
+# App-level env template + host overlay (#84)
+# ============================================================================
+
+
+def test_project_env_merges_host_overlay_in_place(minimal_config_dict):
+    minimal_config_dict["env"] = "A=1\nB=2"
+    minimal_config_dict["hosts"][0]["env"] = "B=3\nC=4"
+
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    assert config.effective_env(config.hosts[0]) == "A=1\nB=3\nC=4"
+
+
+def test_host_overlay_replaces_last_project_declaration():
+    """dotenv is last-wins, so the LAST project line for a key is replaced."""
+    assert merge_env_templates("A=1\nA=2\nB=9", "A=3") == "A=1\nA=3\nB=9"
+
+
+def test_merge_without_project_env_is_host_env():
+    host_env = "# host only\nA=1\nB=$REF\n"
+    assert merge_env_templates("", host_env) == "# host only\nA=1\nB=$REF"
+    assert merge_env_templates("  ", host_env) == "# host only\nA=1\nB=$REF"
+
+
+def test_merge_without_host_env_is_project_env():
+    project = "# project\nA=1\nB=$$LITERAL"
+    assert merge_env_templates(project, "") == project
+    assert merge_env_templates(project, "   \n") == project
+
+
+def test_merge_ignores_host_comments_and_blanks():
+    merged = merge_env_templates("A=1", "# a comment\n\nB=2\n# trailing")
+    assert merged == "A=1\nB=2"
+
+
+def test_merge_preserves_template_text_verbatim():
+    """$REF, $$ escapes and {placeholders} survive the merge untouched."""
+    project = "TOKEN=$SECRET\nESCAPED=$$NOT_A_REF\nURL={app_name}.example"
+    merged = merge_env_templates(project, "EXTRA=$OTHER_REF")
+    assert merged == f"{project}\nEXTRA=$OTHER_REF"
+
+
+def test_config_env_and_envfile_are_mutually_exclusive(minimal_config_dict, tmp_path):
+    envfile = tmp_path / ".env.base"
+    envfile.write_text("A=1\n")
+    minimal_config_dict["env"] = "A=1"
+    minimal_config_dict["envfile"] = str(envfile)
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(minimal_config_dict, type=Config)
+    assert "both 'env' and 'envfile'" in exc_info.value.message
+
+
+def test_config_reads_env_from_envfile(minimal_config_dict, tmp_path):
+    envfile = tmp_path / ".env.base"
+    envfile.write_text("  A=1\nB=2  \n")
+    minimal_config_dict["envfile"] = str(envfile)
+
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    assert config.env_content == "A=1\nB=2"
+
+
+def test_config_envfile_missing_errors(minimal_config_dict, tmp_path):
+    minimal_config_dict["envfile"] = str(tmp_path / "nope.env")
+
+    with pytest.raises(ImproperlyConfiguredError) as exc_info:
+        msgspec.convert(minimal_config_dict, type=Config)
+    assert "not found" in exc_info.value.message
+
+
+def test_host_only_secret_ref_resolves_through_adapter(
+    minimal_config_dict, monkeypatch
+):
+    """A $REF declared only in the host overlay reaches the secrets pipeline."""
+    from fujin.secrets import resolve_secrets
+
+    minimal_config_dict["env"] = "A=1"
+    minimal_config_dict["hosts"][0]["env"] = "HOST_SECRET=$HOST_SECRET_ENV"
+    config = msgspec.convert(minimal_config_dict, type=Config)
+    monkeypatch.setenv("HOST_SECRET_ENV", "resolved-value")
+
+    rendered = resolve_secrets(
+        config.effective_env(config.hosts[0]), config.secret_config
+    )
+
+    assert "HOST_SECRET=resolved-value" in rendered
+    assert "A=1" in rendered
+
+
+# ============================================================================
+# Block-based, quote-aware env merge (#84)
+# ============================================================================
+
+
+def test_host_multiline_quoted_value_survives_merge():
+    host = 'CERT="line1\nline2"'
+    merged = merge_env_templates("B=2", host)
+
+    assert merged == 'B=2\nCERT="line1\nline2"'
+    with StringIO(merged) as buffer:
+        assert dotenv_values(stream=buffer) == {"B": "2", "CERT": "line1\nline2"}
+
+
+def test_project_multiline_value_not_corrupted_by_other_key_override():
+    project = 'CERT="a\nb=1\nc"\nPORT=8000'
+    merged = merge_env_templates(project, "PORT=9000")
+
+    assert merged == 'CERT="a\nb=1\nc"\nPORT=9000'
+    assert "b=1" in merged  # the quoted continuation is still inside CERT
+
+
+def test_project_multiline_value_override_drops_orphan_continuation():
+    project = 'CERT="a\nb"\nPORT=8000'
+    merged = merge_env_templates(project, 'CERT="new"')
+
+    assert merged == 'CERT="new"\nPORT=8000'
+    assert "a\nb" not in merged
+
+
+def test_export_with_tab_overrides_project_key():
+    merged = merge_env_templates("A=1\nB=2", "export\tA=9")
+
+    assert merged == "export\tA=9\nB=2"
+
+
+def test_bare_key_host_line_is_kept_and_rendered_as_empty():
+    merged = merge_env_templates("A=1", "EMPTY")
+
+    assert merged == "A=1\nEMPTY"
+    assert render_template(merged) == "A=1\nEMPTY="
+
+
+def test_empty_value_override():
+    merged = merge_env_templates("KEY=old\nB=2", "KEY=")
+
+    assert merged == "KEY=\nB=2"
+
+
+def test_override_value_containing_equals():
+    merged = merge_env_templates("URL=http://old\nB=2", "URL=a=b")
+
+    assert merged == "URL=a=b\nB=2"
+    with StringIO(merged) as buffer:
+        assert dotenv_values(stream=buffer)["URL"] == "a=b"

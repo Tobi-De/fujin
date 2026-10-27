@@ -68,6 +68,11 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
     )  # Service name -> replica count (for template units)
     requirements: str | None = None
 
+    # Project-wide env template (raw dotenv text). Host ``env``/``envfile``
+    # values overlay it key-by-key; see :func:`merge_env_templates`.
+    _env_file: str | None = msgspec.field(name="envfile", default=None)
+    env_content: str = msgspec.field(name="env", default="")
+
     local_config_dir: Path = Path(".fujin")
     apps_dir: str = "/opt/fujin"
     caddy_config_dir: str = "/etc/caddy/conf.d"
@@ -85,6 +90,17 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
     def __post_init__(self):
         if not self.app_user:
             self.app_user = self.app_name
+
+        if self._env_file and self.env_content:
+            raise ImproperlyConfiguredError(
+                "Cannot set both 'env' and 'envfile' properties."
+            )
+        if self._env_file:
+            envfile = Path(self._env_file)
+            if not envfile.exists():
+                raise ImproperlyConfiguredError(f"{self._env_file} not found")
+            self.env_content = envfile.read_text()
+        self.env_content = self.env_content.strip()
 
         if not self.hosts or len(self.hosts) == 0:
             raise ImproperlyConfiguredError(
@@ -131,6 +147,10 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
     def effective_secrets(self, host: HostConfig) -> SecretConfig | None:
         """Secret config for *this* host: host override (#75) or the global."""
         return host.secrets or self.secret_config
+
+    def effective_env(self, host: HostConfig) -> str:
+        """Env template for *this* host: host overlay over the project template."""
+        return merge_env_templates(self.env_content, host.env_content)
 
     @property
     def app_bin(self) -> str:
@@ -222,6 +242,137 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
         for du in self.deployed_units:
             units.extend(du.all_runtime_units())
         return units
+
+
+_ENV_EXPORT_RE = re.compile(r"^\s*export\s+")
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _env_template_key(line: str) -> str | None:
+    """Variable name declared by the first line of an env-template block.
+
+    An optional ``export`` prefix (followed by any whitespace) is stripped,
+    then the text before the first ``=`` is the key. A bare line with no
+    ``=`` is a valueless key (python-dotenv renders it as ``KEY=``), not a
+    comment. Comment and blank lines declare nothing. Values are never
+    inspected: the template is raw text until the secrets pipeline renders
+    it.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    stripped = _ENV_EXPORT_RE.sub("", stripped)
+    key = stripped.split("=", 1)[0].strip()
+    if not _ENV_KEY_RE.match(key):
+        return None
+    return key
+
+
+def _scan_quote_state(line: str, quote: str | None) -> str | None:
+    """Advance the dotenv quote state across one physical line.
+
+    ``quote`` is the currently open quote character (``None`` when outside a
+    value continuation). Backslash-escaped quotes are honoured inside double
+    quotes; single-quoted values are literal.
+    """
+    i = 0
+    length = len(line)
+    while i < length:
+        char = line[i]
+        if quote == '"':
+            if char == "\\":
+                i += 2
+                continue
+            if char == '"':
+                quote = None
+        elif quote == "'":
+            if char == "'":
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        i += 1
+    return quote
+
+
+def _env_blocks(text: str) -> list[list[str]]:
+    """Split an env template into logical blocks of physical lines.
+
+    An assignment block spans continuation lines while a quote is left open
+    (so a multi-line ``CERT="a\\nb"`` value survives intact). Comment, blank
+    and non-assignment lines form their own single-line keyless blocks.
+    """
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    quote: str | None = None
+
+    for line in text.splitlines():
+        if current is None:
+            current = [line]
+            if _env_template_key(line) is None:
+                # Comments/blanks are never continued, even if they contain
+                # an unbalanced quote character.
+                blocks.append(current)
+                current = None
+                continue
+            quote = _scan_quote_state(line, None)
+            if quote is None:
+                blocks.append(current)
+                current = None
+            continue
+
+        current.append(line)
+        quote = _scan_quote_state(line, quote)
+        if quote is None:
+            blocks.append(current)
+            current = None
+
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
+def merge_env_templates(project: str, host: str) -> str:
+    """Merge a host env overlay onto the project-wide env template.
+
+    The project template is the base: its blocks keep their order and exact
+    text (multi-line quoted values included). A host assignment block
+    declaring a key the project already declares replaces the project's
+    block for that key in place (the last project occurrence, matching
+    dotenv last-wins); host-only keys are appended at the end in host order.
+    Host comment and blank blocks are dropped. Host block text is used
+    verbatim, so an ``export`` prefix is never rewritten. Values are never
+    parsed or rendered here, so ``$REF``, ``$$`` and ``{placeholder}`` text
+    survives untouched and reaches the normal secrets pipeline.
+
+    An empty project template yields the host env unchanged (the pre-#84
+    behaviour), and an empty host env yields the project template unchanged.
+    """
+    project = project.strip()
+    host = host.strip()
+    if not project:
+        return host
+    if not host:
+        return project
+
+    project_blocks = _env_blocks(project)
+    last_index: dict[str, int] = {}
+    for i, block in enumerate(project_blocks):
+        key = _env_template_key(block[0])
+        if key is not None:
+            last_index[key] = i
+
+    appended: list[list[str]] = []
+    for block in _env_blocks(host):
+        key = _env_template_key(block[0])
+        if key is None:
+            continue
+        index = last_index.get(key)
+        if index is None:
+            appended.append(block)
+            continue
+        project_blocks[index] = block
+
+    return "\n".join(line for block in project_blocks + appended for line in block)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

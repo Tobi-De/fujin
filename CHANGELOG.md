@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- *(secrets)* $$ escape for literal $ in env values (#85)
 - *(deploy)* Content-addressed release tree with manifest store and build cache (#94)
 - Rollback --to <version>; generated-requirements cache repair
 - *(secrets)* Per-host secret adapter config (75)

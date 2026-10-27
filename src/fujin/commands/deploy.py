@@ -165,12 +165,15 @@ class Deploy(BaseCommand):
         logger.debug("Target host: %s", host.address)
 
         secret_config = config.effective_secrets(host)
+        # The host env overlays the project template (#84); both are raw
+        # template text, so the merge precedes parsing/rendering.
+        env_template = config.effective_env(host)
         # Refs come from the env *template*, not the rendered file: `$$REF`
         # renders a literal `$REF` and must not be treated as unresolved.
-        secret_aliases = secret_refs(host.env_content)
+        secret_aliases = secret_refs(env_template)
         if secret_config:
             self.output.info("Resolving secrets from configuration...")
-            parsed_env = resolve_secrets(host.env_content, secret_config)
+            parsed_env = resolve_secrets(env_template, secret_config)
             # Track every resolved secret value so all output paths render it
             # as `<$REF>` instead of the raw value (never registered in the
             # build cache; #77).
@@ -183,7 +186,7 @@ class Deploy(BaseCommand):
                 secret_aliases,
             )
         else:
-            parsed_env = render_template(host.env_content)
+            parsed_env = render_template(env_template)
 
         context = build._interpolation_context(config, host)
         resolved_env, unresolved = safe_format(parsed_env, **context)

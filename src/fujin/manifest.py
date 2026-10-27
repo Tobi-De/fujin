@@ -367,14 +367,16 @@ def _env_keys(env_content: str) -> list[str]:
     return sorted(dotenv_values(stream=StringIO(env_content)) or {})
 
 
-def _fingerprint_host(host: HostConfig) -> dict[str, Any]:
+def _fingerprint_host(config: Config, host: HostConfig) -> dict[str, Any]:
     return {
         "address": host.address,
         "user": host.user,
         "port": host.port,
         "native_ssh_auth": host.native_ssh_auth,
         "key_passphrase_env": host.key_passphrase_env,
-        "env_keys": _env_keys(host.env_content),
+        # Key NAMES of the host's effective env (project template + host
+        # overlay); values stay out (secret carriers).
+        "env_keys": _env_keys(config.effective_env(host)),
     }
 
 
@@ -393,7 +395,7 @@ def _fingerprint_data(config: Config) -> dict[str, Any]:
         "requirements": config.requirements,
         "apps_dir": config.apps_dir,
         "caddy_config_dir": config.caddy_config_dir,
-        "hosts": [_fingerprint_host(host) for host in config.hosts],
+        "hosts": [_fingerprint_host(config, host) for host in config.hosts],
     }
 
 
@@ -402,12 +404,14 @@ def config_fingerprint(config: Config) -> str:
 
     Canonical resolved-config JSON (sorted keys), excluding:
 
-    - secret VALUES and adapter settings: ``HostConfig.env_content`` (read
-      from ``env``/``envfile`` during ``__post_init__``) is reduced to its
-      variable NAMES only, and the global/per-host ``[secrets]`` adapter
-      configuration is omitted entirely: adapter identity is not a build
-      input (the venv installs from requirements; resolved VALUES land in
-      the rendered ``.env``, whose change already flips the release digest).
+    - secret VALUES and adapter settings: the host's effective env template
+      (``Config.effective_env``, i.e. ``env``/``envfile`` read during
+      ``__post_init__``, project template merged with the host overlay) is
+      reduced to its variable NAMES only, and the global/per-host
+      ``[secrets]`` adapter configuration is omitted entirely: adapter
+      identity is not a build input (the venv installs from requirements;
+      resolved VALUES land in the rendered ``.env``, whose change already
+      flips the release digest).
     - ``replicas`` (per #79 convergence handles scaling separately);
     - ``version``, ``aliases``, ``hooks_config``, ``local_config_dir``
       (release-identity / local-only knobs that must not bust build caches).

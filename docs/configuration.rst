@@ -81,11 +81,77 @@ A host may declare its own ``secrets`` block inside its ``[[hosts]]`` entry (or 
    [hosts.secrets]
    adapter = "system"
 
+.. _project-env:
+
+Project env (``env``)
+---------------------
+**(Optional)**
+
+The project-wide environment template, as raw dotenv text. Every host starts from this template and overlays its own ``env``/``envfile`` on top (see :ref:`host-env-overrides`). Values are not interpreted here: ``$REF`` secret references, ``$$`` escapes and ``{placeholder}`` template variables are rendered later by the normal deploy pipeline.
+
+.. code-block:: toml
+
+   env = """
+   DEBUG=False
+   DATABASE_URL=postgres://localhost/myapp
+   SECRET_KEY=$SECRET_KEY
+   """
+
+.. _project-envfile:
+
+Project envfile (``envfile``)
+-----------------------------
+**(Optional)**
+
+Path to a file containing the project-wide environment template (same content as ``env``). Read at configuration-load time and stripped.
+
+.. code-block:: toml
+
+   envfile = ".env.base"
+
+.. important::
+
+    *envfile* and *env* are mutually exclusive—you can define only one, at the project level and per host.
+
+.. _host-env-overrides:
+
+Host env overrides
+------------------
+
+A host's ``env`` (or ``envfile``) is a **host-scoped overlay** on the project template:
+
+- A host line declaring a key already present in the project template replaces that line in place (the last project declaration, matching dotenv last-wins).
+- Keys that only the host declares are appended at the end, in host order.
+- Host comment and blank lines are ignored; project lines keep their order and exact text.
+- No values are parsed during the merge, so ``$REF``/``$$`` text reaches the secrets pipeline untouched.
+
+.. code-block:: toml
+   :caption: fujin.toml
+
+   env = """
+   DEBUG=False
+   LOG_LEVEL=info
+   SECRET_KEY=$SECRET_KEY
+   """
+
+   [[hosts]]
+   name = "production"
+   address = "example.com"
+   user = "deploy"
+   # Overrides LOG_LEVEL in place, appends REGION.
+   env = """
+   LOG_LEVEL=warning
+   REGION=eu-west-1
+   """
+
+.. note::
+
+   Backwards compatible: with no project-level ``env``/``envfile``, the host env **is** the whole template, exactly as before. With a project template and no host env, every host uses the project template unchanged.
+
 replicas
 --------
 
 A mapping of service names to their replica count. Used for systemd template units (services with ``@`` in their names).
-
 When a service has replicas > 1, Fujin creates a template unit (e.g., ``myapp-worker@.service``) and enables instances 1 through N.
 
 .. code-block:: toml
@@ -410,7 +476,7 @@ envfile
 
 **(Optional)**
 
-Path to the production environment file that will be copied to the host.
+Path to the host's environment file. It is a host-scoped **overlay** on the project-level :ref:`project-env`/:ref:`project-envfile` template: keys it declares replace the project's values, host-only keys are appended, and everything else comes from the project template. See :ref:`host-env-overrides`.
 
 .. code-block:: toml
 
@@ -422,9 +488,7 @@ env
 
 **(Optional)**
 
-A string containing the production environment variables. In combination with the secrets manager, this is most useful when
-you want to automate deployment through a CI/CD platform like GitLab CI or GitHub Actions. For an example of how to do this,
-check out the `integrations guide </integrations.html>`_
+A string containing the host's environment variables, as a host-scoped overlay on the project-level :ref:`project-env`/:ref:`project-envfile` template (host wins on key conflicts, host-only keys are appended). In combination with the secrets manager, this is most useful when you want to automate deployment through a CI/CD platform like GitLab CI or GitHub Actions. For an example of how to do this, check out the `integrations guide </integrations.html>`_
 
 .. code-block:: toml
 
@@ -437,7 +501,7 @@ check out the `integrations guide </integrations.html>`_
 
 .. important::
 
-    *envfile* and *env* are mutually exclusive—you can define only one.
+    *envfile* and *env* are mutually exclusive—you can define only one. With no project-level template, the host env is used as-is (the pre-existing behaviour).
 
 port
 ^^^^
