@@ -40,6 +40,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 📚 Documentation
 
+- *(agents)* Record implemented deploy speedups and the trimmed integration suite
 - *(agents)* Deployment rework handoff (state, pipeline, invariants, perf notes)
 - *(server)* Drop Sphinx role from harden help text
 - Add fujin cache page to commands reference
