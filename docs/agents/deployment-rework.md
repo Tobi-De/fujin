@@ -119,30 +119,45 @@ code.
 
 ## 5. Performance-relevant operations (where time goes)
 
-Measured locally (warm Docker, Debian 12 systemd container):
+Implemented so far (all unit-tested, committed):
 
-- Container boot + SSH ready: **8–10 s per test** (privileged systemd
-  container, `sleep 5` + `service ssh start` + `sleep 2`).
-- A small binary deploy: **2–4 s** (build is `echo`, dist is a script).
-- Python-package deploy: dominated by `uv` venv install on the server
-  (`install_code_into_staging`).
-- CI (GitHub runner): `test_full_deploy` 14 tests in 143 s ≈ 10 s/test;
-  `test_app_management` 2 tests in 42 s.
+- `acquire_lock` acquires before announcing, polls at 50 ms (was a fixed
+  0.5 s sleep), and accepts only its own token — a blocked/foreign holder can
+  never be mistaken for success.
+- `ensure_app_user` is one command and repairs a missing group.
+- `install_units` is one round trip (was ~10 for 3 units + 2 dropins);
+  `.wants`/`.requires` enablement symlinks are never treated as stray units.
+- `template_instance_plan` is one query (was 3); the readiness poll is one
+  probe per tick (was 1+2 per socket).
+- `prepare_staging` is 1 call in binary mode, 3 in python-package (uv venv,
+  uv pip, one fused permission pass) — venv setgid is applied by the
+  privileged `find` walk.
+- A redeploy with unchanged requirements hardlink-clones the live venv and
+  installs only the wheel (`--no-deps --no-compile`); `hash_server_built`
+  reuses sha256/mode for files whose inode matches the live release. The live
+  release is proven byte-identical by an integration test.
+- `verify_staging` no longer re-hashes the freshly server-hashed `venv/**`
+  (`skip_prefixes`), while the committed-release reuse path still hashes all.
+- Post-activation bookkeeping (state, release listing, audit append, batched
+  GC `rm`) is one round trip.
+- Commands >4 KiB are spooled to a private remote temp file (`sh <file>`);
+  admin scripts use `run_script` (`sudo bash <file>`). This removes the
+  libssh2 exec-channel stalls that made CI time out.
+- Integration suite: 13 tests, ~32 s with `-n 4` (was 27 tests, 15+ min and
+  hanging). Harness: content-addressed image + flock, shared container for
+  app-scoped tests with per-app teardown, fresh containers only for
+  bootstrap/create-user/harden, no fixed sleeps.
 
-Candidates worth profiling (not yet measured end to end):
+Measured on the Docker test app (small dependency set): v1 full install
+1.32 s, v2 venv clone 1.13 s. The clone/hash-reuse win grows with the number
+of dependencies and files.
 
-- `verify_staging` hashes every file in the release tree (thousands of
-  `venv/**` entries) — server-side Python script; CPU + one SSH round trip.
-- Manifest JSON for a python-package app is large (one entry per venv file);
-  it is uploaded, rewritten and re-read several times.
-- `install_code_into_staging` runs `uv pip install` per deploy even when
-  requirements are unchanged (the release tree is content-addressed, but the
-  venv is rebuilt server-side every deploy).
-- Readiness fallback: `is-failed` polling every 0.5 s up to 30 s when a unit
-  is `activating` (normal for slow starters, wasted for fast ones).
-- Each deploy opens one SSH connection; hooks use pty sessions (no idle
-  deadline on pty).
-- `serverops.acquire_lock` + `sweep_stale_staging` per deploy.
+Still open (see §9).
+
+Not yet measured end to end: `verify_staging` hashing cost on a real
+multi-thousand-file venv (now only client entries), manifest JSON size/upload
+(the merged manifest is still uploaded once via SCP), `uv pip install` cost
+when requirements change, readiness fallback on slow starters.
 
 ## 6. Known limitations / risks
 
@@ -194,23 +209,17 @@ The one skipped unit test is the `visudo -c` syntax check (skips when
 
 ## 9. Open work
 
-- **Integration suite restructure (in progress).** 27 Docker tests; CI hung
-  on the first `test_installation.py` test after `test_full_deploy` finished.
-  Root cause found via the new 180 s per-test timeout:
-  `test_stale_unit_cleanup` → `deploy._resolve_live_digest` → `conn.run`
-  (libssh2 exec channel read) stalled until the 300 s default idle deadline.
-  Mitigation landed: read-only probes (`readlink`, `systemctl is-*`, `test`)
-  now use `_probe()` — 15 s idle deadline plus one retry — so a trickling
-  channel costs seconds instead of minutes and does not fail the deploy.
-  Chosen restructure: trim to ~12 high-value tests, module-scoped container
-  with a unique app name per test (function-scoped only for global-state
-  tests: bootstrap/create-user/harden), poll for SSH readiness instead of
-  fixed sleeps, skip the image build when the tag exists, `pytest-xdist -n 4`.
-  The unit suite has no such stall because it never touches libssh2.
-- Deeper transport hardening is still worth doing: every `conn.run` call
-  that is short and idempotent should go through a bounded probe (or the
-  system-`ssh` transport used by `get()`), and long-running commands should
-  carry an explicit idle deadline. This is the main CI-flakiness source.
+- **Integration suite:** restructured and green locally (13 tests, ~32 s with
+  `-n 4`, two consecutive runs). CI verification is in flight; the suite is
+  no longer the bottleneck.
+- **Transport:** large commands are spooled now; the remaining risk is the
+  default 300 s idle deadline on genuinely silent long commands. Consider a
+  shorter default plus per-command overrides.
+- **Speedup items not yet done** (`docs/agents/deployment-speedup.md`):
+  skip unchanged unit/Caddy installs (item 3), build before opening SSH
+  (item 5), further staging fusion (item 7 remainder), OpenSSH ControlMaster
+  for rsync/`get` (item 11), and fusing the merged-manifest write to drop the
+  SCP (item 2 remainder).
 - The older open issues (pre-dating this rework) were not touched; some may
   be redundant now (`#67`, `#72`, …) and need a pass.
 - `#95` follow-ups deliberately out of scope: attachments/SSH keys,
