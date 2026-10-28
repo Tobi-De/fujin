@@ -1300,6 +1300,10 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
     before the new one is written, so a crash mid-write never leaves a broken
     main config without a recovery path: a later call restores it.
 
+    When the installed config is already byte-identical to *content* the
+    function is a no-op (no backup write, no rewrite, no reload) and True is
+    returned immediately.
+
     Returns True on successful reload. On failure the previous config (if
     any) is restored to disk without reloading (Caddy never loaded the new
     config) and False is returned.
@@ -1325,6 +1329,12 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
     if main_exists:
         out, ok = conn.run(f"cat {path_q}", warn=True, hide=True)
         old_content = out if ok else None
+
+    if old_content == content:
+        # The server already serves byte-identical content: no backup, no
+        # rewrite, no reload (a reload would restart Caddy for nothing).
+        logger.info("Caddy config at %s is already current; skipping", path_q)
+        return True
 
     if old_content is not None:
         _sudo_write(conn, bak_path, old_content, chown="caddy:caddy")

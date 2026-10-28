@@ -61,6 +61,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### ⚙️ Miscellaneous Tasks
 
+- Run integration tests serially
 - Raise integration job timeout to 40m
 - Apply pre-commit
 - Apply changelog hook

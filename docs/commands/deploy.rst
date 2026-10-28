@@ -61,6 +61,17 @@ Here's a high-level overview of what happens when you run the ``deploy`` command
    ``common.d``) and the Caddyfile are installed into the usual system
    locations (``/etc/systemd/system``, ``/etc/caddy/conf.d``).
 
+   When the unit set is byte-identical to the live release and the server's
+   recorded units match that release (``state.json``'s
+   ``units_installed_from``), the install and ``daemon-reload`` are skipped.
+   Likewise an unchanged Caddyfile is not rewritten or reloaded when the
+   installed config is already current. ``--force`` always installs; the
+   first deploy always installs.
+
+   Drift caveat: a unit you edit or delete by hand on the server is *not*
+   restored by a deploy that skips the install. ``fujin doctor`` reports the
+   drifted/missing units, and ``fujin deploy --force`` rewrites them.
+
 8. **Activate**: ``current`` is atomically swapped to the new release
    (``current.next`` + ``mv -T``), then services restart according to a
    diff-based restart set (#see "Restart behaviour" below), buildings

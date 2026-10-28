@@ -288,9 +288,8 @@ def setup_deploy(
     monkeypatch.setattr(fujin.serverops, "stop_and_disable", stop_and_disable)
     enable_and_start = MagicMock(return_value=True)
     monkeypatch.setattr(fujin.serverops, "enable_and_start", enable_and_start)
-    monkeypatch.setattr(
-        fujin.serverops, "install_caddyfile", MagicMock(return_value=True)
-    )
+    install_caddyfile = MagicMock(return_value=True)
+    monkeypatch.setattr(fujin.serverops, "install_caddyfile", install_caddyfile)
 
     monkeypatch.setattr(fujin.transfer, "rsync_to_staging", MagicMock(return_value=[]))
     verify_payload = dict(
@@ -360,6 +359,7 @@ def setup_deploy(
         "swap": swap,
         "verify": verify,
         "install_units": install_units,
+        "install_caddyfile": install_caddyfile,
         "write_states": write_states,
         "finalize_calls": finalize_calls,
         "log_calls": log_calls,
@@ -3083,3 +3083,141 @@ def test_deploy_full_install_for_binary_release(monkeypatch, minimal_config, tmp
     assert invoke(cmd) == 0
 
     assert spies["prepare_staging"].call_args.kwargs["clone_from"] is None
+
+
+# ===========================================================================
+# Unchanged unit / Caddyfile install skip
+# ===========================================================================
+
+CADDYFILE = 'testapp.example.com {\n\trespond "ok"\n}\n'
+
+CADDY_FILES = {**STAGING_FILES, "Caddyfile": CADDYFILE}
+
+
+def _installed_units_state():
+    return State(
+        current="prev",
+        units_installed_from="prev",
+        client_digest="old",
+    )
+
+
+def test_unchanged_units_skip_install(monkeypatch, minimal_config, tmp_path):
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=_installed_units_state(),
+        prev_manifest=manifest_for(with_env=True),
+    )
+    assert invoke(cmd) == 0
+
+    spies["install_units"].assert_not_called()
+    # daemon-reload only lives inside install_units (one fused script).
+    assert not any("daemon-reload" in c for c, _ in spies["conn"].calls)
+
+
+def test_changed_unit_installs(monkeypatch, minimal_config, tmp_path):
+    prev_files = dict(STAGING_FILES)
+    prev_files["systemd/testapp-web.service"] = "[Service]\nExecStart=/old\n"
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=_installed_units_state(),
+        prev_manifest=manifest_for(with_env=True, files=prev_files),
+    )
+    assert invoke(cmd) == 0
+
+    spies["install_units"].assert_called_once()
+
+
+def test_force_installs_unchanged_units(monkeypatch, minimal_config, tmp_path):
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=_installed_units_state(),
+        prev_manifest=manifest_for(with_env=True),
+    )
+    cmd.force = True
+    assert invoke(cmd) == 0
+
+    spies["install_units"].assert_called_once()
+
+
+def test_first_deploy_installs_units(monkeypatch, minimal_config, tmp_path):
+    # setup_deploy defaults to no state and no previous manifest.
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    assert invoke(cmd) == 0
+
+    spies["install_units"].assert_called_once()
+
+
+def test_stale_units_installed_from_forces_install(
+    monkeypatch, minimal_config, tmp_path
+):
+    state = State(
+        current="prev",
+        units_installed_from="older-release",
+        client_digest="old",
+    )
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        prev_manifest=manifest_for(with_env=True),
+    )
+    assert invoke(cmd) == 0
+
+    spies["install_units"].assert_called_once()
+
+
+def test_unchanged_caddyfile_skips_install(monkeypatch, minimal_config, tmp_path):
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=CADDY_FILES,
+        state=_installed_units_state(),
+        prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
+    )
+    spies["conn"].append_response(minimal_config.caddy_config_path, "", True)
+    assert invoke(cmd) == 0
+
+    spies["install_caddyfile"].assert_not_called()
+
+
+def test_changed_caddyfile_installs(monkeypatch, minimal_config, tmp_path):
+    prev_files = dict(CADDY_FILES)
+    prev_files["Caddyfile"] = 'testapp.example.com {\n\trespond "old"\n}\n'
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=CADDY_FILES,
+        state=_installed_units_state(),
+        prev_manifest=manifest_for(with_env=True, files=prev_files),
+    )
+    spies["conn"].append_response(minimal_config.caddy_config_path, "", True)
+    assert invoke(cmd) == 0
+
+    spies["install_caddyfile"].assert_called_once()
+
+
+def test_unchanged_caddyfile_reinstalled_when_missing(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=CADDY_FILES,
+        state=_installed_units_state(),
+        prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
+    )
+    # No marker registered: the config is NOT installed on the server.
+    assert invoke(cmd) == 0
+
+    spies["install_caddyfile"].assert_called_once()

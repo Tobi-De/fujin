@@ -210,3 +210,47 @@ def test_unit_and_dropin_convergence(shared_vps, project, unit, tmp_path):
         container, f"/etc/systemd/system/{app}-web.service.d/limits.conf"
     )
     assert_dir_not_exists(container, f"/etc/systemd/system/{app}-web.service.d")
+
+
+def test_redeploy_does_not_rewrite_unchanged_units(shared_vps, project, unit):
+    """A non-noop redeploy with an unchanged unit set leaves the installed
+    unit file untouched (same inode and mtime) and keeps the service live."""
+    container = shared_vps["name"]
+    app = "stableunitsapp"
+    deploy_app(
+        project(
+            app,
+            shared_vps,
+            version="1.0.0",
+            units={"web.service": unit(app, "web")},
+        )
+    )
+    wait_for_service(container, f"{app}-web.service")
+    unit_path = f"/etc/systemd/system/{app}-web.service"
+    before, ok = exec_in_container(container, f"stat -c '%y %i' {unit_path}")
+    assert ok and before
+    release_before, ok = exec_in_container(
+        container, f"readlink /opt/fujin/{app}/current"
+    )
+    assert ok and release_before
+
+    # Version bump: the dist entry changes (a real, non-noop deploy) while
+    # the unit set stays byte-identical.
+    deploy_app(
+        project(
+            app,
+            shared_vps,
+            version="2.0.0",
+            units={"web.service": unit(app, "web")},
+        )
+    )
+    wait_for_service(container, f"{app}-web.service")
+
+    release_after, _ = exec_in_container(
+        container, f"readlink /opt/fujin/{app}/current"
+    )
+    assert release_after != release_before, "a new release must have been activated"
+    after, _ = exec_in_container(container, f"stat -c '%y %i' {unit_path}")
+    assert after == before, f"unit file was rewritten: {before} -> {after}"
+    stdout, ok = exec_in_container(container, f"systemctl is-active {app}-web.service")
+    assert ok and stdout == "active", f"Service not active: {stdout}"

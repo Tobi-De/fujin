@@ -1076,13 +1076,50 @@ class Deploy(BaseCommand):
                 transfer.commit_release(conn, remote_staging, final_digest)
 
             unit_files, dropins, oneshots = collect_local_units(files, config)
-            if unit_files or dropins:
+            # A unit set identical to what is already installed needs no
+            # rewrite and no ``daemon-reload``. ``units_installed_from`` is
+            # the release whose units the server is known to run; a manual
+            # edit/deletion on the server is server drift, reported by
+            # ``fujin doctor`` and fixed with ``--force``.
+            units_unchanged = (
+                not first_deploy
+                and not self.force
+                and state is not None
+                and state.units_installed_from is not None
+                and state.units_installed_from == live_digest
+                and prev_manifest is not None
+                and not any(
+                    change.kind is m.EntryKind.UNIT
+                    for change in m.diff_manifests(
+                        prev_manifest, final_manifest
+                    ).changes
+                )
+            )
+            if (unit_files or dropins) and units_unchanged:
+                self.output.info(
+                    "Systemd units unchanged since release"
+                    f" {live_digest[:12]}; skipping install and daemon-reload."
+                )
+            elif unit_files or dropins:
                 self.output.info("Installing systemd units...")
                 serverops.install_units(conn, config.app_name, unit_files, dropins)
 
             caddy_entry = final_manifest.entries.get(m.CADDYFILE_PATH)
             if caddy_entry is not None and caddy_entry.kind is m.EntryKind.CADDY:
-                self._install_caddyfile(conn, staging_dir / mfile)
+                caddy_unchanged = (
+                    not first_deploy
+                    and not self.force
+                    and prev_manifest is not None
+                    and prev_manifest.entries.get(m.CADDYFILE_PATH) == caddy_entry
+                    and self._caddyfile_installed(conn)
+                )
+                if caddy_unchanged:
+                    self.output.info(
+                        "Caddyfile unchanged and already installed; skipping"
+                        " write and reload."
+                    )
+                else:
+                    self._install_caddyfile(conn, staging_dir / mfile)
 
             # Post-install hooks: committed, NOT live yet; they see the new
             # release dir and its rendered .env.
@@ -1736,6 +1773,15 @@ class Deploy(BaseCommand):
     # =======================================================================================
     # Caddy
     # =======================================================================================
+
+    def _caddyfile_installed(self, conn) -> bool:
+        """Whether this app's Caddy config already exists on the server."""
+        _, exists = conn.run(
+            f"test -f {serverops.q(self.config.caddy_config_path)}",
+            warn=True,
+            hide=True,
+        )
+        return bool(exists)
 
     def _install_caddyfile(self, conn, local_caddy: Path) -> None:
         if not local_caddy.is_file():

@@ -1061,6 +1061,44 @@ def test_install_caddyfile_success(conn):
     assert any("chown caddy:caddy" in c for c in cmds)
 
 
+def test_install_caddyfile_identical_content_is_a_noop(conn):
+    def run_side(cmd, **kw):
+        if "test -f" in cmd:
+            return ("", True)
+        if "cat /etc/caddy" in cmd:
+            return ("same config\n", True)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    conn.run.side_effect = run_side
+    assert serverops.install_caddyfile(
+        conn, "same config\n", "/etc/caddy/conf.d/myapp.caddy"
+    )
+    assert [c[0][0] for c in conn.run.call_args_list] == [
+        "test -f /etc/caddy/conf.d/myapp.caddy",
+        "test -f /etc/caddy/conf.d/myapp.caddy.fujin-bak",
+        "cat /etc/caddy/conf.d/myapp.caddy",
+    ]
+
+
+def test_install_caddyfile_changed_content_takes_full_path(conn):
+    def run_side(cmd, **kw):
+        if "test -f" in cmd:
+            return ("", True)
+        if "cat /etc/caddy" in cmd:
+            return ("old config\n", True)
+        return ("", True)
+
+    conn.run.side_effect = run_side
+    assert serverops.install_caddyfile(
+        conn, "new config\n", "/etc/caddy/conf.d/myapp.caddy"
+    )
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    writes = [c for c in cmds if "base64 -d" in c]
+    assert len(writes) == 2  # backup + new config
+    assert any(".fujin-bak" in c for c in writes)
+    assert any("systemctl reload caddy" in c for c in cmds)
+
+
 def test_install_caddyfile_restore_on_failure(conn):
     def run_side(cmd, **kw):
         if "test -f" in cmd:
