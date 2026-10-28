@@ -53,6 +53,34 @@ READINESS_INTERVAL = 0.5
 HEALTH_CHECK_INTERVAL = 1.0
 
 
+def _comparable(manifest: m.Manifest) -> m.Manifest:
+    """Copy of *manifest* restricted to entries a dry run can compare.
+
+    Two classes are excluded:
+
+    - ``.env`` is deploy-time state rendered from resolved secrets; the dry
+      run never resolves them, so the entry is not reported as changed or
+      removed.
+    - ``venv/**`` is server-built (hashed on the server after installation
+      and merged into the manifest later). It never exists on the client, so
+      comparing it to the cached client manifest would report every venv
+      file as removed and force a spurious restart.
+    """
+    return m.Manifest(
+        app_name=manifest.app_name,
+        version=manifest.version,
+        config_fingerprint=manifest.config_fingerprint,
+        dist_sha256=manifest.dist_sha256,
+        entries={
+            path: entry
+            for path, entry in manifest.entries.items()
+            if entry.kind is not m.EntryKind.ENV and not path.startswith("venv/")
+        },
+        host=manifest.host,
+        created_at=manifest.created_at,
+    )
+
+
 @dataclass(frozen=True)
 class HealthProbe:
     """A ``[health_check]`` probe rendered once, before any server I/O.
@@ -244,9 +272,21 @@ class Deploy(BaseCommand):
             help="Use zstd compression for the rsync transfer",
         ),
     ] = False
+    dry_run: Annotated[
+        bool,
+        cappa.Arg(
+            long="--dry-run",
+            help="Print the deployment plan without building, uploading or "
+            "changing anything on the server (read-only SSH only)",
+        ),
+    ] = False
 
     def __call__(self):
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+
+        if self.dry_run:
+            self._dry_run()
+            return
 
         config = self.config
         host = self.selected_host
@@ -284,17 +324,7 @@ class Deploy(BaseCommand):
             parsed_env = render_template(env_template)
 
         context = build._interpolation_context(config, host)
-        resolved_env, unresolved = safe_format(parsed_env, **context)
-        if unresolved:
-            self.output.error(
-                f"Unresolved template variables in env file:"
-                f" {', '.join(sorted(unresolved))}."
-            )
-            raise DeploymentError(
-                "Unresolved template variables in env file:"
-                f" {', '.join(sorted(unresolved))}. Deployment aborted"
-                " (fail-closed)."
-            )
+        resolved_env = self._validate_env_placeholders(parsed_env, context)
         self._fail_closed_on_unresolved_secrets(
             resolved_env, secret_aliases, adapter_configured=secret_config is not None
         )
@@ -318,6 +348,310 @@ class Deploy(BaseCommand):
                 self._deploy(conn, resolved_env, context, probe)
             finally:
                 serverops.release_lock(conn, app_dir, lock)
+
+    # =======================================================================================
+    # Dry run (#90)
+    # =======================================================================================
+
+    def _dry_run(self) -> None:
+        """Print the deployment plan; never build, upload or mutate anything.
+
+        Only read-only SSH is used (``readlink``/``cat`` for the live state
+        and manifest, ``systemctl list-*`` for the convergence plan). The
+        build command is not executed and secrets are never resolved: env
+        references are rendered as ``<$REF>``.
+
+        Configuration validation is the same as a real deploy's and runs
+        before anything is printed: unresolved env template placeholders
+        abort with the same error, and the ``[health_check]`` probe is
+        rendered/validated. The pre-build computation (bundle key and source
+        gathering) comes from the same :func:`build.prebuild` the real
+        deploy uses, so the empty-``.fujin/systemd`` guard also matches.
+        """
+        config = self.config
+        host = self.selected_host
+        app_dir = config.app_dir
+
+        # Same pre-SSH validation as a real deploy (fail-closed, before any
+        # output and before any SSH connection). Secrets are not resolved;
+        # `render_template` keeps `$REF` values intact for the placeholder
+        # check.
+        context = build._interpolation_context(config, host)
+        self._validate_env_placeholders(
+            render_template(config.effective_env(host)), context
+        )
+        self._build_health_probe(context)
+
+        pre = build.prebuild(config, host=host)
+        cache_dir = (
+            config.local_config_dir / "cache" / build.CACHE_ROOT_DIR / (pre.bundle_key)
+        )
+        cached = None if self.no_cache else self._dry_run_load_cached(cache_dir)
+        if cached is None:
+            cached_manifest: m.Manifest | None = None
+            cached_files: dict[str, m.InputFile] = {}
+        else:
+            cached_manifest, cached_files = cached
+        cached_comparable = (
+            _comparable(cached_manifest) if cached_manifest is not None else None
+        )
+
+        self.output.output("Dry run: no changes will be made.")
+        self.output.output(f"host: {host.name or host.address} ({host.address})")
+        self.output.output(f"installation_mode: {config.installation_mode.value}")
+        self.output.output(f"app_user: {config.app_user or config.app_name}")
+        replicas = ", ".join(
+            f"{name}={count}" for name, count in sorted(config.replicas.items())
+        )
+        self.output.output(f"replicas: {replicas or 'none'}")
+
+        self.output.output(f"bundle_key: {pre.bundle_key}")
+        if cached_comparable is not None:
+            self.output.output(f"cache: cached ({cache_dir})")
+            client_digest = m.release_digest(cached_comparable)
+            self.output.output(f"client_digest: {client_digest}")
+            self.output.output(
+                f"swap: releases/{client_digest} (server-built entries, and"
+                " the rendered .env, may change it)"
+            )
+        else:
+            self.output.output(f"cache: would run: {config.build_command}")
+            self.output.output("swap: unknown until build")
+
+        env_refs = secret_refs(config.effective_env(host))
+        refs_display = ", ".join(
+            f"{key}=<${ref}>" for key, ref in sorted(env_refs.items())
+        )
+        fingerprint = m.config_fingerprint(config, host)
+
+        with connection.connection(host=host, compress=False) as conn:
+            state = serverops.read_state(conn, app_dir)
+            live_manifest = serverops.read_current_manifest(conn, app_dir)
+            live_digest = _resolve_live_digest(conn, app_dir, state)
+            live_entries = (
+                _comparable(live_manifest) if live_manifest is not None else None
+            )
+
+            self.output.output(f"live_release: {live_digest or 'none'}")
+            self.output.output(f"env_refs: {refs_display or 'none'}")
+            if live_manifest is None:
+                self.output.output(
+                    f"config_fingerprint: {fingerprint} (no live release)"
+                )
+                self.output.output("env: changed (no live release)")
+            else:
+                matches = live_manifest.config_fingerprint == fingerprint
+                self.output.output(
+                    f"config_fingerprint: {fingerprint}"
+                    f" (live: {live_manifest.config_fingerprint})"
+                )
+                # The live fingerprint stores the env key/ref identity (plus
+                # the rest of the resolved config); values are never hashed.
+                self.output.output(f"env: {'unchanged' if matches else 'changed'}")
+            if self.force:
+                self.output.output("change_expected: yes (--force)")
+            elif live_manifest is None:
+                self.output.output("change_expected: yes (first deploy)")
+            elif cached_comparable is None:
+                self.output.output("change_expected: unknown until build")
+            else:
+                entries_changed = not m.diff_manifests(
+                    live_entries, cached_comparable
+                ).is_empty
+                # The cached manifest carries the version the bundle was
+                # built with (``built.json``); a newer local version means a
+                # real deploy would commit a new release even if every entry
+                # is byte-identical.
+                version_changed = cached_comparable.version != config.local_version
+                expected = matches and not entries_changed and not version_changed
+                self.output.output(
+                    "change_expected: no" if expected else "change_expected: yes"
+                )
+            self.output.output(
+                "note: the exact new release digest is unknown until the build"
+                " runs; secrets are not resolved, so value-only env changes"
+                " are invisible here."
+            )
+
+            if cached_comparable is not None:
+                if live_entries is not None:
+                    diff = m.diff_manifests(live_entries, cached_comparable)
+                else:
+                    empty = m.build_manifest(
+                        app_name=config.app_name,
+                        version=config.local_version,
+                        config_fingerprint=fingerprint,
+                        dist_sha256="",
+                        files={},
+                    )
+                    diff = m.diff_manifests(empty, cached_comparable)
+                self._dry_run_print_diff(diff)
+                to_transfer = sum(
+                    1
+                    for change in diff.changes
+                    if change.change is not m.ChangeType.REMOVED
+                )
+                if live_entries is None:
+                    self.output.output(f"transfer: {to_transfer} files")
+                else:
+                    unchanged = sum(
+                        1
+                        for path, entry in cached_comparable.entries.items()
+                        if (prev := live_entries.entries.get(path)) is not None
+                        and prev.sha256 == entry.sha256
+                    )
+                    self.output.output(
+                        f"transfer: {to_transfer} files"
+                        f" ({unchanged} unchanged hardlinked from the live"
+                        " release)"
+                    )
+            else:
+                self._dry_run_print_sources(pre)
+
+            if self.full_restart:
+                self.output.output("restart: all units (--full-restart)")
+            elif cached_comparable is not None:
+                _unit_files, _dropins, oneshots = collect_local_units(
+                    cached_files, config
+                )
+                restarts = store.restart_set(
+                    live_entries,
+                    cached_comparable,
+                    env_fed_units=serverops.service_unit_names(cached_comparable),
+                    oneshot_units=oneshots,
+                )
+                self.output.output(f"restart: {', '.join(sorted(restarts)) or 'none'}")
+            else:
+                self.output.output("restart: unknown until build")
+
+            if cached_comparable is not None:
+                unit_names = [
+                    name
+                    for path, entry in cached_comparable.entries.items()
+                    if entry.kind is m.EntryKind.UNIT
+                    and (name := serverops.unit_rel_name(path))
+                ]
+            else:
+                unit_names = [path.split("/", 1)[-1] for path in sorted(pre.unit_tree)]
+            desired = self._dry_run_desired_instances(unit_names)
+            start, stop = serverops.template_instance_plan(
+                conn, config.app_name, desired
+            )
+            self.output.output(f"converge_start: {', '.join(start) or 'none'}")
+            self.output.output(f"converge_stop: {', '.join(stop) or 'none'}")
+
+        hooks = config.hooks_config
+        for phase in ("pre_install", "post_install", "post_start"):
+            commands = list(getattr(hooks, phase) or []) if hooks else []
+            self.output.output(f"hooks_{phase}: {'; '.join(commands) or 'none'}")
+
+    def _dry_run_load_cached(
+        self, cache_dir: Path
+    ) -> tuple[m.Manifest, dict[str, m.InputFile]] | None:
+        """Manifest + file specs of a verified cached bundle, or ``None``.
+
+        A cache entry only counts when ``built.json`` matches the directory
+        and every staged file re-hashes to the recorded digest - the same
+        acceptance test a real build performs before reusing the cache.
+        """
+        record = build._load_built_record(cache_dir)
+        if record is None or not build._verify_staged_files(cache_dir, record):
+            return None
+        files = {
+            path: m.InputFile(
+                content=(cache_dir / path).read_bytes(),
+                mode=0o755 if path.startswith(build.BIN_DIR + "/") else None,
+            )
+            for path in record.files
+        }
+        dist_path = next(
+            (path for path in sorted(files) if path.startswith(build.BIN_DIR + "/")),
+            None,
+        )
+        if dist_path is None:  # pragma: no cover - a bundle always has a dist
+            return None
+        manifest = m.build_manifest(
+            app_name=self.config.app_name,
+            # Older cache entries lack a version; assume the current one.
+            version=record.version or self.config.local_version,
+            config_fingerprint=m.config_fingerprint(self.config, self.selected_host),
+            dist_sha256=m.hash_bytes(files[dist_path].content or b""),
+            files=files,
+            host=self.selected_host.name or self.selected_host.address,
+        )
+        return manifest, files
+
+    def _dry_run_print_diff(self, diff: m.Diff) -> None:
+        """Print an entry diff grouped by kind, one plain line per kind."""
+        if diff.is_empty:
+            self.output.output("entries: no changes")
+            return
+        grouped = diff.grouped()
+        for kind in m.EntryKind:
+            changes = grouped.get(kind) or []
+            if not changes:
+                continue
+            added = [c.path for c in changes if c.change is m.ChangeType.ADDED]
+            changed = [c.path for c in changes if c.change is m.ChangeType.MODIFIED]
+            removed = [c.path for c in changes if c.change is m.ChangeType.REMOVED]
+            self.output.output(
+                f"entries {kind}:"
+                f" added={', '.join(added) or '-'}"
+                f" changed={', '.join(changed) or '-'}"
+                f" removed={', '.join(removed) or '-'}"
+            )
+
+    def _dry_run_print_sources(self, inputs: build.Prebuild) -> None:
+        """Entry preview without a cached bundle: client-known sources only."""
+        paths = list(inputs.unit_tree)
+        # ``assets`` is None when no assets are configured; ``asset_tree``
+        # always holds the ``assets/<name>`` paths the build would stage.
+        paths.extend(inputs.asset_tree)
+        if inputs.caddyfile is not None:
+            paths.append(m.CADDYFILE_PATH)
+        grouped: dict[m.EntryKind, list[str]] = {}
+        for path in sorted(paths):
+            grouped.setdefault(m.classify_path(path), []).append(path)
+        if not grouped:
+            self.output.output("entries: no local sources")
+        for kind, kind_paths in grouped.items():
+            self.output.output(f"source_entries {kind}: {', '.join(kind_paths)}")
+        self.output.output("note: the dist/code entry is unknown until the build runs.")
+
+    def _dry_run_desired_instances(self, unit_names: Iterable[str]) -> list[str]:
+        """``svc@1..N`` instances implied by the manifest/tree and config."""
+        app_name = self.config.app_name
+        desired: list[str] = []
+        for name in sorted(set(unit_names)):
+            if not name.endswith("@.service") or not name.startswith(f"{app_name}-"):
+                continue
+            base = name.removeprefix(f"{app_name}-").removesuffix("@.service")
+            replicas = self.config.replicas.get(base, 1)
+            desired.extend(
+                sorted(
+                    store.desired_instances(name.removesuffix("@.service"), replicas)
+                )
+            )
+        return desired
+
+    def _validate_env_placeholders(
+        self, env_text: str, context: Mapping[str, object]
+    ) -> str:
+        """Render ``{placeholders}`` in *env_text*; fail closed on unknowns.
+
+        Shared by the real deploy and ``--dry-run`` so both reject the same
+        configuration with the same error (before any server I/O).
+        """
+        resolved, unresolved = safe_format(env_text, **context)
+        if unresolved:
+            # Silent: the error is carried by the exception (printed once by
+            # the CLI), so a failure never follows partial plan output.
+            raise DeploymentError(
+                "Unresolved template variables in env file:"
+                f" {', '.join(sorted(unresolved))}. Deployment aborted"
+                " (fail-closed)."
+            )
+        return resolved
 
     def _build_health_probe(self, context: Mapping[str, object]) -> HealthProbe | None:
         """Render the configured ``[health_check]`` probe, or ``None``.
@@ -437,6 +771,7 @@ class Deploy(BaseCommand):
                 "noop",
                 host=self.selected_host.name or self.selected_host.address,
                 version=config.local_version,
+                digest=client_digest,
             )
             self.output.success("Deployment already up to date!")
             return
@@ -691,6 +1026,7 @@ class Deploy(BaseCommand):
                 host=self.selected_host.name or self.selected_host.address,
                 version=config.local_version,
                 git_commit=get_git_short_hash(),
+                digest=final_digest,
             )
         except DeploymentError as exc:
             # Cleanup is best effort: the taxonomy code (3/4/5/6) of the
@@ -1293,6 +1629,7 @@ class Deploy(BaseCommand):
             self.config.app_name,
             "rollback",
             host=self.selected_host.name or self.selected_host.address,
+            digest=prev_digest,
         )
 
     # =======================================================================================

@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 import msgspec
 import pytest
 
-from fujin.build import BUILT_FILENAME, clean_build_cache, run_build
+from fujin.build import (
+    BUILT_FILENAME,
+    clean_build_cache,
+    prebuild,
+    run_build,
+)
 from fujin.config import Config
-from fujin.errors import BuildError
+from fujin.errors import BuildError, DeploymentError
 
 
 def make_config(tmp_path: Path, **overrides) -> Config:
@@ -277,3 +283,40 @@ def test_host_scoped_build_cache(project):
         run_build(config, host=config.select_host("staging")).bundle_key
         == staging.bundle_key
     )
+
+
+def test_run_build_uses_the_shared_prebuild(project):
+    """run_build and deploy --dry-run compute the same pre-build key."""
+    config = make_config(project)
+
+    pre = prebuild(config)
+    result = run_build(config)
+
+    assert result.bundle_key == pre.bundle_key
+    assert pre.unit_tree == {
+        "systemd/testapp-testapp.service": (
+            project / ".fujin/systemd/testapp.service"
+        ).read_text()
+    }
+
+
+def test_built_record_stores_the_local_version(project):
+    config = make_config(project)
+    result = run_build(config)
+
+    record = json.loads((result.staging_dir / BUILT_FILENAME).read_text())
+    assert record["version"] == config.local_version
+
+
+def test_prebuild_and_run_build_reject_empty_systemd_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = make_config(tmp_path)
+
+    with pytest.raises(DeploymentError) as pre_err:
+        prebuild(config)
+    with pytest.raises(DeploymentError) as build_err:
+        run_build(config)
+
+    assert str(pre_err.value.message) == "No systemd units found, nothing to build"
+    assert build_err.value.message == pre_err.value.message
+    assert build_err.value.code == pre_err.value.code

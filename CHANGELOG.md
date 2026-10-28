@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- *(config)* Per-host config fingerprint and cross-host deploy guard (#86)
 - *(secrets)* Folder-scoped bitwarden resolution with batch lookup (#95)
 - *(cli)* Documented exit-code taxonomy 0-6 (#91)
 - *(deploy)* Readiness tiers with health_check probe and auto-rollback (#88)

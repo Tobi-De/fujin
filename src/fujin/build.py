@@ -30,6 +30,7 @@ import logging
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import msgspec
@@ -70,6 +71,9 @@ class _BuiltRecord(msgspec.Struct, kw_only=True):
 
     bundle_key: str
     files: dict[str, str]
+    #: ``config.local_version`` at build time. Older cache entries lack it;
+    #: an empty value means "same as the current local version".
+    version: str = ""
 
 
 # =============================================================================================
@@ -310,9 +314,12 @@ def _distfile_name_for(config: Config) -> str:
 # =============================================================================================
 
 
-def _write_built_record(cache_dir: Path, bundle_key: str, files: dict[str, InputFile]):
+def _write_built_record(
+    cache_dir: Path, bundle_key: str, files: dict[str, InputFile], version: str
+):
     record = _BuiltRecord(
         bundle_key=bundle_key,
+        version=version,
         files={
             path: hash_bytes(spec.content or b"")
             for path, spec in sorted(files.items())
@@ -364,6 +371,115 @@ def _find_cached_dist(
 # =============================================================================================
 
 
+@dataclass(frozen=True)
+class Prebuild:
+    """Everything computable about a build before ``build_command`` runs.
+
+    :func:`prebuild` is the single pre-build computation shared by
+    :func:`run_build` and ``deploy --dry-run``. It also owns the
+    "nothing to build" guard, so both paths fail identically.
+    """
+
+    host: HostConfig
+    bundle_key: str
+    unit_sources: dict[str, str]
+    unit_tree: dict[str, str]
+    caddyfile: str | None
+    caddyfile_source: str | None
+    asset_tree: dict[str, str]
+    assets: dict[str, str | bytes] | None
+    requirements: str
+    pyproject_text: str | None
+    unresolved: set[str]
+
+    def key_with_requirements(self, config: Config, requirements: str) -> str:
+        """Recompute the key with the post-build requirements content."""
+        return _compute_bundle_key(
+            config,
+            self.host,
+            unit_sources=self.unit_sources,
+            assets=self.assets,
+            caddyfile_source=self.caddyfile_source,
+            requirements=requirements,
+            pyproject_text=self.pyproject_text,
+        )
+
+
+def _compute_bundle_key(
+    config: Config,
+    host: HostConfig,
+    *,
+    unit_sources: dict[str, str],
+    assets: dict[str, str | bytes] | None,
+    caddyfile_source: str | None,
+    requirements: str,
+    pyproject_text: str | None,
+) -> str:
+    return bundle_key(
+        config,
+        host,
+        unit_sources=dict(unit_sources),
+        assets=assets,
+        caddyfile=caddyfile_source,
+        requirements=requirements,
+        pyproject=pyproject_text,
+    )
+
+
+def prebuild(
+    config: Config,
+    *,
+    host: HostConfig | None = None,
+    assets: dict[str, str | bytes] | None = None,
+) -> Prebuild:
+    """Gather build inputs and compute the pre-build bundle key.
+
+    Raises :class:`DeploymentError` when there is nothing to build, exactly
+    like a real deploy (the dry run uses this same call).
+    """
+    if not config.deployed_units:
+        raise DeploymentError("No systemd units found, nothing to build")
+
+    host = host if host is not None else config.select_host(None)
+    unit_sources, unit_tree, caddyfile, asset_tree, unresolved = _gather_sources(
+        config, host=host, assets=assets
+    )
+    if unresolved:
+        logger.warning(
+            "Found unresolved variables in configuration files: %s\n"
+            "Available variables: %s\n"
+            "These will be left as-is (e.g., {variable_name}) in deployed files.",
+            ", ".join(sorted(unresolved)),
+            ", ".join(sorted(_interpolation_context(config, host))),
+        )
+
+    requirements = _requirements_content(config, after_build=False)
+    pyproject_path = Path("pyproject.toml")
+    pyproject_text = pyproject_path.read_text() if pyproject_path.exists() else None
+    caddyfile_source = None if caddyfile is None else config.caddyfile_path.read_text()
+    return Prebuild(
+        host=host,
+        bundle_key=_compute_bundle_key(
+            config,
+            host,
+            unit_sources=unit_sources,
+            assets=assets,
+            caddyfile_source=caddyfile_source,
+            requirements=requirements,
+            pyproject_text=pyproject_text,
+        ),
+        unit_sources=dict(unit_sources),
+        unit_tree=dict(unit_tree),
+        caddyfile=caddyfile,
+        caddyfile_source=caddyfile_source,
+        asset_tree=dict(asset_tree),
+        assets=assets,
+        requirements=requirements,
+        pyproject_text=pyproject_text,
+        unresolved=set(unresolved),
+    )
+
+
 def run_build(
     config: Config,
     *,
@@ -380,39 +496,12 @@ def run_build(
     (#81 note: supported gracefully). Raises BuildError / DeploymentError
     (cappa.Exit subclasses) on failure.
     """
-    if not config.deployed_units:
-        raise DeploymentError("No systemd units found, nothing to build")
-
-    host = host if host is not None else config.select_host(None)
+    pre = prebuild(config, host=host, assets=assets)
+    host = pre.host
     if commit := get_git_short_hash():
         logger.debug("Git commit: %s", commit)
 
-    unit_sources, unit_tree, caddyfile, asset_tree, unresolved = _gather_sources(
-        config, host=host, assets=assets
-    )
-    if unresolved:
-        logger.warning(
-            "Found unresolved variables in configuration files: %s\n"
-            "Available variables: %s\n"
-            "These will be left as-is (e.g., {variable_name}) in deployed files.",
-            ", ".join(sorted(unresolved)),
-            ", ".join(sorted(_interpolation_context(config, host))),
-        )
-
-    pre_build_requirements = _requirements_content(config, after_build=False)
-    sources: dict[str, str | bytes] = dict(unit_sources)
-    pyproject_path = Path("pyproject.toml")
-    pyproject_text = pyproject_path.read_text() if pyproject_path.exists() else None
-    key = bundle_key(
-        config,
-        host,
-        unit_sources=sources,
-        assets=assets,
-        caddyfile=None if caddyfile is None else config.caddyfile_path.read_text(),
-        requirements=pre_build_requirements,
-        pyproject=pyproject_text,
-    )
-
+    key = pre.bundle_key
     cache_dir = config.local_config_dir / "cache" / CACHE_ROOT_DIR / key
 
     if not no_cache:
@@ -429,16 +518,16 @@ def run_build(
             dist_path, dist_sha256 = _find_cached_dist(files, cache_dir)
             # Refresh interpolated unit/Caddyfile/asset content that drifted
             # without busting the key (the hashed sources did not change).
-            for tree_path in (*unit_tree, *asset_tree):
+            for tree_path in (*pre.unit_tree, *pre.asset_tree):
                 refreshed = (
-                    asset_tree[tree_path]
-                    if tree_path in asset_tree
-                    else unit_tree[tree_path]
+                    pre.asset_tree[tree_path]
+                    if tree_path in pre.asset_tree
+                    else pre.unit_tree[tree_path]
                 )
                 if refreshed != (cache_dir / tree_path).read_text():
                     (cache_dir / tree_path).write_text(refreshed)
                     files[tree_path] = InputFile(content=refreshed.encode("utf-8"))
-            _write_built_record(cache_dir, key, files)
+            _write_built_record(cache_dir, key, files, config.local_version)
             return BuildResult(
                 staging_dir=cache_dir,
                 bundle_key=key,
@@ -456,16 +545,8 @@ def run_build(
     # rebuild the key from the post-build content so the cache is stored
     # under the key a subsequent deploy will actually compute (a generated
     # file that did not exist pre-build hashes to nothing in the pre-key).
-    if requirements != pre_build_requirements and pyproject_path.exists():
-        repaired_key = bundle_key(
-            config,
-            host,
-            unit_sources=sources,
-            assets=assets,
-            caddyfile=None if caddyfile is None else config.caddyfile_path.read_text(),
-            requirements=requirements,
-            pyproject=pyproject_text,
-        )
+    if requirements != pre.requirements:
+        repaired_key = pre.key_with_requirements(config, requirements)
         if repaired_key != key:
             logger.info(
                 "Requirements changed during build; caching under the post-build key"
@@ -475,12 +556,12 @@ def run_build(
     files, dist_path, dist_sha256 = _assemble_staging(
         cache_dir,
         config,
-        unit_tree=unit_tree,
-        caddyfile=caddyfile,
-        asset_tree=asset_tree,
+        unit_tree=pre.unit_tree,
+        caddyfile=pre.caddyfile,
+        asset_tree=pre.asset_tree,
         requirements=requirements,
     )
-    _write_built_record(cache_dir, key, files)
+    _write_built_record(cache_dir, key, files, config.local_version)
     return BuildResult(
         staging_dir=cache_dir,
         bundle_key=key,

@@ -11,6 +11,7 @@ from fujin.commands.app import App
 from fujin.commands.audit import Audit
 from fujin.commands.cache import Cache
 from fujin.commands.deploy import Deploy
+from fujin.commands.doctor import Doctor
 from fujin.commands.down import Down
 from fujin.commands.init import Init
 from fujin.commands.migrate import Migrate
@@ -45,6 +46,7 @@ class Fujin:
         | App
         | Server
         | Audit
+        | Doctor
         | Cache
         | Rollback
         | Prune

@@ -217,6 +217,17 @@ def list_releases(conn: Any, app_dir: str) -> list[str]:
     ]
 
 
+def list_staging_dirs(conn: Any, app_dir: str) -> list[str]:
+    """Orphaned ``releases/.staging-*`` directories, as absolute paths."""
+    out, _ok = conn.run(
+        f"find {shlex.quote(f'{app_dir}/releases')} -mindepth 1 -maxdepth 1"
+        " -type d -name '.staging-*' -print 2>/dev/null | sort",
+        warn=True,
+        hide=True,
+    )
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def collect_garbage(
     conn: Any,
     app_dir: str,
@@ -468,6 +479,50 @@ def parse_holder_pid(output: str) -> str | None:
     return None
 
 
+class LockProbe(msgspec.Struct, frozen=True):
+    """Read-only view of the deploy lock (``fujin doctor``).
+
+    ``state`` is one of ``free`` (nobody holds it), ``live`` (holder pid
+    alive), ``held`` (flock held but no holder pid recorded), ``stale``
+    (holder file with a dead pid) or ``stale-legacy`` (noclobber lock file
+    with a dead pid).
+    """
+
+    state: str
+    pid: str | None = None
+
+
+def probe_lock(conn: Any, app_dir: str) -> LockProbe:
+    """Probe the deploy lock without taking it (strictly read-only).
+
+    The flock itself is tested with ``flock -n`` (does not hold beyond the
+    probe). A recorded holder pid is only reported as ``live`` when
+    ``kill -0`` confirms it.
+    """
+    lock_path = f"{app_dir}/{LOCK_PATH}"
+    holder = f"{lock_path}.holder"
+    legacy = f"{app_dir}/{LEGACY_LOCK_PATH}"
+    cmd = (
+        f"lock={shlex.quote(lock_path)}; holder={shlex.quote(holder)}; "
+        f"legacy={shlex.quote(legacy)}; state=free; pid=; "
+        f'if [ -f "$holder" ]; then pid=$(cut -d- -f1 "$holder" 2>/dev/null); fi; '
+        f'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then state=live; '
+        f'elif [ -f "$legacy" ]; then pid=$(cat "$legacy" 2>/dev/null); '
+        f'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then state=live; '
+        f"else state=stale-legacy; fi; "
+        f'elif [ -n "$pid" ]; then state=stale; '
+        f'elif [ -e "$lock" ] && command -v flock >/dev/null 2>&1 '
+        f'&& ! flock -n "$lock" true 2>/dev/null; then state=held; pid=; '
+        f'fi; echo "$state:${{pid:-}}"'
+    )
+    out, _ok = conn.run(cmd, warn=True, hide=True)
+    line = out.strip().rsplit("\n", 1)[-1] if out.strip() else ""
+    state, _, pid = line.partition(":")
+    if not state:
+        return LockProbe(state="free")
+    return LockProbe(state=state, pid=pid or None)
+
+
 # =============================================================================
 # Code install (into staging; deploy step 4)
 # =============================================================================
@@ -685,8 +740,11 @@ def install_units(
     ``{dropin-filename: content}``; the caller expands ``common.d`` per unit.
     """
     dropins = dropins or {}
-    valid = set(unit_files) | set(dropins)
-    valid |= {f"{unit}.d" for unit in valid}
+    units = set(unit_files) | set(dropins)
+    valid = units | {f"{unit}.d" for unit in units}
+    # Dropin *files* are valid too: kept ``*.d/`` dirs must not accumulate
+    # conf files from an older release (pruned at depth 2 below).
+    valid |= {f"{unit}.d/{name}" for unit, files in dropins.items() for name in files}
 
     _remove_stale_units(conn, app_name, valid)
 
@@ -703,34 +761,76 @@ def install_units(
 
 
 def _remove_stale_units(conn: Any, app_name: str, valid: set[str]) -> None:
-    """Disable + delete installed unit files/dropin dirs no longer declared."""
-    # Quote the prefix only; the glob must stay outside the quotes so the
-    # remote shell expands it. No match -> empty output, nothing stale.
+    """Disable + delete installed units and dropin files no longer declared.
+
+    Covers both depth 1 (``app-*.service``, ``app-*.socket``, ``app-*.timer``,
+    ``app-*.d`` dirs) and depth 2 (files inside a kept ``app-*.d`` dir). A
+    stale dropin file must go even when its directory remains in use.
+    """
+    # Quote the prefix pieces only; the globs must stay outside the quotes so
+    # the remote shell expands them. No match -> empty output, nothing stale.
     out, _ok = conn.run(
-        f"ls -1 /etc/systemd/system/{shlex.quote(app_name)}* 2>/dev/null || true",
+        f"cd /etc/systemd/system && find . -maxdepth 2 \\( "
+        f"-name {shlex.quote(app_name + '*')} "
+        f"-o -path {shlex.quote(f'./{app_name}*.d/*')} "
+        f"\\) -print 2>/dev/null | sort",
         warn=True,
         hide=True,
     )
-    dir_prefix = "/etc/systemd/system/"
     installed = [
-        line.strip().removeprefix(dir_prefix)
-        for line in out.splitlines()
-        if line.strip()
+        line.strip().removeprefix("./") for line in out.splitlines() if line.strip()
     ]
     stale = [name for name in installed if name not in valid]
     if not stale:
         return
-    regular = [u for u in stale if not u.endswith("@.service")]
-    template = [u for u in stale if u.endswith("@.service")]
+    # Only unit names can be disabled; dropin files/dirs are just removed.
+    stale_units = [name for name in stale if "/" not in name]
+    regular = [u for u in stale_units if not u.endswith("@.service")]
+    template = [u for u in stale_units if u.endswith("@.service")]
     if regular:
         conn.run(
             f"sudo systemctl disable --now --quiet {q(*regular)}", warn=True, hide=True
         )
     if template:
         conn.run(f"sudo systemctl disable --quiet {q(*template)}", warn=True, hide=True)
-    conn.run(f"sudo systemctl reset-failed {q(*stale)}", warn=True, hide=True)
+    if stale_units:
+        conn.run(f"sudo systemctl reset-failed {q(*stale_units)}", warn=True, hide=True)
     targets = " ".join(shlex.quote(f"/etc/systemd/system/{name}") for name in stale)
     conn.run(f"sudo rm -rf {targets}", warn=True, hide=True)
+
+
+def installed_unit_tree(conn: Any, app_name: str) -> dict[str, str | None]:
+    """Read the units + dropins installed for *app_name* (read-only).
+
+    Returns ``{relative path: content}``; directory entries (dropin dirs)
+    map to ``None``. Paths are relative to ``/etc/systemd/system``. An
+    unreadable file also maps to ``None`` (it is then reported as drifted by
+    the caller, never silently ignored).
+    """
+    parent = "/etc/systemd/system"
+    pattern = f"{app_name}*"
+    dropin_glob = f"./{app_name}*.d/*"
+    cmd = (
+        f"cd {shlex.quote(parent)} 2>/dev/null && "
+        f"find . -maxdepth 2 \\( -name {shlex.quote(pattern)}"
+        f" -o -path {shlex.quote(dropin_glob)} \\) -print 2>/dev/null | sort"
+    )
+    out, _ok = conn.run(cmd, warn=True, hide=True)
+    entries = [
+        line.strip().removeprefix("./")
+        for line in out.splitlines()
+        if line.strip() and line.strip() != "."
+    ]
+    tree: dict[str, str | None] = {}
+    for rel in entries:
+        if rel.endswith(".d"):
+            tree[rel] = None
+            continue
+        content, ok = conn.run(
+            f"cat {shlex.quote(f'{parent}/{rel}')}", warn=True, hide=True
+        )
+        tree[rel] = content if ok else None
+    return tree
 
 
 # =============================================================================
@@ -811,6 +911,26 @@ def read_state(conn: Any, app_dir: str) -> State | None:
         return None
 
 
+def read_symlink(conn: Any, path: str) -> str | None:
+    """Resolve *path* once, read-only; None when absent or not a symlink."""
+    out, ok = conn.run(f"readlink {shlex.quote(path)}", warn=True, hide=True)
+    target = out.strip() if ok and out else ""
+    return target or None
+
+
+def path_stat(conn: Any, path: str) -> tuple[int, str, str] | None:
+    """``(mode, user, group)`` of *path*, or None when it cannot be stat'ed."""
+    out, ok = conn.run(f"stat -c '%a %U %G' {shlex.quote(path)}", warn=True, hide=True)
+    fields = out.split() if ok and out else []
+    if len(fields) != 3:
+        return None
+    mode, owner, group = fields
+    try:
+        return int(mode, 8), owner, group
+    except ValueError:
+        return None
+
+
 def write_state(conn: Any, app_dir: str, state: State) -> None:
     """Persist state server-side: write ``state.json.tmp`` then rename."""
     path = f"{app_dir}/{STATE_PATH}"
@@ -824,20 +944,25 @@ def write_state(conn: Any, app_dir: str, state: State) -> None:
         raise ServerOpsError(f"Failed to write {path} on server")
 
 
+def read_manifest_at(conn: Any, release_dir: str) -> m.Manifest | None:
+    """Decode the manifest of *release_dir*; None when absent or corrupt."""
+    raw = read_remote_file(conn, f"{release_dir}/{MANIFEST_PATH}")
+    if raw is None:
+        return None
+    try:
+        return m.decode_manifest(raw)
+    except Exception:
+        logger.warning("Undecodable manifest in %s", release_dir)
+        return None
+
+
 def read_current_manifest(conn: Any, app_dir: str) -> m.Manifest | None:
     """Decode the manifest of the live release; None when absent.
 
     Uses SCP (not ``cat``): the merged manifest can be hundreds of KB and
     big exec-channel reads can trickle forever (see SSH2Connection.get).
     """
-    raw = read_remote_file(conn, f"{app_dir}/current/{MANIFEST_PATH}")
-    if raw is None:
-        return None
-    try:
-        return m.decode_manifest(raw)
-    except Exception:
-        logger.warning("Undecodable manifest in %s/current", app_dir)
-        return None
+    return read_manifest_at(conn, f"{app_dir}/current")
 
 
 # =============================================================================

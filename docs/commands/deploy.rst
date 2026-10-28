@@ -100,6 +100,118 @@ A failing ``pre_install`` or ``post_install`` hook fails the deploy (exit
 code ``4``). A failing ``post_start`` hook only warns: the release is
 already live, so the deploy still succeeds.
 
+Previewing a deploy (``--dry-run``)
+------------------------------------
+
+``fujin deploy --dry-run`` prints the plan for the next deploy without
+performing it. It is useful for reviewing what a deploy would change on a
+production server, or for checking that a configuration change has the
+intended effect, before running the real command.
+
+It never mutates anything:
+
+- the build command is **not** executed (no local build, no cache writes);
+- no lock is taken and no server layout or app user is created;
+- nothing is uploaded, committed, installed or activated;
+- no systemd unit is enabled, started, stopped or restarted;
+- no hook is run and no ``state.json``/audit-log write happens.
+
+Only read-only SSH queries are made: ``readlink`` for the ``current``
+symlink, reads of ``state.json`` and the live ``manifest.json``, and
+``systemctl list-unit-files`` / ``systemctl list-units`` for the replica
+plan. Secrets are never resolved: environment references are printed as
+``<$REF>`` placeholders (never their values). If the preview itself fails
+(e.g. the host is unreachable or the configuration is invalid), the normal
+exit-code taxonomy applies; a successful preview exits ``0``.
+
+``--dry-run`` performs the same configuration validation as a real deploy,
+before it prints anything: unresolved env-template placeholders abort with
+the same error/code, an invalid ``[health_check]`` probe is rejected the
+same way, and an empty ``.fujin/systemd/`` fails with the same
+``No systemd units found, nothing to build`` error. The pre-build
+computation (source gathering and the content-addressed ``bundle_key``) is
+the same code path the real deploy uses, so the reported cache decision is
+the one the build will act on.
+
+The output is plain, one-item-per-line text (no spinners), printed in this
+order:
+
+1. **Resolved config**: target host, installation mode, app user and
+   replica counts.
+2. **Build decision**: the content-addressed ``bundle_key`` and either
+   ``cache: cached (<path>)`` when a verified bundle exists under
+   ``.fujin/cache/bundles/<key>/`` or ``cache: would run: <build_command>``.
+   ``--no-cache`` forces the "would run" answer. On a verified cache hit
+   the plan also prints the cached ``client_digest`` and
+   ``swap: releases/<digest>`` (the server-built entries and the rendered
+   ``.env`` can still change the final digest). Without a cache hit it
+   prints ``swap: unknown until build``.
+3. **Live release**: the digest the ``current`` symlink points at, the live
+   and current config fingerprints, the env reference names, and whether a
+   change is expected. ``env: changed|unchanged`` compares the env
+   key/ref identity via the config fingerprint (values are never
+   compared) — the same identity the live release was built with. The
+   expected-change verdict also covers the live fingerprint, a cached
+   manifest with a different local version, and (on ``--force``)
+   ``change_expected: yes (--force)``. Because the new files are not built
+   and secrets are not resolved, the exact new release digest is unknown:
+   the plan says so explicitly, and value-only env rotations cannot be
+   detected.
+4. **Entries by kind**: when a verified cached bundle exists, the plan
+   diffs its manifest against the live release and prints added, changed
+   and removed paths grouped by kind (``unit``, ``code``, ``asset``,
+   ``caddy``). Without a cached bundle it lists the client-known source
+   entries and notes that the dist/code entry is unknown until the build
+   runs.
+5. **Planned transfer**: on a cache hit, the number of client entries that
+   would be uploaded; when a live release exists the same line reports how
+   many unchanged files are hardlinked from it instead of transferred.
+6. **Planned restart set**: the units a real deploy would restart, computed
+   with the same diff logic; without a cached bundle it reports
+   ``unknown until build``, and ``--full-restart`` reports
+   ``all units (--full-restart)``.
+7. **Planned convergence**: the replica instances that would be started and
+   stopped, based on the live ``systemctl`` state.
+8. **Hooks**: the ``pre_install``, ``post_install`` and ``post_start``
+   commands that would run.
+
+.. note::
+
+   Server-built entries (``venv/**`` in a release manifest) exist only
+   after the server installs the app code. The dry run ignores them on both
+   sides of the diff, so a warm cache with an otherwise unchanged release
+   reports ``change_expected: no`` and no restart even though the live
+   manifest contains venv entries the local cache cannot have.
+
+Example:
+
+.. code-block:: shell
+
+    $ fujin deploy --dry-run
+    Dry run: no changes will be made.
+    host: prod (vps.example.com)
+    installation_mode: python-package
+    app_user: bookstore
+    replicas: worker=2
+    bundle_key: 3f2c...
+    cache: cached (.fujin/cache/bundles/3f2c...)
+    client_digest: 6d1a...
+    swap: releases/6d1a... (server-built entries, and the rendered .env, may change it)
+    live_release: 9a1b...
+    env_refs: STRIPE_TOKEN=<$STRIPE_TOKEN>
+    config_fingerprint: 7d4e... (live: 7d4e...)
+    env: unchanged
+    change_expected: no
+    note: the exact new release digest is unknown until the build runs; secrets are not resolved, so value-only env changes are invisible here.
+    entries: no changes
+    transfer: 0 files (14 unchanged hardlinked from the live release)
+    restart: none
+    converge_start: none
+    converge_stop: none
+    hooks_pre_install: none
+    hooks_post_install: uv run manage.py migrate
+    hooks_post_start: none
+
 Deployment Layout and Permissions
 ----------------------------------
 

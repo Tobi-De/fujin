@@ -8,13 +8,14 @@ from __future__ import annotations
 import time
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import cappa
 import msgspec
 import pytest
 
 from fujin.commands.deploy import Deploy
+from fujin.commands.doctor import Doctor
 from fujin.commands.down import Down
 from fujin.commands.rollback import Rollback
 from fujin.config import Config
@@ -1052,6 +1053,97 @@ WantedBy=multi-user.target
     # Version should still show 2.0.0 (failed deploy, no rollback)
     stdout = get_deployed_version(vps_container["name"], "rollbackapp")
     assert stdout == "2.0.0", f"Expected v2.0.0 (no rollback), got: {stdout}"
+
+
+def test_doctor_repairs_missing_symlink_and_stopped_instance(
+    vps_container, ssh_key, tmp_path, monkeypatch
+):
+    """``doctor`` reports a broken ``current`` link + stopped replica and
+    ``doctor --fix`` repairs both (the acceptance path for #92)."""
+    monkeypatch.chdir(tmp_path)
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "doctorapp"\nversion = "1.0.0"\n')
+
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    distfile = dist_dir / "doctorapp-1.0.0"
+    distfile.write_text("#!/bin/bash\necho 'doctor app' && sleep infinity\n")
+    distfile.chmod(0o755)
+
+    systemd_dir = tmp_path / ".fujin" / "systemd"
+    systemd_dir.mkdir(parents=True)
+    (systemd_dir / "web.service").write_text("""[Unit]
+Description=Doctor app web
+
+[Service]
+Type=simple
+ExecStart={app_dir}/current/bin/doctorapp
+WorkingDirectory={app_dir}
+EnvironmentFile=-{app_dir}/current/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    config = msgspec.convert(
+        {
+            "app": "doctorapp",
+            "version": "1.0.0",
+            "build_command": "echo 'building'",
+            "distfile": str(distfile),
+            "installation_mode": "binary",
+            "replicas": {"web": 2},
+            "hosts": [
+                {
+                    "address": vps_container["ip"],
+                    "user": vps_container["user"],
+                    "port": vps_container["port"],
+                    "key_filename": ssh_key,
+                }
+            ],
+        },
+        type=Config,
+    )
+
+    with patch("fujin.config.Config.read", return_value=config):
+        Deploy(no_input=True)()
+
+    container = vps_container["name"]
+    app_dir = "/opt/fujin/doctorapp"
+    for instance in (1, 2):
+        wait_for_service(container, f"doctorapp-web@{instance}.service")
+
+    # Break both invariants doctor is meant to repair.
+    _, ok = exec_in_container(container, f"rm -f {app_dir}/current")
+    assert ok
+    _, ok = exec_in_container(container, "systemctl stop doctorapp-web@2.service")
+    assert ok
+
+    # Report-only run: both problems are FAILs, nothing is mutated.
+    output = MagicMock()
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch.object(Doctor, "output", output),
+    ):
+        with pytest.raises(cappa.Exit) as excinfo:
+            Doctor(fix=False)()
+    assert excinfo.value.code == EXIT_USER_ABORTED
+    text = "\n".join(call.args[0] for call in output.output.call_args_list)
+    assert "current symlink is missing" in text
+    assert "start: doctorapp-web@2.service" in text
+
+    # --fix repairs both.
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch.object(Doctor, "output", MagicMock()),
+    ):
+        Doctor(fix=True)()
+
+    stdout, ok = exec_in_container(container, f"readlink {app_dir}/current")
+    assert ok and stdout.strip().startswith("releases/")
+    wait_for_service(container, "doctorapp-web@2.service")
 
 
 def test_failing_post_install_hook_exits_4_and_previous_release_stays_live(

@@ -19,6 +19,7 @@ def log_operation(
     git_commit: str | None = None,
     from_version: str | None = None,
     to_version: str | None = None,
+    digest: str | None = None,
 ):
     """
     Log an operation to the server-side audit log.
@@ -32,6 +33,8 @@ def log_operation(
         git_commit: Git commit hash (for deploy operations)
         from_version: Previous version (for rollback)
         to_version: Target version (for rollback)
+        digest: Release digest the operation acted on (``fujin doctor``
+            verifies it still exists on disk)
     """
     record: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -49,6 +52,8 @@ def log_operation(
         record["from_version"] = from_version
     if to_version:
         record["to_version"] = to_version
+    if digest:
+        record["digest"] = digest
 
     log_file = f"/opt/fujin/.audit/{app_name}.log"
     json_line = json.dumps(record)

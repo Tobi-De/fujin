@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from fujin.audit import log_operation
 from fujin.commands.audit import Audit
 
 # ============================================================================
@@ -315,3 +317,41 @@ def test_audit_handles_edge_cases(record, expected_behavior):
         # Should not raise and should contain expected behavior
         calls = [str(call) for call in mock_console.print.call_args_list]
         assert any(expected_behavior in call for call in calls)
+
+
+# ============================================================================
+# log_operation records
+# ============================================================================
+
+
+def test_log_operation_records_release_digest():
+    """Deploy/rollback audit records carry the digest doctor verifies."""
+    conn = MagicMock()
+    digest = "a" * 64
+
+    log_operation(
+        conn,
+        "myapp",
+        "deploy",
+        host="example.com",
+        version="1.0.0",
+        digest=digest,
+    )
+
+    write_cmd = conn.run.call_args_list[-1].args[0]
+    encoded = write_cmd.split("echo ", 1)[1].split(" | sudo tee", 1)[0]
+    record = json.loads(json.loads(encoded))
+    assert record["digest"] == digest
+    assert record["operation"] == "deploy"
+    assert record["host"] == "example.com"
+
+
+def test_log_operation_omits_digest_when_not_given():
+    conn = MagicMock()
+
+    log_operation(conn, "myapp", "deploy", host="example.com")
+
+    write_cmd = conn.run.call_args_list[-1].args[0]
+    encoded = write_cmd.split("echo ", 1)[1].split(" | sudo tee", 1)[0]
+    record = json.loads(json.loads(encoded))
+    assert "digest" not in record

@@ -360,35 +360,39 @@ def test_install_units_writes_and_reloads(conn):
 def test_install_units_stale_cleanup(conn):
     conn.run.side_effect = lambda cmd, **kw: (
         (
-            "/etc/systemd/system/myapp-old.service\n"
-            "/etc/systemd/system/myapp-web@.service\n"
-            "/etc/systemd/system/myapp-gone@.service.d\n",
+            "./myapp-gone@.service.d\n"
+            "./myapp-old.service\n"
+            "./myapp-web@.service\n"
+            "./myapp-web@.service.d/old.conf\n",
             True,
         )
-        if "ls -1 /etc/systemd/system/" in cmd
+        if cmd.startswith("cd /etc/systemd/system && find .")
         else ("", True)
     )
     serverops.install_units(conn, "myapp", {"myapp-web@.service": "[Unit]\n"}, {})
-    ls_cmd = conn.run.call_args_list[0][0][0]
-    # glob stays OUTSIDE the quotes so the remote shell expands it (shlex
-    # leaves a safe name unquoted; special chars would be quoted before the *)
-    assert ls_cmd.startswith("ls -1 /etc/systemd/system/myapp*")
-    assert "*'" not in ls_cmd  # the glob is never inside a quoted segment
-    assert "|| true" in ls_cmd
+    find_cmd = conn.run.call_args_list[0][0][0]
+    # Depth-2 listing: top-level units/dirs plus files inside kept ``*.d/``
+    # dirs. The globs are quoted so the remote shell leaves them to find(1).
+    assert find_cmd == (
+        "cd /etc/systemd/system && find . -maxdepth 2 \\( "
+        "-name 'myapp*' -o -path './myapp*.d/*' \\) -print 2>/dev/null | sort"
+    )
     cmds = [c[0][0] for c in conn.run.call_args_list]
-    assert any("disable --now --quiet myapp-old.service" in c for c in cmds)
-    assert any(
-        "reset-failed myapp-old.service myapp-gone@.service.d" in c for c in cmds
-    )
-    assert any(
-        "sudo rm -rf /etc/systemd/system/myapp-old.service "
-        "/etc/systemd/system/myapp-gone@.service.d" in c
-        for c in cmds
-    )
+    assert any("disable --now --quiet" in c and "myapp-old.service" in c for c in cmds)
+    reset = next(c for c in cmds if "reset-failed" in c)
+    assert "myapp-old.service" in reset
+    assert "myapp-gone@.service.d" in reset
+    # depth-2 dropin file is stale but never fed to systemctl
+    assert "old.conf" not in reset
+    rm = next(c for c in cmds if "rm -rf" in c)
+    assert "/etc/systemd/system/myapp-old.service" in rm
+    assert "/etc/systemd/system/myapp-gone@.service.d" in rm
+    assert "/etc/systemd/system/myapp-web@.service.d/old.conf" in rm
+    assert "/etc/systemd/system/myapp-web@.service" not in rm.split()
 
 
 def test_install_units_no_stale_units(conn):
-    conn.run.side_effect = lambda cmd, **kw: ("", True)  # ls matches nothing
+    conn.run.side_effect = lambda cmd, **kw: ("", True)  # find matches nothing
     serverops.install_units(conn, "myapp", {"myapp-web@.service": "[Unit]\n"}, {})
     cmds = [c[0][0] for c in conn.run.call_args_list]
     assert not any("systemctl disable" in c for c in cmds)

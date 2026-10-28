@@ -350,6 +350,7 @@ class Rollback(BaseCommand):
             host=self.selected_host.name or self.selected_host.address,
             from_version=current_manifest.version,
             to_version=target_manifest.version,
+            digest=target,
         )
 
         self._activation_step(

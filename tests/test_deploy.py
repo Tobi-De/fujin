@@ -18,6 +18,7 @@ import cappa
 import pytest
 
 import fujin.commands.deploy as deploy_mod
+import fujin.build as build_mod
 import fujin.connection
 import fujin.serverops
 import fujin.transfer
@@ -2119,3 +2120,597 @@ def test_noop_full_restart_does_not_probe(monkeypatch, minimal_config, tmp_path)
     assert _probe_calls(spies["conn"], "curl") == []
     operations = [k.get("operation") or a[2] for a, k in spies["log_calls"]]
     assert "noop" in operations
+
+
+# ===========================================================================
+# --dry-run (#90): plan only, zero mutation
+# ===========================================================================
+
+from fujin.manifest import hash_bytes  # noqa: E402  (appended for #90 tests)
+
+DRY_RUN_TREE = {
+    "systemd/testapp-web.service": WEB_UNIT,
+    "systemd/testapp-worker@.service": WEB_UNIT,
+    "assets/logo.png": b"png",
+    "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
+}
+
+MUTATION_TARGETS = {
+    "serverops": (
+        "ensure_layout",
+        "ensure_app_user",
+        "acquire_lock",
+        "release_lock",
+        "write_state",
+        "install_units",
+        "enable_and_start",
+        "stop_and_disable",
+        "link_unchanged",
+        "hash_server_built",
+        "install_code_into_staging",
+        "normalize_staging_ownership",
+        "set_envfile_mode",
+        "collect_garbage",
+        "install_caddyfile",
+    ),
+    "transfer": (
+        "rsync_to_staging",
+        "commit_release",
+        "swap_current",
+        "verify_staging",
+        "cleanup_staging",
+        "sweep_stale_staging",
+    ),
+}
+
+
+def _write_cached_bundle(
+    tmp_path, key="bundle-key", files=DRY_RUN_TREE, version="1.0.0"
+):
+    cache = tmp_path / ".fujin" / "cache" / "bundles" / key
+    hashes = {}
+    for path, content in files.items():
+        data = content if isinstance(content, bytes) else content.encode()
+        full = cache / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_bytes(data)
+        hashes[path] = hash_bytes(data)
+    (cache / "built.json").write_text(
+        json.dumps({"bundle_key": key, "files": hashes, "version": version})
+    )
+    return cache
+
+
+DRY_RUN_UNITS = {
+    "web.service": WEB_UNIT,
+    "worker@.service": WEB_UNIT,
+}
+
+
+def _write_local_units(config):
+    systemd = config.local_config_dir / "systemd"
+    systemd.mkdir(parents=True, exist_ok=True)
+    for name, content in DRY_RUN_UNITS.items():
+        (systemd / name).write_text(content)
+
+
+def _dry_run_setup(
+    monkeypatch,
+    minimal_config,
+    tmp_path,
+    *,
+    cache=False,
+    state=None,
+    prev_manifest=None,
+    replicas=None,
+    env=None,
+    enabled_instances=None,
+    active_instances=None,
+    units=True,
+    cache_version=None,
+):
+    """Dry-run harness: a fake read-only connection + mutation spies.
+
+    The pre-build computation runs for real (``build.prebuild``); the
+    ``units=False`` variant leaves ``.fujin/systemd`` empty to exercise the
+    shared "nothing to build" guard.
+    """
+    if replicas is not None:
+        minimal_config.replicas = replicas
+    if env is not None:
+        minimal_config.hosts[0].env_content = env
+
+    if units:
+        _write_local_units(minimal_config)
+        pre = build_mod.prebuild(minimal_config, host=minimal_config.select_host(None))
+        key = pre.bundle_key
+        if cache:
+            _write_cached_bundle(
+                tmp_path,
+                key=key,
+                version=cache_version
+                if cache_version is not None
+                else minimal_config.local_version,
+            )
+    else:
+        key = "bundle-key"
+
+    # The plan must never execute the build or resolve secrets.
+    monkeypatch.setattr(
+        deploy_mod.build,
+        "run_build",
+        lambda *a, **k: pytest.fail("dry-run must not build"),
+    )
+    monkeypatch.setattr(
+        deploy_mod,
+        "resolve_secrets",
+        lambda *a, **k: pytest.fail("dry-run must not resolve secrets"),
+    )
+
+    enabled = enabled_instances or []
+    active = active_instances or []
+    conn = FakeConn(
+        responses=[
+            (
+                "list-unit-files",
+                (
+                    "".join(f"{name} enabled\n" for name in enabled),
+                    True,
+                ),
+            ),
+            (
+                "list-units",
+                (
+                    "".join(f"{name} loaded active running\n" for name in active),
+                    True,
+                ),
+            ),
+        ]
+    )
+    conn_ctx = MagicMock()
+    conn_ctx.return_value.__enter__.return_value = conn
+    conn_ctx.return_value.__exit__.return_value = None
+    monkeypatch.setattr(fujin.connection, "connection", conn_ctx)
+
+    monkeypatch.setattr(fujin.serverops, "read_state", lambda _c, _a: state)
+    monkeypatch.setattr(
+        fujin.serverops, "read_current_manifest", lambda _c, _a: prev_manifest
+    )
+
+    spies = {}
+    for module, names in MUTATION_TARGETS.items():
+        target = getattr(deploy_mod, module)
+        for name in names:
+            spy = MagicMock()
+            monkeypatch.setattr(target, name, spy)
+            spies[name] = spy
+    log = MagicMock()
+    monkeypatch.setattr(deploy_mod, "log_operation", log)
+    spies["log_operation"] = log
+
+    cmd = Deploy(no_input=True)
+    cmd.dry_run = True
+    cmd.config = minimal_config
+    printer = _CapturingPrinter()
+    cmd.output = printer
+    return cmd, printer, conn, spies
+
+
+def _assert_no_mutations(spies, conn):
+    for name, spy in spies.items():
+        assert not spy.called, f"{name} must not run during --dry-run"
+    assert conn.uploads == []
+    for command, _kw in conn.calls:
+        assert command.startswith(
+            ("readlink ", "systemctl list-unit-files", "systemctl list-units")
+        ), command
+
+
+def test_dry_run_fresh_host_prints_first_deploy_plan(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, conn, spies = _dry_run_setup(
+        monkeypatch, minimal_config, tmp_path, replicas={"worker": 2}
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "host: example.com (example.com)" in lines
+    assert "installation_mode: python-package" in lines
+    assert "app_user: testapp" in lines
+    assert "bundle_key: " in lines
+    assert "cache: would run: echo building" in lines
+    assert "swap: unknown until build" in lines
+    assert "live_release: none" in lines
+    assert "change_expected: yes (first deploy)" in lines
+    assert "source_entries unit: systemd/testapp-web.service" in lines
+    assert "note: the dist/code entry is unknown until the build runs." in lines
+    assert "restart: unknown until build" in lines
+    # A fresh host has no instances: every configured replica starts.
+    assert "converge_start: testapp-worker@1.service, testapp-worker@2.service" in lines
+    assert "converge_stop: none" in lines
+    assert "hooks_pre_install: none" in lines
+    assert "hooks_post_install: none" in lines
+    assert "hooks_post_start: none" in lines
+    _assert_no_mutations(spies, conn)
+
+
+def test_dry_run_cache_hit_uses_cached_manifest(monkeypatch, minimal_config, tmp_path):
+    prev = manifest_for(files=DRY_RUN_TREE, dist="older-dist")
+    cmd, printer, conn, spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        cache=True,
+        prev_manifest=prev,
+        replicas={"worker": 2},
+    )
+    # Entries are compared against the cached bundle, not the live tree.
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "cache: cached (" in lines
+    assert "cache: would run:" not in lines
+    # dist differs -> code change restarts every app service unit.
+    assert "restart: testapp-web.service, testapp-worker@.service" in lines
+    _assert_no_mutations(spies, conn)
+
+
+def test_dry_run_prints_entries_grouped_by_kind(monkeypatch, minimal_config, tmp_path):
+    prev_files = {
+        path: content
+        for path, content in DRY_RUN_TREE.items()
+        if path != "assets/logo.png"
+    }
+    prev_files["assets/old.png"] = b"old"
+    prev = manifest_for(files=prev_files, dist="older-dist")
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        cache=True,
+        prev_manifest=prev,
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert (
+        "entries asset: added=assets/logo.png changed=- removed=assets/old.png" in lines
+    )
+    # Unchanged unit/code entries produce no line at all.
+    assert "entries unit:" not in lines
+    assert "entries code:" not in lines
+
+
+def test_dry_run_change_expected_no_when_plan_matches_live(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "config_fingerprint", lambda *_a, **_k: "fp0")
+    # Match the cached manifest exactly: the dist entry hash comes from the
+    # cached wheel, and the fingerprint is pinned above (before the bundle
+    # key is computed, so the cache lookup uses the pinned value).
+    prev = manifest_for(
+        version=minimal_config.local_version,
+        files=DRY_RUN_TREE,
+        dist=hash_bytes(b"wheel"),
+    )
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        cache=True,
+        prev_manifest=prev,
+        state=State(current="a" * 64),
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert f"live_release: {'a' * 64}" in lines
+    assert "config_fingerprint: fp0 (live: fp0)" in lines
+    assert "env: unchanged" in lines
+    assert "change_expected: no" in lines
+    assert "client_digest: " in lines
+    assert "swap: releases/" in lines
+    assert "transfer: 0 files (4 unchanged hardlinked from the live release)" in lines
+    assert "entries: no changes" in lines
+    assert "restart: none" in lines
+
+
+def test_dry_run_change_expected_yes_on_fingerprint_drift(
+    monkeypatch, minimal_config, tmp_path
+):
+    prev = manifest_for(files=DRY_RUN_TREE, dist="dist-000")
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        cache=True,
+        prev_manifest=prev,
+        state=State(current="b" * 64),
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "change_expected: yes" in lines
+
+
+def test_dry_run_convergence_prints_start_and_stop(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        cache=True,
+        replicas={"worker": 2},
+        enabled_instances=[
+            "testapp-worker@1.service",
+            "testapp-worker@3.service",
+        ],
+        active_instances=[
+            "testapp-worker@1.service",
+            "testapp-worker@3.service",
+        ],
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "converge_start: testapp-worker@2.service" in lines
+    assert "converge_stop: testapp-worker@3.service" in lines
+
+
+def test_dry_run_prints_hook_lists(monkeypatch, minimal_config, tmp_path):
+    from fujin.config import HooksConfig
+
+    cmd, printer, _conn, _spies = _dry_run_setup(monkeypatch, minimal_config, tmp_path)
+    minimal_config.hooks_config = HooksConfig(
+        pre_install=["echo pre"],
+        post_install=["echo post"],
+        post_start=["echo start"],
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "hooks_pre_install: echo pre" in lines
+    assert "hooks_post_install: echo post" in lines
+    assert "hooks_post_start: echo start" in lines
+
+
+def test_dry_run_renders_secret_refs_without_values(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        env="STRIPE_TOKEN=$STRIPE_TOKEN\nDEBUG=1",
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "env_refs: STRIPE_TOKEN=<$STRIPE_TOKEN>" in lines
+    assert SENTINEL not in lines
+    assert "$STRIPE_TOKEN\n" not in lines
+
+
+def test_two_consecutive_dry_runs_print_same_plan(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd1, printer1, _conn1, _spies1 = _dry_run_setup(
+        monkeypatch, minimal_config, tmp_path, cache=True
+    )
+    assert invoke(cmd1) == 0
+
+    cmd2, printer2, _conn2, _spies2 = _dry_run_setup(
+        monkeypatch, minimal_config, tmp_path, cache=True
+    )
+    assert invoke(cmd2) == 0
+
+    assert printer1.lines == printer2.lines
+
+
+def test_dry_run_no_cache_ignores_existing_cache(monkeypatch, minimal_config, tmp_path):
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch, minimal_config, tmp_path, cache=True
+    )
+    cmd.no_cache = True
+
+    assert invoke(cmd) == 0
+
+    assert "cache: would run: echo building" in "\n".join(printer.lines)
+
+
+def test_dry_run_ignores_server_built_venv_entries(
+    monkeypatch, minimal_config, tmp_path
+):
+    """venv/** exists only on the server: it must not look like a removal."""
+    monkeypatch.setattr(deploy_mod.m, "config_fingerprint", lambda *_a, **_k: "fp0")
+    live_files = dict(DRY_RUN_TREE)
+    live_files["venv/lib/python3.11/site-packages/pkg/__init__.py"] = b"x"
+    prev = manifest_for(
+        version=minimal_config.local_version,
+        files=live_files,
+        dist=hash_bytes(b"wheel"),
+    )
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        cache=True,
+        prev_manifest=prev,
+        state=State(current="d" * 64),
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "venv/" not in lines
+    assert "change_expected: no" in lines
+    assert "entries: no changes" in lines
+    assert "restart: none" in lines
+    assert "transfer: 0 files" in lines
+
+
+def test_dry_run_reports_version_drift_of_cached_bundle(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "config_fingerprint", lambda *_a, **_k: "fp0")
+    prev = manifest_for(
+        version=minimal_config.local_version,
+        files=DRY_RUN_TREE,
+        dist=hash_bytes(b"wheel"),
+    )
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        cache=True,
+        cache_version="0.9.0",
+        prev_manifest=prev,
+        state=State(current="e" * 64),
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "entries: no changes" in lines
+    assert "change_expected: yes" in lines
+
+
+def test_dry_run_reflects_force_and_full_restart_flags(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch, minimal_config, tmp_path, cache=True
+    )
+    cmd.force = True
+    cmd.full_restart = True
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "change_expected: yes (--force)" in lines
+    assert "restart: all units (--full-restart)" in lines
+
+
+def test_dry_run_without_cache_prints_unknown_swap_and_restart(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, _conn, _spies = _dry_run_setup(monkeypatch, minimal_config, tmp_path)
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "swap: unknown until build" in lines
+    assert "restart: unknown until build" in lines
+
+
+def test_dry_run_prints_transfer_and_env_for_cache_hit(
+    monkeypatch, minimal_config, tmp_path
+):
+    prev = manifest_for(files=DRY_RUN_TREE, dist="older-dist")
+    cmd, printer, _conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        cache=True,
+        prev_manifest=prev,
+        state=State(current="f" * 64),
+    )
+
+    assert invoke(cmd) == 0
+
+    lines = "\n".join(printer.lines)
+    assert "client_digest: " in lines
+    assert "swap: releases/" in lines
+    assert "transfer: 0 files (4 unchanged hardlinked from the live release)" in lines
+    assert "env: changed" in lines
+
+
+def test_dry_run_does_not_write_the_build_cache(monkeypatch, minimal_config, tmp_path):
+    cmd, _printer, _conn, _spies = _dry_run_setup(
+        monkeypatch, minimal_config, tmp_path, cache=True
+    )
+    cache_root = tmp_path / ".fujin" / "cache"
+
+    def snapshot():
+        return {
+            str(path): path.stat().st_mtime_ns
+            for path in (cache_root, *cache_root.rglob("*"))
+        }
+
+    before = snapshot()
+    assert invoke(cmd) == 0
+    assert snapshot() == before
+
+
+def test_dry_run_and_build_share_the_prebuild_computation(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, _conn, _spies = _dry_run_setup(monkeypatch, minimal_config, tmp_path)
+
+    assert invoke(cmd) == 0
+
+    expected = build_mod.prebuild(minimal_config).bundle_key
+    assert f"bundle_key: {expected}" in "\n".join(printer.lines)
+
+
+def test_dry_run_empty_systemd_dir_fails_like_a_real_build(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, conn, _spies = _dry_run_setup(
+        monkeypatch, minimal_config, tmp_path, units=False
+    )
+
+    with pytest.raises(DeploymentError) as dry:
+        cmd()
+    assert dry.value.message == "No systemd units found, nothing to build"
+
+    with pytest.raises(DeploymentError) as real:
+        build_mod.prebuild(minimal_config)
+    assert real.value.message == dry.value.message
+    assert real.value.code == dry.value.code
+    # Nothing was printed and no SSH connection was opened.
+    assert printer.lines == []
+    assert conn.calls == []
+
+
+def test_dry_run_rejects_unresolved_env_placeholder_before_output(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, conn, _spies = _dry_run_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        env="FOO={missing}",
+    )
+
+    with pytest.raises(DeploymentError) as exc:
+        cmd()
+
+    assert "missing" in exc.value.message
+    assert printer.lines == []
+    assert conn.calls == []
+
+
+def test_dry_run_validates_health_check_probe_before_output(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, printer, conn, _spies = _dry_run_setup(
+        monkeypatch, minimal_config, tmp_path, units=False
+    )
+    minimal_config.health_check = HealthCheckConfig(command="curl {missing}")
+
+    with pytest.raises(ImproperlyConfiguredError) as exc:
+        cmd()
+
+    assert "missing" in str(exc.value.message)
+    assert printer.lines == []
+    assert conn.calls == []

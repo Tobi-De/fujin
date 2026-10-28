@@ -41,6 +41,8 @@ Quick Reference
      - Migrate from older Fujin configuration formats
    * - :doc:`audit`
      - View audit logs for deployment operations stored on the server
+   * - :doc:`doctor`
+     - Check server-state integrity and repair safe inconsistencies
    * - :doc:`exit-codes`
      - Documented process exit codes for scripts and CI
 
@@ -60,4 +62,5 @@ Quick Reference
    cache
    migrate
    audit
+   doctor
    exit-codes
