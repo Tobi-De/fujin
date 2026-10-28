@@ -4,10 +4,11 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.28.0b2] - 2026-10-28
 
 ### 🐛 Bug Fixes
 
+- *(deploy)* Upgrade legacy unit content and verify rollback readiness
 - *(cli)* Generate release-tree content in init and migrate
 
 ## [0.28.0-beta.1] - 2026-10-28

@@ -286,10 +286,10 @@ with self.connection() as conn:
 
 ```python
 self.output.success("Operation completed!")  # green
-self.output.error("Something failed")        # red
-self.output.warning("Be careful")            # yellow
-self.output.info("FYI...")                   # blue
-self.output.output("Plain text")             # no color
+self.output.error("Something failed")  # red
+self.output.warning("Be careful")  # yellow
+self.output.info("FYI...")  # blue
+self.output.output("Plain text")  # no color
 ```
 
 ## Project-Specific Notes
