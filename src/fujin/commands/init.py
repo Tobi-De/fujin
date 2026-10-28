@@ -47,6 +47,16 @@ class Init(BaseCommand):
 
         # Generate minimal fujin.toml
         config = self._generate_toml(app_name)
+        if self.profile == "django":
+            # Migrations and static collection run once per release against
+            # the new release's own virtualenv, not on every service restart.
+            resolved_app = config["app"]
+            config["hooks"] = {
+                "post_install": [
+                    f"{{app_dir}}/venv/bin/{resolved_app} migrate --no-input",
+                    f"{{app_dir}}/venv/bin/{resolved_app} collectstatic --no-input",
+                ]
+            }
         fujin_toml.write_text(tomli_w.dumps(config, multiline_strings=True))
         self.output.success("Generated fujin.toml")
 
@@ -140,56 +150,44 @@ class Init(BaseCommand):
 
         # Web service
         web_service = systemd_dir / "web.service"
+        # Keep the framework-agnostic placeholder from the template; the unit
+        # tells the user to adjust the main command.
         service_content = NEW_SERVICE_TEMPLATE.format(name="web")
-        # Customize ExecStart for gunicorn
-        service_content = service_content.replace(
-            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{install_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
-        )
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
         self._create_caddyfile(fujin_dir, app_name, "localhost:8000")
 
     def _generate_django(self, app_name: str, fujin_dir: Path):
-        """Generate Django profile: web service with migrations."""
+        """Generate Django profile: web service served by gunicorn.
+
+        Migrations and collectstatic run as post-install hooks (once per
+        release) rather than on every service restart.
+        """
         systemd_dir = fujin_dir / "systemd"
         systemd_dir.mkdir(parents=True, exist_ok=True)
 
-        # Web service with pre-start migrations
         web_service = systemd_dir / "web.service"
         service_content = NEW_SERVICE_TEMPLATE.format(name="web")
 
-        # Add ExecStartPre for migrations and collectstatic
-        exec_start_pre_lines = (
-            f"# Run migrations and collect static files before starting\n"
-            f"ExecStartPre={{install_dir}}/.venv/bin/{app_name} migrate\n"
-            f"ExecStartPre={{install_dir}}/.venv/bin/{app_name} collectstatic --no-input\n"
-            f"ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/ {{app_dir}}/staticfiles/'\n"
+        service_content = service_content.replace(
+            "WorkingDirectory={app_dir}",
+            "WorkingDirectory={app_dir}/current",
         )
         service_content = service_content.replace(
-            "# Main command - adjust to match your application\n", exec_start_pre_lines
-        )
-
-        # Customize ExecStart for gunicorn and add reload with migrations
-        service_content = service_content.replace(
-            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{install_dir}}/.venv/bin/gunicorn {app_name}.wsgi:application --bind 0.0.0.0:8000",
-        )
-        exec_reload_lines = (
-            f"ExecReload={{install_dir}}/.venv/bin/{app_name} migrate\n"
-            f"ExecReload={{install_dir}}/.venv/bin/{app_name} collectstatic --no-input\n"
-            f"ExecReload=/bin/kill -s HUP $MAINPID\n"
-        )
-        service_content = service_content.replace(
-            "ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/",
-            f"{exec_reload_lines}ExecStartPre=/bin/bash -c 'rsync -a --delete staticfiles/",
+            "ExecStart={app_dir}/current/venv/bin/python -m myapp.web",
+            "# Adjust the WSGI module to match your Django project\n"
+            "ExecStart={app_dir}/current/venv/bin/gunicorn "
+            "myapp.wsgi:application --bind localhost:8000",
         )
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")
 
         self._create_caddyfile(
-            fujin_dir, app_name, "localhost:8000", static_path="{app_dir}/staticfiles/"
+            fujin_dir,
+            app_name,
+            "localhost:8000",
+            static_path="{app_dir}/current/staticfiles/",
         )
 
     def _generate_binary(self, app_name: str, fujin_dir: Path):
@@ -204,13 +202,14 @@ class Init(BaseCommand):
         # Add ExecStartPre for migrations
         service_content = service_content.replace(
             "# Main command - adjust to match your application\n",
-            f"# Run migrations before starting\nExecStartPre={{app_dir}}/{app_name} migrate\n\n",
+            "# Run migrations before starting\n"
+            f"ExecStartPre={{app_dir}}/current/bin/{app_name} migrate\n\n",
         )
 
-        # Customize ExecStart for binary (no .venv)
+        # Customize ExecStart for binary (no venv)
         service_content = service_content.replace(
-            "ExecStart={install_dir}/.venv/bin/python -m myapp.web",
-            f"ExecStart={{app_dir}}/{app_name} prodserver",
+            "ExecStart={app_dir}/current/venv/bin/python -m myapp.web",
+            f"ExecStart={{app_dir}}/current/bin/{app_name} prodserver",
         )
         web_service.write_text(service_content)
         self.output.success(f"  Created {web_service}")

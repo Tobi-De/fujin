@@ -41,6 +41,14 @@ def test_init_creates_fujin_toml_with_simple_profile(tmp_path, monkeypatch):
         assert (clean_dir / ".fujin/systemd/web.service").exists()
         assert (clean_dir / ".fujin/Caddyfile").exists()
 
+        # Service points into the release tree, not the deprecated install dir;
+        # the main command stays the framework-agnostic template placeholder.
+        web_service = (clean_dir / ".fujin/systemd/web.service").read_text()
+        assert "{install_dir}" not in web_service
+        assert "ExecStart={app_dir}/current/venv/bin/python -m myapp.web" in web_service
+        assert "current/venv/bin/" in web_service
+        assert "gunicorn" not in web_service
+
         # Verify success messages (includes file creation messages)
         mock_output.success.assert_any_call("Generated fujin.toml")
         mock_output.success.assert_any_call(
@@ -70,16 +78,46 @@ def test_init_with_profiles(tmp_path, monkeypatch, profile):
         assert (tmp_path / ".fujin/systemd").exists()
         assert (tmp_path / ".fujin/Caddyfile").exists()
 
+        web_service = (tmp_path / ".fujin/systemd/web.service").read_text()
+        exec_start = next(
+            line for line in web_service.splitlines() if line.startswith("ExecStart=")
+        )
+
+        # Every profile references the release tree, never the deprecated
+        # install directory or a bare checkout path.
+        assert "{install_dir}" not in web_service
+        assert ".install" not in web_service
+        assert "current/" in exec_start
+        assert "{app_dir}/current/.env" in web_service
+
         # Profile-specific checks
         if profile == "django":
-            # Django has web service with migrations
-            web_service = (tmp_path / ".fujin/systemd/web.service").read_text()
-            assert "migrate" in web_service
-            assert "collectstatic" in web_service
-        elif profile == "binary":
-            # Binary has web service without .venv
-            web_service = (tmp_path / ".fujin/systemd/web.service").read_text()
+            app_name = config["app"]
+            assert exec_start == (
+                "ExecStart={app_dir}/current/venv/bin/gunicorn "
+                "myapp.wsgi:application --bind localhost:8000"
+            )
+            # Comment tells the user to adjust the WSGI module.
+            assert "# Adjust the WSGI module" in web_service
+            assert "WorkingDirectory={app_dir}/current\n" in web_service
+            # Migrations/collectstatic are post-install hooks, not per-restart.
+            assert "ExecStartPre" not in web_service
+            assert "ExecReload" not in web_service
+            assert "migrate" not in web_service
+            assert config["hooks"]["post_install"] == [
+                f"{{app_dir}}/venv/bin/{app_name} migrate --no-input",
+                f"{{app_dir}}/venv/bin/{app_name} collectstatic --no-input",
+            ]
+
+            caddyfile = (tmp_path / ".fujin/Caddyfile").read_text()
+            assert "root * {app_dir}/current/staticfiles/" in caddyfile
+            assert "{install_dir}" not in caddyfile
+        else:
+            binary = f"{{app_dir}}/current/bin/{config['app']}"
+            assert exec_start == f"ExecStart={binary} prodserver"
+            assert f"ExecStartPre={binary} migrate" in web_service
             assert ".venv" not in web_service
+            assert "hooks" not in config
 
 
 # ============================================================================
