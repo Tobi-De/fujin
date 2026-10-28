@@ -300,11 +300,7 @@ class Server(BaseCommand):
 
             self.output.info("Installing scoped sudoers rule...")
             script = sudoers.install_dropin_script(name, rule)
-            output, installed = conn.run(
-                f"sudo bash -c {shlex.quote(script)}",
-                warn=True,
-                pty=True,
-            )
+            output, installed = conn.run_script(script, sudo=True, warn=True)
             if not installed or sudoers.DROPIN_OK not in output:
                 raise cappa.Exit(
                     f"User {name} was created, but the sudoers rule was not "
@@ -393,11 +389,7 @@ class Server(BaseCommand):
             # re-derives the legacy line from the live file (no TOCTOU) and
             # restores both files itself if anything fails.
             script = sudoers.harden_script(user, app_user, self.config.app_name, rule)
-            output, ok = conn.run(
-                f"sudo bash -c {shlex.quote(script)}",
-                warn=True,
-                pty=True,
-            )
+            output, ok = conn.run_script(script, sudo=True, warn=True)
             if not ok or sudoers.HARDEN_OK not in output:
                 reason = "unknown cause"
                 for line in output.splitlines():

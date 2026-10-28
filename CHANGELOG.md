@@ -45,6 +45,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### ⚡ Performance
 
+- *(deploy)* Clone the live venv when requirements are unchanged
 - *(deploy)* Hash server-built files once per deploy
 - *(deploy)* Cut pre/post-deploy SSH round-trips
 

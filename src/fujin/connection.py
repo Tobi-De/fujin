@@ -5,8 +5,10 @@ import hashlib
 import shlex
 import logging
 import os
+import secrets
 import select
 import socket
+import tempfile
 import time
 import subprocess
 from fujin.errors import UploadError
@@ -30,6 +32,16 @@ from fujin.config import HostConfig
 from fujin.errors import ConnectionError, SSHAuthenticationError, CommandError
 
 logger = logging.getLogger(__name__)
+
+#: Commands larger than this are spooled to a remote file and executed with
+#: ``sh <file>``. Sending a large script as one exec-channel string can wedge
+#: libssh2 forever (see deploy._write_remote_manifest for the same lesson).
+SPOOL_THRESHOLD_BYTES = 4096
+
+
+def should_spool(command: str) -> bool:
+    """Whether *command* is too large to send through the exec channel."""
+    return len(command.encode("utf-8")) > SPOOL_THRESHOLD_BYTES
 
 
 class SSH2Connection:
@@ -71,6 +83,11 @@ class SSH2Connection:
     ) -> tuple[str, bool]:
         """Executes a command on the remote host.
 
+        Non-PTY commands larger than :data:`SPOOL_THRESHOLD_BYTES` are
+        uploaded to a private remote temp file and executed as
+        ``sh <file>``: sending a big script through the exec channel in one
+        string can wedge libssh2. The temp file is always removed afterwards.
+
         Args:
             command: The shell command to execute
             warn: If True, don't raise an exception on non-zero exit status
@@ -96,9 +113,6 @@ class SSH2Connection:
         # Interactive sessions have no output deadline: the user may think.
         if pty:
             idle_timeout = None
-        idle_deadline = None
-        if idle_timeout is not None:
-            idle_deadline = time.monotonic() + idle_timeout
 
         cwd_prefix = ""
         if self.cwd:
@@ -111,6 +125,119 @@ class SSH2Connection:
         )
         full_command = f'export PATH="{env_prefix}"; {cwd_prefix}{command}'
         logger.debug(f"Running command: {full_command}")
+
+        # A large script sent as a single exec-channel string can wedge
+        # libssh2, so spool it to a remote temp file and send a tiny
+        # ``sh <file>`` directive instead. PTY sessions stay on the direct
+        # path: they are interactive and tiny by nature.
+        if not pty and should_spool(full_command):
+            return self._run_spooled(full_command, command, warn, hide, idle_timeout)
+
+        return self._execute(full_command, command, warn, pty, hide, idle_timeout)
+
+    def run_script(
+        self,
+        script: str,
+        *,
+        sudo: bool = False,
+        interpreter: str = "bash",
+        warn: bool = False,
+        hide: bool = False,
+        idle_timeout: float = 300,
+    ) -> tuple[str, bool]:
+        """Run a (possibly large) shell script without a PTY.
+
+        The script is spooled to a private remote temp file and executed as
+        ``[sudo] <interpreter> <file>``. Use this for admin transactions that
+        must not travel through the exec channel as one big string (they can
+        wedge libssh2) and do not need a terminal. ``sudo`` here is the
+        operator's full sudo (``server harden`` / ``create-user`` are admin
+        actions, not the scoped deploy rule).
+        """
+        return self._run_spooled(
+            script,
+            script,
+            warn,
+            hide,
+            idle_timeout,
+            interpreter=interpreter,
+            sudo=sudo,
+        )
+
+    def _run_spooled(
+        self,
+        full_command: str,
+        command: str,
+        warn: bool,
+        hide: bool,
+        idle_timeout: float | None,
+        *,
+        interpreter: str = "sh",
+        sudo: bool = False,
+    ) -> tuple[str, bool]:
+        """Upload *full_command* to a private remote temp file and run it."""
+        remote = f"/tmp/fujin-cmd-{os.getpid()}-{secrets.token_hex(8)}.sh"
+        fd, local = tempfile.mkstemp(prefix="fujin-cmd-", suffix=".sh")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(full_command)
+            # mkstemp already creates 0600; be explicit so the upload mode
+            # handled to the remote side is never world-readable.
+            os.chmod(local, 0o600)
+            try:
+                self.put(local, remote)
+            except (SSH2Error, OSError) as exc:
+                # Uploading the spool file is part of running the command:
+                # a dying transport here is still exit code 5.
+                raise ConnectionError(
+                    "SSH transport failed while uploading the spooled command"
+                    f" script: {command[:120]!r}: {exc}"
+                ) from exc
+            prefix = "sudo " if sudo else ""
+            return self._execute(
+                f"{prefix}{interpreter} {shlex.quote(remote)}",
+                command,
+                warn,
+                False,
+                hide,
+                idle_timeout,
+            )
+        finally:
+            self._remove_remote_script(remote)
+            try:
+                os.unlink(local)
+            except OSError:
+                logger.debug("Failed to remove local spool file", exc_info=True)
+
+    def _remove_remote_script(self, remote: str) -> None:
+        """Best-effort removal of a spooled remote script.
+
+        Runs in a ``finally`` block, so it must never mask the original
+        error: the rm is short and its own failures are swallowed.
+        """
+        try:
+            self.run(
+                f"rm -f {shlex.quote(remote)}",
+                warn=True,
+                hide=True,
+                idle_timeout=30,
+            )
+        except BaseException:
+            logger.debug("Failed to remove remote spool file", exc_info=True)
+
+    def _execute(
+        self,
+        directive: str,
+        command: str,
+        warn: bool,
+        pty: bool,
+        hide: bool,
+        idle_timeout: float | None,
+    ) -> tuple[str, bool]:
+        """Run *directive* on the remote host, streaming its output."""
+        idle_deadline = None
+        if idle_timeout is not None:
+            idle_deadline = time.monotonic() + idle_timeout
 
         stdout_buffer = []
         stderr_buffer = []
@@ -134,7 +261,7 @@ class SSH2Connection:
             try:
                 if pty:
                     channel.pty()
-                channel.execute(full_command)
+                channel.execute(directive)
 
                 # Switch to raw mode for interactive sessions to prevent local echo
                 # and handle password masking correctly.

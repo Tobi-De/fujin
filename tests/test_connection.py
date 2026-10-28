@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import re
+import shlex
 import socket
 from unittest.mock import MagicMock, patch
 
@@ -10,8 +13,8 @@ import pytest
 from ssh2.exceptions import SSH2Error
 
 from fujin.config import HostConfig
-from fujin.connection import SSH2Connection
-from fujin.errors import CommandError, ConnectionError
+from fujin.connection import SPOOL_THRESHOLD_BYTES, SSH2Connection, should_spool
+from fujin.errors import CommandError, ConnectionError, UploadError
 from fujin.exit_codes import EXIT_HOST_UNREACHABLE
 
 
@@ -245,6 +248,172 @@ def test_cleanup_failure_does_not_mask_remote_exit_status(
         connection.run("false", hide=True)
 
     assert excinfo.value.code == 7
+
+
+# ============================================================================
+# Spooling large commands (never send big scripts through the exec channel)
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        (0, False),
+        (SPOOL_THRESHOLD_BYTES, False),
+        (SPOOL_THRESHOLD_BYTES + 1, True),
+    ],
+)
+def test_should_spool_uses_the_byte_threshold(size, expected):
+    assert should_spool("x" * size) is expected
+
+
+def test_should_spool_counts_utf8_bytes():
+    # 2048 chars * 2 bytes == exactly the threshold; one more char spools.
+    assert should_spool("é" * 2048) is False
+    assert should_spool("é" * 2049) is True
+
+
+@pytest.fixture
+def spool_connection(connection):
+    """Connection with the channel internals replaced by recording doubles."""
+    connection.put = MagicMock()
+    execute = MagicMock(return_value=("output", True))
+    connection._execute = execute
+    return connection, execute
+
+
+def test_large_non_pty_command_is_spooled_then_cleaned_up(spool_connection):
+    conn, execute = spool_connection
+    big = "echo " + "x" * (SPOOL_THRESHOLD_BYTES + 100)
+    captured = {}
+
+    def fake_put(local, remote, verify=False):
+        captured["local"] = local
+        captured["remote"] = remote
+        with open(local, encoding="utf-8") as handle:
+            captured["content"] = handle.read()
+        captured["mode"] = os.stat(local).st_mode & 0o777
+
+    conn.put.side_effect = fake_put
+
+    assert conn.run(big, warn=True, hide=True, idle_timeout=12) == ("output", True)
+
+    remote = captured["remote"]
+    assert re.fullmatch(r"/tmp/fujin-cmd-\d+-[0-9a-f]{16}\.sh", remote)
+    assert captured["mode"] == 0o600
+    assert captured["content"].startswith('export PATH="')
+    assert captured["content"].endswith(big)
+    assert not os.path.exists(captured["local"])
+
+    assert execute.call_count == 2
+    run_call, cleanup_call = execute.call_args_list
+    assert run_call.args[0] == f"sh {shlex.quote(remote)}"
+    assert run_call.args[1:] == (big, True, False, True, 12)
+    assert f"rm -f {shlex.quote(remote)}" in cleanup_call.args[0]
+    assert cleanup_call.args[2] is True  # cleanup is warn=True: never raises
+
+
+def test_spool_path_is_unique_per_call(spool_connection):
+    conn, _ = spool_connection
+    big = "echo " + "x" * SPOOL_THRESHOLD_BYTES
+    remotes = []
+    conn.put.side_effect = lambda local, remote, verify=False: remotes.append(remote)
+
+    conn.run(big, hide=True, warn=True)
+    conn.run(big, hide=True, warn=True)
+
+    assert len(set(remotes)) == 2
+
+
+def test_small_non_pty_command_is_not_spooled(spool_connection):
+    conn, execute = spool_connection
+
+    assert conn.run("echo hi", hide=True) == ("output", True)
+
+    conn.put.assert_not_called()
+    assert execute.call_count == 1
+    assert execute.call_args.args[0].endswith("; echo hi")
+
+
+def test_pty_command_is_never_spooled_even_when_large(connection, mock_ssh_components):
+    _, mock_channel, _ = mock_ssh_components
+    connection.put = MagicMock()
+    big = "echo " + "x" * SPOOL_THRESHOLD_BYTES
+
+    connection.run(big, pty=True, hide=True)
+
+    connection.put.assert_not_called()
+    mock_channel.execute.assert_called_once()
+    assert big in mock_channel.execute.call_args.args[0]
+
+
+def test_spooled_cleanup_runs_when_execution_fails(spool_connection):
+    conn, execute = spool_connection
+
+    original = ConnectionError("transport lost")
+
+    def fake_execute(directive, command, warn, pty, hide, idle_timeout):
+        if directive.startswith("sh "):
+            raise original
+        return ("", True)
+
+    execute.side_effect = fake_execute
+
+    with pytest.raises(ConnectionError) as excinfo:
+        conn.run("echo " + "x" * SPOOL_THRESHOLD_BYTES, hide=True)
+
+    assert excinfo.value is original
+
+    assert execute.call_count == 2
+    assert "rm -f /tmp/fujin-cmd-" in execute.call_args_list[1].args[0]
+
+
+def test_spooled_cleanup_failure_does_not_mask_original_error(spool_connection):
+    conn, execute = spool_connection
+
+    def fake_execute(directive, command, warn, pty, hide, idle_timeout):
+        raise RuntimeError(f"boom: {directive.split()[0]}")
+
+    execute.side_effect = fake_execute
+
+    with pytest.raises(RuntimeError, match="boom: sh"):
+        conn.run("echo " + "x" * SPOOL_THRESHOLD_BYTES, hide=True)
+
+    # The rm ran (and failed) without replacing the original error.
+    assert execute.call_count == 2
+
+
+def test_spooled_command_is_cleaned_up_when_upload_fails(spool_connection):
+    conn, execute = spool_connection
+    captured = {}
+
+    upload_error = UploadError("scp failed")
+
+    def failing_put(local, remote, verify=False):
+        captured["local"] = local
+        captured["remote"] = remote
+        raise upload_error
+
+    conn.put.side_effect = failing_put
+
+    with pytest.raises(UploadError) as excinfo:
+        conn.run("echo " + "x" * SPOOL_THRESHOLD_BYTES, hide=True)
+
+    assert excinfo.value is upload_error
+
+    assert not os.path.exists(captured["local"])
+    assert execute.call_count == 1
+    assert f"rm -f {shlex.quote(captured['remote'])}" in execute.call_args.args[0]
+
+
+def test_spool_upload_transport_failure_is_connection_error(spool_connection):
+    conn, _ = spool_connection
+    conn.put.side_effect = SSH2Error("socket disconnected")
+
+    with pytest.raises(ConnectionError) as excinfo:
+        conn.run("echo " + "x" * SPOOL_THRESHOLD_BYTES, hide=True)
+
+    assert excinfo.value.code == EXIT_HOST_UNREACHABLE
 
 
 # ============================================================================

@@ -7,7 +7,6 @@ setup-ssh, upgrade handling and the scoped-sudoers transactions.
 
 from __future__ import annotations
 
-import shlex
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -428,6 +427,26 @@ class FakeConn:
                 return result
         return ("", True)
 
+    def run_script(
+        self,
+        script,
+        *,
+        sudo=False,
+        interpreter="bash",
+        warn=False,
+        hide=False,
+        idle_timeout=300,
+    ):
+        # Admin scripts are spooled, so the script body is the recorded unit
+        # of work (the wrapper command is a tiny ``[sudo] bash <tmp>``).
+        self.commands.append(script)
+        if script in self.exact:
+            return self.exact[script]
+        for needle, result in self.contains.items():
+            if needle in script:
+                return result
+        return ("", True)
+
 
 def _run_with_fake(conn: FakeConn, config, method, *args, **kwargs):
     with (
@@ -462,14 +481,12 @@ CAT = "sudo cat /etc/sudoers"
 
 def _install_cmd(name: str = "newdeploy") -> str:
     rule = sudoers.render_rule(name, "testapp", "testapp")
-    script = sudoers.install_dropin_script(name, rule)
-    return f"sudo bash -c {shlex.quote(script)}"
+    return sudoers.install_dropin_script(name, rule)
 
 
 def _harden_cmd() -> str:
     rule = sudoers.render_rule("deploy", "testapp", "testapp")
-    script = sudoers.harden_script("deploy", "testapp", "testapp", rule)
-    return f"sudo bash -c {shlex.quote(script)}"
+    return sudoers.harden_script("deploy", "testapp", "testapp", rule)
 
 
 def test_create_user_installs_scoped_dropin_and_never_appends_nopasswd(
