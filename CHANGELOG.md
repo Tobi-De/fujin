@@ -44,6 +44,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - *(tests)* Lint autofixes in integration tests
 
+### 🧪 Testing
+
+- *(ci)* Fail fast on hung integration tests
+
 ### ⚙️ Miscellaneous Tasks
 
 - Raise integration job timeout to 40m
