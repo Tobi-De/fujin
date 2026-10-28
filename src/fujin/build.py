@@ -89,6 +89,8 @@ def _interpolation_context(config: Config, host: HostConfig) -> dict[str, object
         "version": config.version,
         "app_dir": config.app_dir,
         "install_dir": config.install_dir,
+        # Persistent app data, outside the immutable release tree (#74).
+        "shared_dir": f"{config.app_dir}/shared",
         "user": host.user,
     }
     # Add unit names to context for cross-service references (e.g., After={web_socket});

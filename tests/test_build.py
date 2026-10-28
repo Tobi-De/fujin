@@ -55,6 +55,24 @@ def build_cached_bundles(project: Path) -> int:
     return len([p for p in cache.iterdir() if p.is_dir()])
 
 
+def test_caddyfile_shared_dir_is_interpolated(project):
+    """{shared_dir} resolves in a Caddyfile like any other template variable."""
+    from fujin.build import _gather_sources
+
+    (project / ".fujin" / "Caddyfile").write_text(
+        "example.com {\n    root * {shared_dir}\n    file_server\n}\n"
+    )
+    config = make_config(project)
+
+    _sources, _tree, caddyfile, _assets, unresolved = _gather_sources(
+        config, host=config.hosts[0], assets=None
+    )
+
+    assert unresolved == set()
+    assert caddyfile is not None
+    assert "root * /opt/fujin/testapp/shared" in caddyfile
+
+
 def test_build_produces_staging_tree(project):
     config = make_config(project)
     result = run_build(config)

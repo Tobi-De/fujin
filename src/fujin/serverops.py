@@ -751,13 +751,54 @@ def install_units(
     for name, content in unit_files.items():
         _sudo_write(conn, f"/etc/systemd/system/{name}", content)
     for unit, files in dropins.items():
+        if not files:
+            continue
         dir_path = f"/etc/systemd/system/{unit}.d"
+        # The dropin directory is not shipped as a unit file, so create it
+        # before writing into it (``mkdir -p`` is idempotent).
+        _, ok = conn.run(f"sudo mkdir -p {shlex.quote(dir_path)}", warn=True, hide=True)
+        if not ok:
+            raise ServerOpsError(f"Failed to create {dir_path} on server")
         for name, content in files.items():
             _sudo_write(conn, f"{dir_path}/{name}", content)
+
+    # A unit that no longer declares dropins must not keep an empty
+    # ``<unit>.d`` directory behind (systemd treats it as present, and a
+    # stale empty dir confuses ``installed_unit_tree`` consumers).
+    _remove_empty_dropin_dirs(
+        conn,
+        app_name,
+        {f"{unit}.d" for unit in units}
+        - {f"{unit}.d" for unit, files in dropins.items() if files},
+    )
 
     _, ok = conn.run("sudo systemctl daemon-reload", warn=True)
     if not ok:
         raise ServerOpsError("systemctl daemon-reload failed")
+
+
+def _remove_empty_dropin_dirs(conn: Any, app_name: str, candidates: set[str]) -> None:
+    """Remove empty ``<app>*.d`` dirs among *candidates* (relative names).
+
+    Only directories the server itself reports as empty are deleted, so a
+    dropin dir that still holds undeclared files is left for inspection.
+    """
+    if not candidates:
+        return
+    out, _ok = conn.run(
+        f"cd /etc/systemd/system && find . -maxdepth 1 -type d"
+        f" -name {shlex.quote(app_name + '*.d')} -empty -print 2>/dev/null",
+        warn=True,
+        hide=True,
+    )
+    empty = {
+        line.strip().removeprefix("./") for line in out.splitlines() if line.strip()
+    }
+    targets = sorted(candidates & empty)
+    if not targets:
+        return
+    paths = " ".join(shlex.quote(f"/etc/systemd/system/{name}") for name in targets)
+    conn.run(f"sudo rm -rf {paths}", warn=True, hide=True)
 
 
 def _remove_stale_units(conn: Any, app_name: str, valid: set[str]) -> None:
@@ -1012,6 +1053,28 @@ def _list_template_instances(conn: Any, command: str, pattern: str) -> set[str]:
     return instances
 
 
+def _enabled_template_instances(conn: Any, pattern: str) -> set[str]:
+    """Instances enabled on disk, derived from ``*.wants``/``*.requires`` links.
+
+    ``systemctl list-unit-files`` lists the template unit file (``svc@.service``)
+    but never its instances, so it cannot tell whether ``svc@2`` is enabled.
+    ``systemctl enable`` records enablement as a symlink inside a target's
+    ``.wants``/``.requires`` directory, which this read-only scan finds - that
+    is what makes a manually stopped (but still enabled) instance visible.
+    """
+    out, _ok = conn.run(
+        f"find /etc/systemd/system -maxdepth 2 -type l"
+        f" -name {shlex.quote(pattern)} -printf '%f\\n' 2>/dev/null || true",
+        warn=True,
+        hide=True,
+    )
+    return {
+        name
+        for name in (line.strip() for line in out.splitlines())
+        if name.endswith(".service") and not name.endswith("@.service")
+    }
+
+
 def template_instance_plan(
     conn: Any, app_name: str, desired: Iterable[str]
 ) -> tuple[list[str], list[str]]:
@@ -1026,7 +1089,7 @@ def template_instance_plan(
     pattern = f"{app_name}-*@*.service"
     enabled = _list_template_instances(
         conn, "systemctl list-unit-files --no-legend", pattern
-    )
+    ) | _enabled_template_instances(conn, pattern)
     active = _list_template_instances(
         conn,
         "systemctl list-units --type=service --state=active --no-legend",

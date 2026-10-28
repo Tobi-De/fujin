@@ -205,9 +205,19 @@ Create standard systemd service files with Fujin-specific variable substitution:
 
 **Available Variables:**
 
+These work in systemd unit files, dropins and the Caddyfile alike:
+
 - ``{app_name}`` - Your application name
 - ``{app_dir}`` - Full path to application directory (``/opt/fujin/{app_name}``)
 - ``{app_user}`` - User to run the app as (defaults to app_name)
+- ``{version}`` - Version being deployed
+- ``{install_dir}`` - Legacy deployment-infrastructure path (``.install``)
+- ``{user}`` - SSH/deploy user
+- ``{shared_dir}`` - Persistent app data outside the release tree
+  (``/opt/fujin/{app_name}/shared``); use it for Caddyfile roots and unit
+  paths that must survive a deploy
+- ``{<service>_socket}`` / ``{<service>_timer}`` / ``{<service>}`` -
+  discovered unit names for cross-service ``After=``/``Requires=``
 
 **Timers:**
 
@@ -323,6 +333,8 @@ Hook commands support the same template variables as systemd unit files:
 - ``{app_user}`` - User running the app
 - ``{version}`` - Current version being deployed
 - ``{install_dir}`` - Legacy deployment-infrastructure path (``.install``); prefer ``{app_dir}/current/...`` for the live release
+- ``{shared_dir}`` - Persistent app data outside the release tree
+  (``/opt/fujin/{app_name}/shared``)
 
 Complete Example
 ~~~~~~~~~~~~~~~~

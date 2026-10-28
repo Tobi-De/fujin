@@ -2302,7 +2302,14 @@ def _assert_no_mutations(spies, conn):
     assert conn.uploads == []
     for command, _kw in conn.calls:
         assert command.startswith(
-            ("readlink ", "systemctl list-unit-files", "systemctl list-units")
+            (
+                "readlink ",
+                "systemctl list-unit-files",
+                "systemctl list-units",
+                # Read-only: enabled template instances live as ``.wants``
+                # symlinks, which list-unit-files never reports.
+                "find /etc/systemd/system",
+            )
         ), command
 
 

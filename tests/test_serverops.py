@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 from unittest.mock import MagicMock
 
 import pytest
@@ -357,6 +358,72 @@ def test_install_units_writes_and_reloads(conn):
     assert base64.b64encode(b"[Service]\n").decode() in "\n".join(cmds)
 
 
+def test_install_units_creates_dropin_directories(conn):
+    serverops.install_units(
+        conn,
+        "myapp",
+        {"myapp-web.service": "[Service]\n"},
+        {"myapp-web.service": {"limits.conf": "[Service]\nLimitNOFILE=8192\n"}},
+    )
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    mkdir_index = cmds.index("sudo mkdir -p /etc/systemd/system/myapp-web.service.d")
+    write_index = next(
+        i
+        for i, cmd in enumerate(cmds)
+        if "/etc/systemd/system/myapp-web.service.d/limits.conf" in cmd
+    )
+    # The directory must exist before the first write into it.
+    assert mkdir_index < write_index
+
+
+def test_install_units_dropin_directory_failure(conn):
+    conn.run.side_effect = lambda cmd, **kw: (
+        ("", True)
+        if cmd != "sudo mkdir -p /etc/systemd/system/myapp-web.service.d"
+        else ("", False)
+    )
+    with pytest.raises(serverops.ServerOpsError, match="myapp-web.service.d"):
+        serverops.install_units(
+            conn,
+            "myapp",
+            {},
+            {"myapp-web.service": {"limits.conf": "[Service]\n"}},
+        )
+
+
+def test_install_units_removes_empty_declared_dropin_dir(conn):
+    def run(cmd, **kw):
+        if cmd.startswith("cd /etc/systemd/system && find . -maxdepth 2"):
+            return "./myapp-web.service.d\n./myapp-web.service.d/old.conf\n", True
+        if cmd.startswith("cd /etc/systemd/system && find . -maxdepth 1"):
+            return "./myapp-web.service.d\n", True
+        return "", True
+
+    conn.run.side_effect = run
+    serverops.install_units(conn, "myapp", {"myapp-web.service": "[Unit]\n"}, {})
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    assert "sudo rm -rf /etc/systemd/system/myapp-web.service.d" in cmds
+
+
+def test_install_units_keeps_non_empty_dropin_dir(conn):
+    def run(cmd, **kw):
+        if cmd.startswith("cd /etc/systemd/system && find . -maxdepth 2"):
+            return "./myapp-web.service.d\n./myapp-web.service.d/keep.conf\n", True
+        return "", True  # the -empty probe finds nothing
+
+    conn.run.side_effect = run
+    serverops.install_units(conn, "myapp", {"myapp-web.service": "[Unit]\n"}, {})
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    removed = [
+        target
+        for cmd in cmds
+        if cmd.startswith("sudo rm -rf ")
+        for target in shlex.split(cmd)[3:]
+    ]
+    assert "/etc/systemd/system/myapp-web.service.d" not in removed
+    assert "/etc/systemd/system/myapp-web.service.d/keep.conf" in removed
+
+
 def test_install_units_stale_cleanup(conn):
     conn.run.side_effect = lambda cmd, **kw: (
         (
@@ -411,6 +478,47 @@ def test_write_file_failure_raises(conn):
     conn.run.return_value = ("", False)
     with pytest.raises(serverops.ServerOpsError, match="write"):
         serverops.install_units(conn, "myapp", {"myapp-web.service": "[Unit]\n"}, {})
+
+
+# =============================================================================
+# template_instance_plan
+# =============================================================================
+
+
+def test_template_instance_plan_sees_stopped_enabled_instance(conn):
+    """``list-unit-files`` never reports instances; ``.wants`` symlinks do."""
+
+    def run(cmd, **kw):
+        if "list-unit-files" in cmd:
+            return "", True  # real systemd: only the bare template is listed
+        if cmd.startswith("find /etc/systemd/system"):
+            return "myapp-web@1.service\nmyapp-web@2.service\n", True
+        if "list-units" in cmd:
+            return "myapp-web@1.service loaded active running\n", True
+        return "", True
+
+    conn.run.side_effect = run
+    start, stop = serverops.template_instance_plan(
+        conn, "myapp", ["myapp-web@1", "myapp-web@2"]
+    )
+    assert start == ["myapp-web@2.service"]
+    assert stop == []
+
+
+def test_template_instance_plan_stops_extra_enabled_instance(conn):
+    def run(cmd, **kw):
+        if "list-unit-files" in cmd:
+            return "", True
+        if cmd.startswith("find /etc/systemd/system"):
+            return "myapp-web@1.service\nmyapp-web@3.service\n", True
+        if "list-units" in cmd:
+            return "myapp-web@1.service loaded active running\n", True
+        return "", True
+
+    conn.run.side_effect = run
+    start, stop = serverops.template_instance_plan(conn, "myapp", ["myapp-web@1"])
+    assert start == []
+    assert stop == ["myapp-web@3.service"]
 
 
 # =============================================================================

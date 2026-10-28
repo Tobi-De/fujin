@@ -150,6 +150,9 @@ def command_groups(
             *_cmds("find", f"{app_dir}*"),
         ),
         "unit-files": (
+            # Dropin directories (``<unit>.d``) must exist before the first
+            # file is written; ``/etc/systemd/system`` itself always exists.
+            *_cmds("mkdir", "-p", f"{units}*"),
             *_cmds("tee", f"{units}*"),
             *_cmds("mv", f"{units}*", f"{units}*"),
             *_cmds("rm", "-rf", f"{units}*"),

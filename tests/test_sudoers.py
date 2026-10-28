@@ -155,6 +155,23 @@ def test_file_commands_are_path_restricted_to_the_app():
     } <= seen
 
 
+def test_rule_grants_mkdir_only_for_dropin_directories_and_app_tree():
+    # ``install_units`` creates ``/etc/systemd/system/<unit>.d`` before the
+    # first dropin write, so that exact shape must be granted (both usr-merge
+    # directories) and nothing broader.
+    specs = _specs()
+    for directory in ("/usr/bin", "/bin"):
+        assert f"{directory}/mkdir -p /etc/systemd/system/{APP_NAME}*" in specs
+        assert f"{directory}/mkdir -p /opt/fujin/{APP_NAME}*" in specs
+    mkdir_specs = [spec for spec in specs if _binary(spec) == "mkdir"]
+    allowed = {
+        f"/{prefix}/mkdir -p {root}{APP_NAME}*"
+        for prefix in ("usr/bin", "bin")
+        for root in ("/opt/fujin/", "/etc/systemd/system/")
+    } | {f"/{prefix}/mkdir -p /opt/fujin/.audit" for prefix in ("usr/bin", "bin")}
+    assert set(mkdir_specs) <= allowed
+
+
 def test_rule_is_rendered_for_the_app_name():
     rule = sudoers.render_rule(DEPLOY_USER, APP_USER, "otherapp")
     assert "/opt/fujin/otherapp" in rule

@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- *(server)* Scoped sudoers rule instead of NOPASSWD:ALL (#93)
 - *(cli)* Deploy --dry-run and fujin doctor (#90 #92)
 - *(config)* Per-host config fingerprint and cross-host deploy guard (#86)
 - *(secrets)* Folder-scoped bitwarden resolution with batch lookup (#95)
