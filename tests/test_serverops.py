@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import shlex
 import subprocess
 from unittest.mock import MagicMock
 
@@ -350,100 +349,106 @@ def test_release_lock_file(conn):
 
 
 # =============================================================================
-# install_code_into_staging
+# prepare_staging (fused code install + permission model)
 # =============================================================================
 
 
-def test_install_code_python(conn, tmp_path):
-    dist = tmp_path / "myapp-1.0-py3-none-any.whl"
-    dist.write_bytes(b"wheel")
-    req = tmp_path / "requirements.txt"
-    req.write_text("flask\n")
-
-    serverops.install_code_into_staging(
+def _prepare(
+    conn,
+    *,
+    mode="python-package",
+    python="3.11",
+    requirements=None,
+    dist="bin/myapp-1.0-py3-none-any.whl",
+    app_name="myapp",
+):
+    serverops.prepare_staging(
         conn,
         "/opt/fujin/myapp/releases/.staging-1",
-        "python-package",
-        "3.11",
-        str(req),
-        "bin/myapp-1.0-py3-none-any.whl",
-        app_name="myapp",
+        mode,
+        python,
+        requirements,
+        dist,
+        app_name=app_name,
+        app_user="myapp",
     )
-    # dist and requirements are part of the rsynced staging tree: nothing is
-    # uploaded again (the pip command only asserts requirements.txt exists)
-    assert conn.put.call_args_list == []
 
+
+def test_prepare_staging_python_round_trips(conn):
+    """uv's own steps stay separate; every chmod/chgrp step is one call."""
+    _prepare(conn)
     cmds = [c[0][0] for c in conn.run.call_args_list]
-    assert any(
-        "uv venv --relocatable -p 3.11 --managed-python" in c and "staging-1/venv" in c
-        for c in cmds
-    )
-    pip = next(c for c in cmds if "uv pip install --python" in c)
+    assert len(cmds) == 3
+    assert "uv venv --relocatable -p 3.11 --managed-python" in cmds[0]
+    assert ".staging-1/venv" in cmds[0]
+    assert "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python" in cmds[0]
+    pip = cmds[1]
+    assert "uv pip install --python" in pip
     assert "--no-deps" in pip
-    assert "staging-1/bin/myapp-1.0-py3-none-any.whl" in pip
-    assert "test -f /opt/fujin/myapp/releases/.staging-1/requirements.txt" in pip
-    assert "-r /opt/fujin/myapp/releases/.staging-1/requirements.txt" in pip
+    assert ".staging-1/bin/myapp-1.0-py3-none-any.whl" in pip
     assert "UV_COMPILE_BYTECODE=1" in pip
-    assert "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python" in pip
-    # no transient distfile upload/cleanup exists anymore
+    # nothing is uploaded again: dist and requirements ride in the rsync tree
+    assert conn.put.call_args_list == []
     assert not any(".distfile" in c for c in cmds)
 
 
-def test_install_code_python_venv_never_live(conn):
-    serverops.install_code_into_staging(
-        conn,
-        "/opt/fujin/myapp/releases/.staging-1",
-        "python-package",
-        "3.12",
-        None,
-        "bin/dist.whl",
-        app_name="myapp",
+def test_prepare_staging_python_permission_pass_is_one_call(conn):
+    _prepare(conn)
+    script = conn.run.call_args_list[-1][0][0]
+    assert conn.run.call_count == 3
+    assert "chmod -R u+rwX,go+rX /opt/fujin/myapp/releases/.staging-1/venv" in script
+    assert "chmod -R u+x /opt/fujin/myapp/releases/.staging-1/venv/bin" in script
+    assert "chmod 0640 /opt/fujin/myapp/releases/.staging-1/.env" in script
+    assert "sudo chgrp -R myapp /opt/fujin/myapp/releases/.staging-1" in script
+    assert (
+        "sudo find /opt/fujin/myapp/releases/.staging-1 -path"
+        " /opt/fujin/myapp/releases/.staging-1/venv -prune -o -type d"
+        " -exec chmod g+rxs {} +" in script
     )
-    for c in conn.run.call_args_list:
-        # target is always staging/venv, never .install/.venv
-        assert ".install" not in c[0][0]
+    assert "-prune -o -links 1 -type f -exec chmod g+rX {} +" in script
+    # venv/ is pruned from the tree-wide walks: its modes come from the
+    # venv-specific chmod above (one walk over venv instead of three).
+    assert script.count("-prune -o") == 2
+    assert "sudo" not in script.split("sudo chgrp")[0]
 
 
-def test_install_code_binary(conn, tmp_path):
-    dist = tmp_path / "myapp"
-    dist.write_bytes(b"\x7fELF...")
-    serverops.install_code_into_staging(
-        conn,
-        "/opt/fujin/myapp/releases/.staging-7",
-        "binary",
-        None,
-        None,
-        "bin/myapp",
-        app_name="myapp",
-    )
-    # dist ships via the rsynced staging tree; no per-file upload anymore
+def test_prepare_staging_python_never_live(conn):
+    _prepare(conn)
+    for call in conn.run.call_args_list:
+        assert ".install" not in call[0][0]
+
+
+def test_prepare_staging_binary_is_one_call(conn):
+    _prepare(conn, mode="binary", python=None, dist="bin/myapp")
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    assert len(cmds) == 1
+    script = cmds[0]
+    assert "mkdir -p /opt/fujin/myapp/releases/.staging-1/bin" in script
+    assert "chmod 755 /opt/fujin/myapp/releases/.staging-1/bin/myapp" in script
+    assert "chmod 0640 /opt/fujin/myapp/releases/.staging-1/.env" in script
+    assert "sudo chgrp -R myapp" in script
+    # a binary release has no venv to install
+    assert "uv venv" not in script
     assert conn.put.call_args_list == []
-    assert any(
-        "chmod 755" in c[0][0] and "staging-7/bin/myapp" in c[0][0]
-        for c in conn.run.call_args_list
-    )
 
 
-def test_install_code_unknown_mode(conn):
+def test_prepare_staging_unknown_mode(conn):
     with pytest.raises(serverops.ServerOpsError, match="Unknown installation mode"):
-        serverops.install_code_into_staging(
-            conn,
-            "/tmp/staging",
-            "docker",
-            None,
-            None,
-            "bin/d",
-            app_name="x",
-        )
+        _prepare(conn, mode="docker", python=None, dist="bin/d")
 
 
-def test_install_code_python_missing_requirements_fails(conn):
+def test_prepare_staging_python_requires_version(conn):
+    with pytest.raises(serverops.ServerOpsError, match="python_version"):
+        _prepare(conn, python=None)
+
+
+def test_prepare_staging_missing_requirements_fails(conn):
     conn.run.side_effect = [
         ("", True),  # uv venv
         ("fujin: /s/requirements.txt missing from the staging tree", False),
     ]
     with pytest.raises(serverops.ServerOpsError, match="missing from the staging"):
-        serverops.install_code_into_staging(
+        serverops.prepare_staging(
             conn,
             "/s",
             "python-package",
@@ -451,21 +456,94 @@ def test_install_code_python_missing_requirements_fails(conn):
             "local/requirements.txt",
             "bin/myapp-1.0-py3-none-any.whl",
             app_name="x",
+            app_user="x",
         )
 
 
-def test_install_code_failure_raises(conn, tmp_path):
+def test_prepare_staging_venv_failure_raises(conn):
     conn.run.side_effect = [("error out", False)]
     with pytest.raises(serverops.ServerOpsError, match="venv"):
-        serverops.install_code_into_staging(
-            conn,
-            "/s",
-            "python-package",
-            "3.11",
-            None,
-            "bin/myapp-1.0-py3-none-any.whl",
-            app_name="x",
-        )
+        _prepare(conn)
+
+
+def test_prepare_staging_permission_failure_names_the_step(conn):
+    def run(cmd, **kw):
+        if "chgrp" in cmd:
+            return ("FUJIN-FAIL:chgrp", False)
+        return ("", True)
+
+    conn.run.side_effect = run
+    with pytest.raises(serverops.ServerOpsError, match="normalize ownership"):
+        _prepare(conn)
+
+
+def test_prepare_staging_env_mode_failure_is_attributed(conn):
+    def run(cmd, **kw):
+        if "chmod 0640" in cmd:
+            return ("FUJIN-FAIL:env-mode", False)
+        return ("", True)
+
+    conn.run.side_effect = run
+    with pytest.raises(serverops.ServerOpsError, match=r"chmod \.env"):
+        _prepare(conn)
+
+
+def test_prepare_staging_permission_script_runs_locally(tmp_path, monkeypatch):
+    """The fused permission pass must produce the same owners/modes as the
+    sequential chmod/chgrp/find implementation it replaced."""
+    root = tmp_path / "staging"
+    (root / "venv" / "bin").mkdir(parents=True)
+    (root / "venv" / "lib" / "site-packages").mkdir(parents=True)
+    (root / "assets").mkdir()
+    (root / ".env").write_text("SECRET=1\n")
+    (root / "assets" / "logo.png").write_bytes(b"png")
+    (root / "venv" / "bin" / "python").write_text("#!/bin/sh\n")
+    (root / "venv" / "lib" / "site-packages" / "mod.py").write_text("x = 1\n")
+    # A hardlink stands in for a file hardlinked from the live release: its
+    # inode must not be chmod-ed.
+    live = tmp_path / "live-asset"
+    live.write_bytes(b"shared")
+    live.chmod(0o640)
+    (root / "assets" / "shared.bin").write_bytes(b"shared")
+    (root / "assets" / "shared.bin").unlink()
+    import os
+
+    os.link(live, root / "assets" / "shared.bin")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "sudo").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "sudo $*" >> "$SUDO_LOG"\n'
+        'if [ "$1" = chgrp ]; then exit 0; fi\nexec "$@"\n'
+    )
+    (bindir / "sudo").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    monkeypatch.setenv("SUDO_LOG", str(tmp_path / "sudo.log"))
+
+    script = serverops._staging_permissions_script(
+        str(root), "myapp", "python-package", "bin/myapp"
+    )
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    def mode(path):
+        return path.stat().st_mode & 0o7777
+
+    assert mode(root / ".env") == 0o640
+    # setgid is preserved on both venv and tree directories (the umask of the
+    # test process decides whether the group-write bit is already set)
+    venv_lib = root / "venv" / "lib" / "site-packages"
+    assert mode(venv_lib) & 0o2000
+    assert mode(root / "assets") & 0o2000
+    venv_file = root / "venv" / "lib" / "site-packages" / "mod.py"
+    # venv entries get u+rwX,go+rX (not the tree-wide group-only bits)
+    assert mode(venv_file) in (0o644, 0o664)
+    # the hardlinked live file keeps its inode mode
+    assert mode(live) == 0o640
+    sudo_log = (tmp_path / "sudo.log").read_text()
+    assert "sudo chgrp -R myapp" in sudo_log
+    assert "-exec chmod g+rxs {} +" in sudo_log
+    assert "-exec chmod g+rX {} +" in sudo_log
 
 
 # =============================================================================
@@ -513,168 +591,270 @@ def test_hash_server_built_command_fails(conn):
 
 
 # =============================================================================
-# install_units
+# install_units (one fused script)
 # =============================================================================
 
 
-def test_install_units_writes_and_reloads(conn):
-    serverops.install_units(
-        conn,
-        "myapp",
-        {"myapp-web@.service": "[Service]\n", "myapp-web.socket": "[Socket]\n"},
-        {"myapp-web@.service": {"limits.conf": "[Service]\nLimitNOFILE=8192\n"}},
+UNIT_FILES = {
+    "myapp-web.service": "[Service]\nExecStart=/bin/true\n",
+    "myapp-web.socket": "[Socket]\nListenStream=/run/myapp/web.sock\n",
+    "myapp-worker@.service": "[Service]\n",
+}
+DROPINS = {
+    "myapp-web.service": {"limits.conf": "[Service]\nLimitNOFILE=8192\n"},
+    "myapp-worker@.service": {"env.conf": "[Service]\n"},
+}
+
+
+def test_install_units_is_one_round_trip(conn):
+    serverops.install_units(conn, "myapp", UNIT_FILES, DROPINS)
+    assert conn.run.call_count == 1
+    script = conn.run.call_args[0][0]
+    # both scans run first, between markers
+    assert script.index("find . -maxdepth 2") < script.index(
+        serverops.INSTALL_INSTALLED_END
     )
-    cmds = [c[0][0] for c in conn.run.call_args_list]
-    assert any(
-        "sudo tee" in c and "/etc/systemd/system/myapp-web@.service" in c for c in cmds
+    assert script.index("find . -maxdepth 1") < script.index(
+        serverops.INSTALL_EMPTY_END
     )
-    assert any("/etc/systemd/system/myapp-web.socket" in c for c in cmds)
-    assert any("myapp-web@.service.d/limits.conf" in c for c in cmds)
-    assert cmds[-1] == "sudo systemctl daemon-reload"
+    assert script.index(serverops.INSTALL_INSTALLED_END) < script.index("sudo mkdir -p")
+    assert script.index(serverops.INSTALL_EMPTY_END) < script.index(
+        "sudo systemctl daemon-reload"
+    )
+    # every unit/dropin is written with the per-file sudo tee/mv shape
+    for unit in ("myapp-web.service", "myapp-web.socket", "myapp-worker@.service"):
+        assert f"sudo tee /etc/systemd/system/{unit}.fujin-new" in script
+        assert (
+            f"sudo mv /etc/systemd/system/{unit}.fujin-new /etc/systemd/system/{unit}"
+            in script
+        )
+    for dropin in (
+        "myapp-web.service.d/limits.conf",
+        "myapp-worker@.service.d/env.conf",
+    ):
+        assert f"sudo tee /etc/systemd/system/{dropin}.fujin-new" in script
+        assert (
+            f"sudo mv /etc/systemd/system/{dropin}.fujin-new /etc/systemd/system/{dropin}"
+            in script
+        )
+    # all dropin dirs exist before the writes
+    assert script.index(
+        "sudo mkdir -p /etc/systemd/system/myapp-web.service.d"
+    ) < script.index(
+        "sudo tee /etc/systemd/system/myapp-web.service.d/limits.conf.fujin-new"
+    )
+    # the daemon-reload runs exactly once and last
+    assert script.count("sudo systemctl daemon-reload") == 1
+    assert script.splitlines()[-1].startswith("sudo systemctl daemon-reload")
     # content travels base64-encoded (quoting safe)
-    assert base64.b64encode(b"[Service]\n").decode() in "\n".join(cmds)
+    assert base64.b64encode(b"[Service]\nLimitNOFILE=8192\n").decode() in script
 
 
-def test_install_units_creates_dropin_directories(conn):
-    serverops.install_units(
-        conn,
-        "myapp",
-        {"myapp-web.service": "[Service]\n"},
-        {"myapp-web.service": {"limits.conf": "[Service]\nLimitNOFILE=8192\n"}},
+def test_install_units_stale_and_prune_lists_are_literal(conn):
+    serverops.install_units(conn, "myapp", UNIT_FILES, DROPINS)
+    script = conn.run.call_args[0][0]
+    # declared names are accepted literally, so a stale sibling still matches
+    # the fallback patterns
+    assert (
+        "myapp-web.service|myapp-web.service.d|myapp-web.service.d/limits.conf"
+        in script
     )
-    cmds = [c[0][0] for c in conn.run.call_args_list]
-    mkdir_index = cmds.index("sudo mkdir -p /etc/systemd/system/myapp-web.service.d")
-    write_index = next(
-        i
-        for i, cmd in enumerate(cmds)
-        if "/etc/systemd/system/myapp-web.service.d/limits.conf" in cmd
-    )
-    # The directory must exist before the first write into it.
-    assert mkdir_index < write_index
+    assert "*/*) sudo rm -rf" in script
+    assert "*@.service)" in script
+    # the empty-dir prune only targets units without declared dropins
+    assert "myapp-web.socket.d)" in script
+    assert "myapp-web.service.d)" not in script.split('case "$rel" in')[-1]
 
 
-def test_install_units_dropin_directory_failure(conn):
-    conn.run.side_effect = lambda cmd, **kw: (
-        ("", True)
-        if cmd != "sudo mkdir -p /etc/systemd/system/myapp-web.service.d"
-        else ("", False)
+def test_install_units_stale_removal_happens_before_prune(conn):
+    serverops.install_units(conn, "myapp", UNIT_FILES, DROPINS)
+    script = conn.run.call_args[0][0]
+    stale_at = script.index("while IFS= read -r name; do")
+    empty_scan_at = script.index("empty=$(find . -maxdepth 1")
+    assert stale_at < empty_scan_at
+
+
+def test_install_units_mkdir_failure_names_the_directory(conn):
+    conn.run.return_value = (
+        "FUJIN-FAIL:mkdir:/etc/systemd/system/myapp-web.service.d",
+        False,
     )
     with pytest.raises(serverops.ServerOpsError, match="myapp-web.service.d"):
-        serverops.install_units(
-            conn,
-            "myapp",
-            {},
-            {"myapp-web.service": {"limits.conf": "[Service]\n"}},
-        )
+        serverops.install_units(conn, "myapp", {}, DROPINS)
 
 
-def test_install_units_removes_empty_declared_dropin_dir(conn):
-    def run(cmd, **kw):
-        if cmd.startswith("cd /etc/systemd/system && find . -maxdepth 2"):
-            return "./myapp-web.service.d\n./myapp-web.service.d/old.conf\n", True
-        if cmd.startswith("cd /etc/systemd/system && find . -maxdepth 1"):
-            return "./myapp-web.service.d\n", True
-        return "", True
-
-    conn.run.side_effect = run
-    serverops.install_units(conn, "myapp", {"myapp-web.service": "[Unit]\n"}, {})
-    cmds = [c[0][0] for c in conn.run.call_args_list]
-    assert "sudo rm -rf /etc/systemd/system/myapp-web.service.d" in cmds
-
-
-def test_install_units_keeps_non_empty_dropin_dir(conn):
-    def run(cmd, **kw):
-        if cmd.startswith("cd /etc/systemd/system && find . -maxdepth 2"):
-            return "./myapp-web.service.d\n./myapp-web.service.d/keep.conf\n", True
-        return "", True  # the -empty probe finds nothing
-
-    conn.run.side_effect = run
-    serverops.install_units(conn, "myapp", {"myapp-web.service": "[Unit]\n"}, {})
-    cmds = [c[0][0] for c in conn.run.call_args_list]
-    removed = [
-        target
-        for cmd in cmds
-        if cmd.startswith("sudo rm -rf ")
-        for target in shlex.split(cmd)[3:]
-    ]
-    assert "/etc/systemd/system/myapp-web.service.d" not in removed
-    assert "/etc/systemd/system/myapp-web.service.d/keep.conf" in removed
-
-
-def test_install_units_stale_cleanup(conn):
-    conn.run.side_effect = lambda cmd, **kw: (
-        (
-            "./myapp-gone@.service.d\n"
-            "./myapp-old.service\n"
-            "./myapp-web@.service\n"
-            "./myapp-web@.service.d/old.conf\n",
-            True,
-        )
-        if cmd.startswith("cd /etc/systemd/system && find .")
-        else ("", True)
+def test_install_units_write_failure_names_the_file(conn):
+    conn.run.return_value = (
+        "FUJIN-FAIL:write:/etc/systemd/system/myapp-web.socket",
+        False,
     )
-    serverops.install_units(conn, "myapp", {"myapp-web@.service": "[Unit]\n"}, {})
-    find_cmd = conn.run.call_args_list[0][0][0]
-    # Depth-2 listing: top-level units/dirs plus files inside kept ``*.d/``
-    # dirs. The globs are quoted so the remote shell leaves them to find(1).
-    assert find_cmd == (
-        "cd /etc/systemd/system && find . -maxdepth 2 \\( "
-        "-name 'myapp*' -o -path './myapp*.d/*' \\) -print 2>/dev/null | sort"
-    )
-    cmds = [c[0][0] for c in conn.run.call_args_list]
-    assert any("disable --now --quiet" in c and "myapp-old.service" in c for c in cmds)
-    reset = next(c for c in cmds if "reset-failed" in c)
-    assert "myapp-old.service" in reset
-    assert "myapp-gone@.service.d" in reset
-    # depth-2 dropin file is stale but never fed to systemctl
-    assert "old.conf" not in reset
-    rm = next(c for c in cmds if "rm -rf" in c)
-    assert "/etc/systemd/system/myapp-old.service" in rm
-    assert "/etc/systemd/system/myapp-gone@.service.d" in rm
-    assert "/etc/systemd/system/myapp-web@.service.d/old.conf" in rm
-    assert "/etc/systemd/system/myapp-web@.service" not in rm.split()
-
-
-def test_install_units_no_stale_units(conn):
-    conn.run.side_effect = lambda cmd, **kw: ("", True)  # find matches nothing
-    serverops.install_units(conn, "myapp", {"myapp-web@.service": "[Unit]\n"}, {})
-    cmds = [c[0][0] for c in conn.run.call_args_list]
-    assert not any("systemctl disable" in c for c in cmds)
-    assert not any("rm -rf" in c for c in cmds)
+    with pytest.raises(
+        serverops.ServerOpsError, match="Failed to write .*myapp-web.socket"
+    ):
+        serverops.install_units(conn, "myapp", UNIT_FILES, DROPINS)
 
 
 def test_install_units_daemon_reload_failure(conn):
-    conn.run.side_effect = lambda cmd, **kw: (
-        ("", True) if cmd != "sudo systemctl daemon-reload" else ("", False)
-    )
+    conn.run.return_value = ("FUJIN-FAIL:daemon-reload", False)
     with pytest.raises(serverops.ServerOpsError, match="daemon-reload"):
-        serverops.install_units(conn, "myapp", {"myapp-web.service": "[Unit]\n"}, {})
+        serverops.install_units(conn, "myapp", UNIT_FILES, DROPINS)
 
 
-def test_write_file_failure_raises(conn):
+def test_install_units_unattributed_failure(conn):
     conn.run.return_value = ("", False)
-    with pytest.raises(serverops.ServerOpsError, match="write"):
-        serverops.install_units(conn, "myapp", {"myapp-web.service": "[Unit]\n"}, {})
+    with pytest.raises(
+        serverops.ServerOpsError, match="Failed to install systemd units"
+    ):
+        serverops.install_units(conn, "myapp", UNIT_FILES, DROPINS)
+
+
+def test_install_units_prunes_empty_declared_dropin_dir(conn):
+    serverops.install_units(
+        conn,
+        "myapp",
+        {"myapp-web.service": "[Unit]\n"},
+        {},
+    )
+    script = conn.run.call_args[0][0]
+    assert "myapp-web.service.d)" in script
+    assert 'sudo rm -rf "/etc/systemd/system/$rel"' in script
+
+
+class _ScriptConn:
+    """Capture the fused script instead of executing it over SSH."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def run(self, command, **kwargs):
+        self.calls.append(command)
+        return "", True
+
+
+def test_install_units_script_runs_locally(tmp_path, monkeypatch):
+    """End-to-end shell check: writes, stale cleanup, pruning, reload order."""
+    root = tmp_path / "systemd"
+    root.mkdir()
+    (root / "myapp-old.service").write_text("[Unit]\n")
+    (root / "myapp-gone@.service").write_text("[Unit]\n")
+    (root / "myapp-web.service").write_text("[Unit]\nold=1\n")
+    (root / "myapp-web.service.d").mkdir()
+    (root / "myapp-web.service.d" / "old.conf").write_text("[Service]\n")
+    (root / "myapp-web.socket.d").mkdir()  # declared unit without dropins
+    (root / "unrelated.service").write_text("[Unit]\n")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "sudo", 'printf "%s\\n" "$*" >> "$SUDO_LOG"\nexec "$@"\n')
+    _stub(bindir, "systemctl", 'printf "%s\\n" "SYSTEMCTL $*" >> "$SUDO_LOG"\n')
+    monkeypatch.setenv("PATH", f"{bindir}:{__import__('os').environ['PATH']}")
+    log = tmp_path / "sudo.log"
+    monkeypatch.setenv("SUDO_LOG", str(log))
+    monkeypatch.setattr(serverops, "SYSTEMD_DIR", str(root))
+
+    conn = _ScriptConn()
+    serverops.install_units(conn, "myapp", UNIT_FILES, DROPINS)
+    assert len(conn.calls) == 1
+    result = subprocess.run(["sh", "-c", conn.calls[0]], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    # writes landed with content; nothing temp is left behind
+    assert (root / "myapp-web.service").read_text().startswith("[Service]\nExecStart")
+    assert (root / "myapp-web.socket").exists()
+    assert (root / "myapp-worker@.service.d" / "env.conf").exists()
+    assert (root / "myapp-web.service.d" / "limits.conf").exists()
+    assert not list(root.glob("*.fujin-new"))
+    assert not list(root.glob("*.d/*.fujin-new"))
+
+    # stale units/files/dirs are gone, unrelated state untouched
+    assert not (root / "myapp-old.service").exists()
+    assert not (root / "myapp-gone@.service").exists()
+    assert not (root / "myapp-web.service.d" / "old.conf").exists()
+    assert not (root / "myapp-web.socket.d").exists()
+    assert (root / "unrelated.service").exists()
+
+    lines = [line for line in log.read_text().splitlines() if line]
+    assert "systemctl disable --now --quiet myapp-old.service" in lines
+    assert "systemctl disable --quiet myapp-gone@.service" in lines
+    assert "systemctl reset-failed myapp-old.service" in lines
+    assert any(line.startswith(f"rm -rf {root}/myapp-old.service") for line in lines)
+    assert any(
+        line.startswith(f"rm -rf {root}/myapp-web.service.d/old.conf") for line in lines
+    )
+    assert any(line.startswith(f"rm -rf {root}/myapp-web.socket.d") for line in lines)
+    # one daemon-reload, after every write and removal
+    reloads = [line for line in lines if line == "systemctl daemon-reload"]
+    assert len(reloads) == 1
+    assert lines[-1] == "SYSTEMCTL daemon-reload"
+
+
+def test_install_units_script_reports_write_failure_locally(tmp_path, monkeypatch):
+    root = tmp_path / "systemd"
+    root.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(
+        bindir,
+        "sudo",
+        'case "$2" in *myapp-web.socket.fujin-new) exit 1;; esac\n'
+        'printf "%s\\n" "$*" >> "$SUDO_LOG"\nexec "$@"\n',
+    )
+    monkeypatch.setenv("PATH", f"{bindir}:{__import__('os').environ['PATH']}")
+    monkeypatch.setenv("SUDO_LOG", str(tmp_path / "sudo.log"))
+    monkeypatch.setattr(serverops, "SYSTEMD_DIR", str(root))
+
+    script = serverops._install_units_script(
+        "myapp", UNIT_FILES, DROPINS, set(UNIT_FILES) | set(DROPINS), set()
+    )
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "FUJIN-FAIL:write:" in result.stdout
+    assert "myapp-web.socket" in result.stdout
 
 
 # =============================================================================
-# template_instance_plan
+# template_instance_plan (one fused query)
 # =============================================================================
+
+
+def _plan_out(*, enabled=(), links=(), active=()):
+    return "".join(
+        [
+            "".join(f"{name} enabled\n" for name in enabled),
+            f"{serverops.PLAN_ENABLED_END}\n",
+            "".join(f"{name}\n" for name in links),
+            f"{serverops.PLAN_LINKS_END}\n",
+            "".join(f"{name} loaded active running\n" for name in active),
+        ]
+    )
+
+
+def test_template_instance_plan_single_round_trip(conn):
+    conn.run.return_value = (
+        _plan_out(enabled=["myapp-web@1.service"], active=["myapp-web@1.service"]),
+        True,
+    )
+    serverops.template_instance_plan(conn, "myapp", ["myapp-web@1"])
+    assert conn.run.call_count == 1
+    cmd = conn.run.call_args[0][0]
+    assert cmd.startswith("systemctl list-unit-files --no-legend 'myapp-*@*.service'")
+    assert cmd.index(serverops.PLAN_ENABLED_END) < cmd.index(
+        "find /etc/systemd/system -maxdepth 2 -type l"
+    )
+    assert cmd.index(serverops.PLAN_LINKS_END) < cmd.index(
+        "systemctl list-units --type=service --state=active --no-legend"
+    )
 
 
 def test_template_instance_plan_sees_stopped_enabled_instance(conn):
     """``list-unit-files`` never reports instances; ``.wants`` symlinks do."""
-
-    def run(cmd, **kw):
-        if "list-unit-files" in cmd:
-            return "", True  # real systemd: only the bare template is listed
-        if cmd.startswith("find /etc/systemd/system"):
-            return "myapp-web@1.service\nmyapp-web@2.service\n", True
-        if "list-units" in cmd:
-            return "myapp-web@1.service loaded active running\n", True
-        return "", True
-
-    conn.run.side_effect = run
+    conn.run.return_value = (
+        _plan_out(
+            links=["myapp-web@1.service", "myapp-web@2.service"],
+            active=["myapp-web@1.service"],
+        ),
+        True,
+    )
     start, stop = serverops.template_instance_plan(
         conn, "myapp", ["myapp-web@1", "myapp-web@2"]
     )
@@ -683,19 +863,106 @@ def test_template_instance_plan_sees_stopped_enabled_instance(conn):
 
 
 def test_template_instance_plan_stops_extra_enabled_instance(conn):
-    def run(cmd, **kw):
-        if "list-unit-files" in cmd:
-            return "", True
-        if cmd.startswith("find /etc/systemd/system"):
-            return "myapp-web@1.service\nmyapp-web@3.service\n", True
-        if "list-units" in cmd:
-            return "myapp-web@1.service loaded active running\n", True
-        return "", True
-
-    conn.run.side_effect = run
+    conn.run.return_value = (
+        _plan_out(
+            links=["myapp-web@1.service", "myapp-web@3.service"],
+            active=["myapp-web@1.service"],
+        ),
+        True,
+    )
     start, stop = serverops.template_instance_plan(conn, "myapp", ["myapp-web@1"])
     assert start == []
     assert stop == ["myapp-web@3.service"]
+
+
+def test_template_instance_plan_stops_highest_first(conn):
+    conn.run.return_value = (
+        _plan_out(
+            enabled=[
+                "myapp-web@1.service enabled",
+                "myapp-web@2.service enabled",
+                "myapp-web@4.service enabled",
+                "myapp-web@canary.service enabled",
+            ],
+            active=["myapp-web@1.service"],
+        ),
+        True,
+    )
+    start, stop = serverops.template_instance_plan(conn, "myapp", ["myapp-web@1"])
+    assert start == []
+    assert stop == [
+        "myapp-web@4.service",
+        "myapp-web@2.service",
+        "myapp-web@canary.service",
+    ]
+
+
+def test_template_instance_plan_bare_template_lines_are_not_instances(conn):
+    conn.run.return_value = (
+        _plan_out(
+            enabled=["myapp-web@.service enabled"],
+            links=["myapp-web@.service"],
+            active=["myapp-web@1.service loaded active running"],
+        ),
+        True,
+    )
+    start, stop = serverops.template_instance_plan(conn, "myapp", ["myapp-web@1"])
+    # the bare template lines add no instance: @1 only needs enabling
+    assert start == ["myapp-web@1.service"]
+    assert stop == []
+
+
+def test_split_plan_sections_tolerates_missing_markers():
+    enabled, links, active = serverops._split_plan_sections("a.service enabled\n")
+    assert enabled == ["a.service enabled"]
+    assert links == [] and active == []
+
+
+# =============================================================================
+# readiness probe (one fused command per poll tick)
+# =============================================================================
+
+
+def test_readiness_probe_command_is_one_call(conn):
+    cmd = serverops.readiness_probe_command(
+        ["myapp-web.service", "myapp-worker@1.service"],
+        {"/run/myapp/web.sock": "myapp-web.socket"},
+    )
+    assert cmd.count("systemctl is-failed") == 1
+    assert "systemctl is-failed myapp-web.service myapp-worker@1.service" in cmd
+    assert cmd.index(serverops.READINESS_STATUS_END) < cmd.index(
+        f"{serverops.READINESS_SOCKET_BEGIN} myapp-web.socket"
+    )
+    assert "test -S /run/myapp/web.sock" in cmd
+    assert "systemctl is-active myapp-web.socket" in cmd
+    # no sudo: the deploy user polls its own units
+    assert "sudo" not in cmd
+
+
+def test_parse_readiness_probe_socket_verdicts():
+    output = (
+        "active\nactivating\n"
+        f"{serverops.READINESS_STATUS_END}\n"
+        f"{serverops.READINESS_SOCKET_BEGIN} myapp-web.socket\npresent\nactive\n"
+        f"{serverops.READINESS_SOCKET_END}\n"
+        f"{serverops.READINESS_SOCKET_BEGIN} myapp-db.socket\npresent\nactivating\n"
+        f"{serverops.READINESS_SOCKET_END}\n"
+        f"{serverops.READINESS_SOCKET_BEGIN} myapp-cache.socket\nmissing\n"
+        f"{serverops.READINESS_SOCKET_END}\n"
+    )
+    statuses, sockets = serverops.parse_readiness_probe(output)
+    assert statuses == ["active", "activating"]
+    assert sockets == {
+        "myapp-web.socket": True,
+        "myapp-db.socket": False,
+        "myapp-cache.socket": False,
+    }
+
+
+def test_parse_readiness_probe_missing_status_marker():
+    statuses, sockets = serverops.parse_readiness_probe("active\nactive\n")
+    assert statuses == ["active", "active"]
+    assert sockets == {}
 
 
 # =============================================================================
@@ -1030,11 +1297,18 @@ def test_stop_and_disable_failure(conn):
 # =============================================================================
 
 
-def test_install_code_python_uses_managed_python_dir(conn, tmp_path):
+def test_prepare_staging_uses_managed_python_dir(conn, tmp_path):
     dist = tmp_path / "myapp-1.0-py3-none-any.whl"
     dist.write_bytes(b"wheel")
-    serverops.install_code_into_staging(
-        conn, "/s", "python-package", "3.11", None, str(dist), app_name="myapp"
+    serverops.prepare_staging(
+        conn,
+        "/s",
+        "python-package",
+        "3.11",
+        None,
+        str(dist),
+        app_name="myapp",
+        app_user="myapp",
     )
     venv_cmd = next(c[0][0] for c in conn.run.call_args_list if "uv venv" in c[0][0])
     assert "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python" in venv_cmd
@@ -1084,19 +1358,6 @@ def test_install_caddyfile_crash_recovery_restores_backup(conn):
         in c[0][0]
         for c in conn.run.call_args_list
     )
-
-
-def test_set_envfile_mode(conn):
-    serverops.set_envfile_mode(conn, "/opt/fujin/myapp/releases/.staging-1")
-    cmd = conn.run.call_args[0][0]
-    assert "chmod 0640 /opt/fujin/myapp/releases/.staging-1/.env" in cmd
-    assert "sudo" not in cmd  # setgid dir handles group ownership
-
-
-def test_set_envfile_mode_failure(conn):
-    conn.run.return_value = ("", False)
-    with pytest.raises(serverops.ServerOpsError):
-        serverops.set_envfile_mode(conn, "/opt/fujin/myapp/releases/.staging-1")
 
 
 # =============================================================================

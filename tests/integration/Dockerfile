@@ -32,7 +32,6 @@ RUN groupadd fujin || true && \
 RUN su - fujin -c "curl -LsSf https://astral.sh/uv/install.sh | sh"
 
 # 4. Systemd cleanup (standard steps to make systemd work in docker)
-RUN systemctl enable ssh
 RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
     /etc/systemd/system/*.wants/* \
     /lib/systemd/system/local-fs.target.wants/* \
@@ -40,6 +39,8 @@ RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
     /lib/systemd/system/sockets.target.wants/*initctl* \
     /lib/systemd/system/sysinit.target.wants/systemd-tmpfiles-setup* \
     /lib/systemd/system/systemd-update-utmp*
+# Enable ssh *after* the cleanup above, which wipes multi-user.target.wants.
+RUN systemctl enable ssh
 
 # 5. Set systemd as entrypoint
 CMD ["/lib/systemd/systemd"]

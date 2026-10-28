@@ -377,6 +377,8 @@ def harden_script(
         rf"^{re.escape(user)}[[:space:]]+ALL=\(ALL(:ALL)?\)[[:space:]]+"
         r"NOPASSWD:[[:space:]]*ALL[[:space:]]*(#.*)?$"
     )
+    # grep takes a bare regex; sed needs an address delimited by slashes.
+    sed_address = f"/{pattern}/d"
     return f"""set -euo pipefail
 umask 077
 SUDOERS={shlex.quote(SUDOERS_PATH)}
@@ -424,7 +426,7 @@ if grep -Eq {shlex.quote(pattern)} "$SUDOERS"; then
     BACKUP="$SUDOERS.{SALT}-backup-$(date -u +%Y%m%dT%H%M%SZ)"
     cp -a "$SUDOERS" "$BACKUP"
     TMP_SUDOERS=$(mktemp "$SUDOERS.{SALT}-XXXXXXXX")
-    sed -E {shlex.quote(pattern + "d")} "$SUDOERS" > "$TMP_SUDOERS"
+    sed -E {shlex.quote(sed_address)} "$SUDOERS" > "$TMP_SUDOERS"
     chmod 0440 "$TMP_SUDOERS"
     visudo -c -f "$TMP_SUDOERS" >/dev/null
     mv -f "$TMP_SUDOERS" "$SUDOERS"
@@ -432,8 +434,10 @@ if grep -Eq {shlex.quote(pattern)} "$SUDOERS"; then
 fi
 visudo -c >/dev/null
 LISTING=$(sudo -l -U {shlex.quote(user)} 2>&1 || true)
-if ! printf '%s\\n' "$LISTING" | grep -q 'FUJIN_DEPLOY'; then
-    FAIL_REASON=alias-missing
+# ``sudo -l`` expands aliases: the rule is visible through its app-scoped
+# command path, not through the alias name.
+if ! printf '%s\\n' "$LISTING" | grep -Fq {shlex.quote(f"/opt/fujin/{app_name}")}; then
+    FAIL_REASON=rule-missing
     exit 1
 fi
 if printf '%s\\n' "$LISTING" | grep -q 'NOPASSWD: ALL'; then

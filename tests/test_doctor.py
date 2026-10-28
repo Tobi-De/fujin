@@ -10,14 +10,17 @@ from __future__ import annotations
 import base64
 import fnmatch
 import json
+import os
 import re
-import shlex
+import subprocess
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import cappa
 import msgspec
 
-from fujin import store
+from fujin import serverops, store
 from fujin.commands.doctor import FAIL, OK, WARN, Doctor
 from fujin.config import Config
 from fujin.manifest import build_manifest, manifest_to_dict
@@ -149,9 +152,50 @@ class FakeConn:
                 lines.append(full)
         return "\n".join(lines) + ("\n" if lines else ""), True
 
+    # -- fused install script ------------------------------------------
+    def _run_install_script(self, cmd):
+        """Execute the fused ``install_units`` script against a scratch tree.
+
+        The real script runs locally with stub ``sudo``/``systemctl``; the
+        resulting file tree is read back into ``self.installed``. That keeps
+        the fake honest about stale removal, dropin pruning and daemon-reload
+        ordering instead of re-implementing the script in Python.
+        """
+        workdir = Path(tempfile.mkdtemp())
+        root = workdir / "systemd"
+        root.mkdir()
+        for rel, content in self.installed.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content or "")
+        bindir = workdir / "bin"
+        bindir.mkdir()
+        sudo = bindir / "sudo"
+        sudo.write_text('#!/bin/sh\nexec "$@"\n')
+        sudo.chmod(0o755)
+        systemctl = bindir / "systemctl"
+        systemctl.write_text("#!/bin/sh\nexit 0\n")
+        systemctl.chmod(0o755)
+        env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+        result = subprocess.run(
+            ["sh", "-c", cmd.replace("/etc/systemd/system", str(root))],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.installed = {
+            str(path.relative_to(root)): path.read_text()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        return result.stdout, result.returncode == 0
+
     # -- exec ----------------------------------------------------------
     def run(self, cmd, **kw):
         self.calls.append(cmd)
+
+        if serverops.INSTALL_INSTALLED_END in cmd:
+            return self._run_install_script(cmd)
 
         if cmd.startswith("readlink "):
             return (self.link or "", self.link is not None)
@@ -165,32 +209,6 @@ class FakeConn:
             return f"{mode:o} {owner} {group}", True
 
         if cmd.startswith("printf '%s'") and "state.json.tmp" in cmd:
-            return "", True
-
-        if "base64 -d" in cmd and "/etc/systemd/system/" in cmd:
-            # Real form: echo <b64> | base64 -d | sudo tee <path>.fujin-new
-            # >/dev/null && sudo mv <path>.fujin-new <path>
-            match = re.search(r"echo (\S+) \| base64 -d", cmd)
-            assert match, cmd
-            mv = re.search(r"&& sudo mv (\S+) (\S+)", cmd)
-            assert mv, cmd
-            dest = mv.group(2).strip("'\"")
-            rel = dest.split("/etc/systemd/system/", 1)[1]
-            self.installed[rel] = base64.b64decode(match.group(1)).decode()
-            return "", True
-
-        if cmd.startswith("sudo rm -rf ") and "/etc/systemd/system/" in cmd:
-            # Targets are shlex-quoted; a directory target takes its contents.
-            for target in shlex.split(cmd)[3:]:
-                if "/etc/systemd/system/" not in target:
-                    continue
-                rel = target.split("/etc/systemd/system/", 1)[1]
-                for key in [
-                    key
-                    for key in self.installed
-                    if key == rel or key.startswith(f"{rel}/")
-                ]:
-                    del self.installed[key]
             return "", True
 
         if cmd.startswith("cat ") and "/store/state.json" in cmd:
@@ -244,10 +262,14 @@ class FakeConn:
             return "\n".join(json.dumps(record) for record in self.audit), True
 
         if "list-unit-files" in cmd:
-            return "\n".join(self.enabled), True
-
-        if "list-units" in cmd:
-            return "\n".join(self.active), True
+            # Fused plan probe: enabled listing, ``.wants`` links, active
+            # listing, separated by end-of-section markers.
+            return (
+                "".join(f"{name} enabled\n" for name in self.enabled)
+                + f"{serverops.PLAN_ENABLED_END}\n"
+                + f"{serverops.PLAN_LINKS_END}\n"
+                + "".join(f"{name} loaded active running\n" for name in self.active)
+            ), True
 
         if "state=free; pid=" in cmd:
             return self.lock + "\n", True
@@ -540,8 +562,12 @@ def test_stray_dropin_inside_kept_dir_is_removed(minimal_config_dict, monkeypatc
     )
 
     assert exit_code == 0
-    assert f"sudo rm -rf /etc/systemd/system/{UNIT_NAME}.d/stray.conf" in conn.calls
-    assert f"sudo rm -rf /etc/systemd/system/{UNIT_NAME}.d" not in conn.calls
+    script = "\n".join(conn.calls)
+    # stale dropin files are removed by the fused install script, but the
+    # kept dropin directory (still declared) survives
+    assert f"{UNIT_NAME}.d/stray.conf" in script
+    assert f'/etc/systemd/system/{UNIT_NAME}.d"' not in script
+    assert f"{UNIT_NAME}.d/stray.conf" not in conn.installed
 
 
 def test_unit_less_release_reports_and_removes_stale_units(
@@ -572,7 +598,8 @@ def test_unit_less_release_reports_and_removes_stale_units(
         monkeypatch, make_config(minimal_config_dict), conn, fix=True
     )
     assert exit_code == 0
-    assert f"sudo rm -rf /etc/systemd/system/{stray}" in conn.calls
+    assert stray not in conn.installed
+    assert "sudo rm -rf" in "\n".join(conn.calls)
 
 
 # ============================================================================
@@ -654,11 +681,12 @@ def test_drifted_units_reinstalled(minimal_config_dict, monkeypatch):
     )
 
     assert exit_code == 0
-    assert any(
-        "base64 -d" in cmd and "/etc/systemd/system/" in cmd for cmd in conn.calls
-    )
-    assert "sudo systemctl daemon-reload" in conn.calls
-    assert "sudo rm -rf /etc/systemd/system/testapp-stray.service" in conn.calls
+    script = "\n".join(conn.calls)
+    assert "base64 -d" in script and "/etc/systemd/system/" in script
+    assert "sudo systemctl daemon-reload" in script
+    # the drifted unit was rewritten, the stray one removed
+    assert "testapp-stray.service" not in conn.installed
+    assert "ExecStart=/bin/true" in conn.installed[UNIT_NAME]
 
 
 # ============================================================================

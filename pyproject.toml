@@ -54,6 +54,7 @@ dev = [
   "fujin-secrets-bitwarden",
   "pytest>=9.0.1",
   "pytest-timeout>=2.4",
+  "pytest-xdist>=3.8",
 ]
 docs = [
   "myst-parser",
@@ -149,6 +150,7 @@ markers = [
   "ssh: Tests requiring SSH connection",
   "installer: Tests for the zipapp installer",
   "use_recorder: mark test to use the mock recorder",
+  "no_app_cleanup: do not run the shared-container app teardown",
 ]
 
 [tool.bumpversion]

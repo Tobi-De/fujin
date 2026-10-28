@@ -937,16 +937,17 @@ class Deploy(BaseCommand):
                 },
                 exclude={build.BUILT_FILENAME},
             )
-            serverops.set_envfile_mode(conn, remote_staging)
-
             self.output.info("Installing application code on the server...")
+            # One fused preparation: app code install, ``.env`` mode and the
+            # deploy permission model (uv's own steps stay separate so their
+            # output is attributed to the right command).
             tree_requirements = staging_dir / build.REQUIREMENTS_TREE_PATH
             dist_tree_path = next(
                 path
                 for path in sorted(result.files)
                 if path.startswith(build.BIN_DIR + "/")
             )
-            serverops.install_code_into_staging(
+            serverops.prepare_staging(
                 conn,
                 remote_staging,
                 config.installation_mode.value,
@@ -954,10 +955,7 @@ class Deploy(BaseCommand):
                 (str(tree_requirements) if tree_requirements.is_file() else None),
                 dist_tree_path,
                 app_name=config.app_name,
-            )
-
-            serverops.normalize_staging_ownership(
-                conn, remote_staging, config.app_user or config.app_name
+                app_user=config.app_user or config.app_name,
             )
 
             server_built = serverops.hash_server_built(
@@ -1402,16 +1400,13 @@ class Deploy(BaseCommand):
         if not units_to_check and not sockets:
             return []
         sorted_units = sorted(units_to_check)
+        # Every fact a tick needs (unit statuses, per socket: file bound and
+        # owning unit active) comes back from ONE read-only command.
+        probe_command = serverops.readiness_probe_command(sorted_units, sockets)
         deadline = time.monotonic() + READINESS_TIMEOUT
         while True:
-            statuses: list[str] = []
-            if sorted_units:
-                out, _ok = _probe(
-                    conn,
-                    "systemctl is-failed "
-                    f"{' '.join(serverops.q(u) for u in sorted_units)}",
-                )
-                statuses = [line.strip() for line in out.splitlines() if line.strip()]
+            out, _ok = _probe(conn, probe_command)
+            statuses, socket_states = serverops.parse_readiness_probe(out)
             failed = [
                 unit
                 for unit, status in zip(sorted_units, statuses, strict=False)
@@ -1426,16 +1421,11 @@ class Deploy(BaseCommand):
                 if status != "active"
             ]
             # A socket file legitimately appears only once the socket unit is
-            # active; the unit check below also covers socket units that are
-            # activating but not yet bound.
+            # active; the probe also reports socket units that are activating
+            # but not yet bound.
             unready_sockets: list[str] = []
-            for path, unit in sockets.items():
-                _, exists = _probe(conn, f"test -S {serverops.q(path)}")
-                socket_active = exists and (
-                    _probe(conn, f"systemctl is-active {serverops.q(unit)}")[0].strip()
-                    == "active"
-                )
-                if not socket_active and unit not in unready_sockets:
+            for unit in sockets.values():
+                if not socket_states.get(unit, False) and unit not in unready_sockets:
                     unready_sockets.append(unit)
             if not not_ready and not unready_sockets:
                 return units_to_check

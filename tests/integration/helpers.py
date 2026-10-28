@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from unittest.mock import patch
 
 
 def exec_in_container(container_name: str, cmd: str) -> tuple[str, bool]:
@@ -17,6 +18,70 @@ def exec_in_container(container_name: str, cmd: str) -> tuple[str, bool]:
         text=True,
     )
     return result.stdout.strip(), result.returncode == 0
+
+
+def container_running(container_name: str) -> bool:
+    """Whether the named container exists and is running."""
+    result = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def teardown_app(container_name: str, app: str) -> None:
+    """Remove every trace of ``app`` from a shared container.
+
+    Stops/disables units, sockets and timers (including template instances),
+    removes unit/dropin files, wants symlinks, the app directory and the app
+    user.  Safe to call for an app that was never deployed.
+    """
+    if not container_running(container_name):
+        return
+    script = f"""
+set +e
+systemctl list-units --all --plain --no-legend '{app}-*' | awk '{{print $1}}' | xargs -r systemctl stop
+systemctl list-unit-files --plain --no-legend '{app}-*' | awk '{{print $1}}' | xargs -r systemctl disable
+rm -f /etc/systemd/system/{app}-*.service /etc/systemd/system/{app}-*.socket /etc/systemd/system/{app}-*.timer
+rm -rf /etc/systemd/system/{app}-*.service.d
+rm -f /etc/systemd/system/*.wants/{app}-*
+rm -f /etc/caddy/conf.d/{app}.caddy
+rm -rf /opt/fujin/{app} /run/{app}
+id -u {app} >/dev/null 2>&1 && userdel -f {app}
+systemctl daemon-reload
+systemctl reset-failed
+true
+"""
+    exec_in_container(container_name, script)
+
+
+def deploy_app(config, *, no_input: bool = True):
+    """Run ``Deploy`` with ``config`` patched in (errors propagate)."""
+    from fujin.commands.deploy import Deploy
+
+    with patch("fujin.config.Config.read", return_value=config):
+        return Deploy(no_input=no_input)()
+
+
+def http_server_script(port: int) -> str:
+    """A tiny static HTTP server used as a deployable binary."""
+    return f"""#!/usr/bin/env python3
+import http.server
+import socketserver
+
+PORT = {port}
+Handler = http.server.SimpleHTTPRequestHandler
+
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+with Server(("", PORT), Handler) as httpd:
+    print(f"Server running on port {{PORT}}")
+    httpd.serve_forever()
+"""
 
 
 def assert_service_running(container_name: str, service_name: str) -> None:
@@ -119,6 +184,31 @@ def assert_systemd_unit_not_exists(container_name: str, unit_name: str) -> None:
     assert not ok, f"Systemd unit {unit_name} should not exist"
 
 
+def assert_no_nopasswd_all(container_name: str, username: str) -> None:
+    """Assert ``/etc/sudoers`` grants no ``NOPASSWD: ALL`` to ``username``."""
+    stdout, _ = exec_in_container(
+        container_name,
+        f"grep -c '{username}.*NOPASSWD:[ ]*ALL' /etc/sudoers || true",
+    )
+    assert stdout.strip() in ("", "0"), (
+        f"{username} must not be granted NOPASSWD: ALL: {stdout}"
+    )
+
+
+def assert_sudo_scoped(
+    container_name: str, username: str, app_dir: str | None = None
+) -> None:
+    """Assert the user only gets the scoped ``FUJIN_DEPLOY`` sudo rule."""
+    stdout, ok = exec_in_container(
+        container_name, f"sudo cat /etc/sudoers.d/fujin-{username}"
+    )
+    assert ok, f"Scoped sudoers drop-in missing for {username}: {stdout}"
+    assert f"{username} ALL=(root) NOPASSWD: FUJIN_DEPLOY" in stdout
+    if app_dir is not None:
+        assert app_dir in stdout, f"{app_dir} not granted in sudoers: {stdout}"
+    assert_no_nopasswd_all(container_name, username)
+
+
 def read_file(container_name: str, path: str) -> str:
     """Read file contents from container."""
     stdout, ok = exec_in_container(container_name, f"cat {path}")
@@ -145,6 +235,24 @@ def get_current_release(container_name: str, app_name: str) -> str:
     return stdout.strip()
 
 
+def get_main_pid(container_name: str, unit_name: str) -> str:
+    """Return the ``MainPID`` of a systemd unit."""
+    stdout, _ = exec_in_container(
+        container_name,
+        f"systemctl show {unit_name} --property=MainPID --value",
+    )
+    return stdout.strip()
+
+
+def release_count(container_name: str, app_name: str) -> int:
+    """Number of committed release directories for an app."""
+    stdout, ok = exec_in_container(
+        container_name, f"ls /opt/fujin/{app_name}/releases/"
+    )
+    assert ok, f"Could not list releases for {app_name}: {stdout}"
+    return len(stdout.split())
+
+
 def assert_release_layout(container_name: str, app_name: str) -> None:
     """Assert the canonical release-tree layout exists with correct modes."""
     app_dir = f"/opt/fujin/{app_name}"
@@ -164,13 +272,10 @@ def assert_noop_redeploy_kept_pid(
     container_name: str, unit_name: str, pid_before: str
 ) -> None:
     """Assert a unit was never restarted: MainPID unchanged from pid_before."""
-    stdout, _ = exec_in_container(
-        container_name,
-        f"systemctl show {unit_name} --property=MainPID --value",
-    )
-    assert stdout.strip() == pid_before, (
+    stdout = get_main_pid(container_name, unit_name)
+    assert stdout == pid_before, (
         f"Unit {unit_name} restarted during a no-op deploy "
-        f"(pid: {pid_before} -> {stdout.strip()})"
+        f"(pid: {pid_before} -> {stdout})"
     )
 
 

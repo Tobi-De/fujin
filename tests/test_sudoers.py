@@ -289,7 +289,7 @@ def test_harden_script_removes_only_the_exact_legacy_line():
 def test_harden_script_verifies_sudo_listing_and_absence_of_nopasswd_all():
     script = sudoers.harden_script(DEPLOY_USER, APP_USER, APP_NAME, _rule())
     assert "sudo -l -U deploy" in script
-    assert "grep -q 'FUJIN_DEPLOY'" in script
+    assert "grep -Fq /opt/fujin/testapp" in script
     assert "grep -q 'NOPASSWD: ALL'" in script
 
 

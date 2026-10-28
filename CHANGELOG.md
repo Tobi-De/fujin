@@ -42,6 +42,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - *(server)* Drop Sphinx role from harden help text
 - Add fujin cache page to commands reference
 
+### ⚡ Performance
+
+- *(deploy)* Cut pre/post-deploy SSH round-trips
+
 ### 🎨 Styling
 
 - *(tests)* Lint autofixes in integration tests

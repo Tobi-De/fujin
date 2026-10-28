@@ -46,9 +46,26 @@ LEGACY_LOCK_PATH = ".deploy_lock"
 STATE_PATH = "store/state.json"
 MANIFEST_PATH = "manifest.json"
 ENV_PATH = ".env"
+SYSTEMD_DIR = "/etc/systemd/system"
 
 _PYTHON_ROOT = "venv"
 _BINARY_ROOT = "bin"
+
+#: End-of-section markers for the fused ``install_units`` script: the scans
+#: are printed first (diagnostics), the mutating steps follow.
+INSTALL_INSTALLED_END = "FUJIN-INSTALLED-END"
+INSTALL_EMPTY_END = "FUJIN-EMPTY-END"
+#: ``FUJIN-FAIL:<step>[:<target>]`` names the step that aborted a fused script.
+INSTALL_FAIL = "FUJIN-FAIL:"
+
+#: End-of-section markers for the fused ``template_instance_plan`` query.
+PLAN_ENABLED_END = "FUJIN-ENABLED-END"
+PLAN_LINKS_END = "FUJIN-LINKS-END"
+
+#: Section markers for the fused readiness probe (one round-trip per tick).
+READINESS_STATUS_END = "FUJIN-STATUS-END"
+READINESS_SOCKET_BEGIN = "FUJIN-SOCKET"
+READINESS_SOCKET_END = "FUJIN-SOCKET-END"
 
 
 class ServerOpsError(RuntimeError):
@@ -377,16 +394,31 @@ def _python_script(body: str, marker: str = "FUJINSCRIPT") -> str:
     return f"python3 - <<'{marker}'\n{body}\n{marker}"
 
 
+def _sudo_write_command(
+    path: str, content: bytes | str, *, chown: str | None = None
+) -> str:
+    """The base64-stream + ``mv`` command that writes a root-owned path.
+
+    Kept as one composable string so fused scripts (``install_units``) keep
+    the exact per-file ``sudo tee`` / ``sudo mv`` shapes the scoped sudoers
+    rule matches.
+    """
+    path_q = shlex.quote(path)
+    tmp_q = shlex.quote(f"{path}.fujin-new")
+    cmd = (
+        f"echo {_b64(content)} | base64 -d | sudo tee {tmp_q} >/dev/null"
+        f" && sudo mv {tmp_q} {path_q}"
+    )
+    if chown is not None:
+        cmd += f" && sudo chown {chown} {path_q}"
+    return cmd
+
+
 def _sudo_write(
     conn: Any, path: str, content: bytes | str, *, chown: str | None = None
 ) -> None:
     """Write file content to a root-owned path via base64 stream + mv."""
-    path_q = shlex.quote(path)
-    tmp_q = shlex.quote(f"{path}.fujin-new")
-    b64 = _b64(content)
-    cmd = f"echo {b64} | base64 -d | sudo tee {tmp_q} >/dev/null && sudo mv {tmp_q} {path_q}"
-    if chown is not None:
-        cmd += f" && sudo chown {chown} {path_q}"
+    cmd = _sudo_write_command(path, content, chown=chown)
     _, ok = conn.run(cmd, warn=True, hide=True)
     if not ok:
         raise ServerOpsError(f"Failed to write {path} on server")
@@ -692,7 +724,30 @@ def probe_lock(conn: Any, app_dir: str) -> LockProbe:
 # =============================================================================
 
 
-def install_code_into_staging(
+def _fail_marker(step: str, target: str | None = None) -> str:
+    """Shell suffix that aborts a fused script with a ``FUJIN-FAIL`` marker.
+
+    Fused scripts lose the per-step exit status that separate ``conn.run``
+    calls had; the marker restores precise failure attribution (which file,
+    which step) without extra round-trips.
+    """
+    marker = f"{INSTALL_FAIL}{step}"
+    if target is not None:
+        marker += f":{target}"
+    return f"|| {{ printf '%s\\n' {shlex.quote(marker)}; exit 1; }}"
+
+
+def _failed_step(output: str) -> str | None:
+    """Value after the last ``FUJIN-FAIL:`` marker in *output* (or None)."""
+    failed = None
+    for line in output.splitlines():
+        text = line.strip()
+        if text.startswith(INSTALL_FAIL):
+            failed = text[len(INSTALL_FAIL) :]
+    return failed
+
+
+def prepare_staging(
     conn: Any,
     staging_dir: str,
     installation_mode: str,
@@ -701,19 +756,25 @@ def install_code_into_staging(
     dist_tree_path: str,
     *,
     app_name: str,
+    app_user: str,
 ) -> None:
-    """Install the application code into *staging*, never into a live venv.
+    """Install the app code and apply the deploy permission model to staging.
 
-    - ``python-package``: the dist file is already part of the staging tree
-      (rsynced to ``{staging}/{dist_tree_path}``); ``uv venv`` builds at
-      ``{staging}/venv`` and ``uv pip install`` installs it there. The staged
-      dist file stays in the tree as a ``code`` entry (it IS the code).
-    - ``binary``: the dist file is staged as ``{staging}/bin/{app_name}``
-      (rsynced); this only ensures the directory exists and the file is 755.
+    Never touches a live venv. The steps and the number of round-trips:
 
-    ``requirements`` is the local requirements.txt path; the build already
-    committed the same file into the staging tree that rsync uploaded, so it
-    is never transferred here - the pip command only asserts it is present.
+    - ``python-package``: ``uv venv`` (1), ``uv pip install`` (1), then the
+      fused permission pass (1) below.
+    - ``binary``: the rsynced dist file plus the fused permission pass (1).
+
+    The permission pass is one ``conn.run`` that sets the ``.env`` mode, the
+    venv modes and the deploy-wide group/setgid model. ``venv/`` is pruned
+    from the tree-wide ``find`` walks: its entries already get their exact
+    modes from the venv-specific passes above, so the venv tree is no longer
+    traversed by every pass of the normalization.
+
+    ``requirements`` is the local requirements.txt path; the build committed
+    the same file into the staging tree that rsync uploaded, so it is never
+    transferred here - the pip command only asserts it is present.
     """
     staging_q = shlex.quote(staging_dir)
     dist_in_tree = f"{staging_q}/{shlex.quote(dist_tree_path)}"
@@ -755,25 +816,92 @@ def install_code_into_staging(
             raise ServerOpsError(
                 f"uv pip install into staging venv failed:\n{_pip_out.strip()}"
             )
+    elif installation_mode != "binary":
+        raise ServerOpsError(f"Unknown installation mode: {installation_mode}")
+
+    script = _staging_permissions_script(
+        staging_dir, app_user, installation_mode, dist_in_tree
+    )
+    out, ok = conn.run(script, warn=True)
+    if ok:
+        return
+    raise _staging_permission_error(_failed_step(out), staging_dir)
+
+
+#: Steps in the fused staging permission pass -> the error they report.
+_STAGING_STEP_ERRORS: dict[str, str] = {
+    "dist-mode": "Failed to chmod dist file in {staging}",
+    "env-mode": "Failed to chmod .env in {staging}",
+    "venv-mode": "Failed to set venv permissions in {staging}",
+    "venv-exec": "Failed to set venv permissions in {staging}",
+    "venv-tree": "Failed to set venv permissions in {staging}",
+    "chgrp": "Failed to normalize ownership of {staging}",
+    "dirs": "Failed to normalize ownership of {staging}",
+    "files": "Failed to normalize ownership of {staging}",
+}
+
+
+def _staging_permission_error(step: str | None, staging_dir: str) -> ServerOpsError:
+    template_ = _STAGING_STEP_ERRORS.get(step or "")
+    if template_ is None:
+        return ServerOpsError(f"Failed to prepare {staging_dir}")
+    return ServerOpsError(template_.format(staging=staging_dir))
+
+
+def _staging_permissions_script(
+    staging_dir: str,
+    app_user: str,
+    installation_mode: str,
+    dist_in_tree: str,
+) -> str:
+    """One shell script applying every staging mode/ownership rule.
+
+    Modes are unchanged from the sequential implementation; only the
+    round-trips are fused. ``venv/`` is pruned from the tree-wide walks
+    because the venv-specific passes above already apply those bits - one
+    combined ``find`` over the venv covers both the setgid directories and
+    the group-readable private files.
+
+    Directories are handled separately from files: a bit-adding ``chmod -R``
+    over the whole tree would mutate the inodes hardlinked from the live
+    release (``link_unchanged``), so only directories and *private* files
+    (``-links 1``) are touched by the tree-wide passes.
+    """
+    staging_q = shlex.quote(staging_dir)
+    venv_q = shlex.quote(f"{staging_dir}/{_PYTHON_ROOT}")
+    lines = []
+    if installation_mode == "python-package":
         # Group-readable/executable venv, owner-writable (installer PHASE 2
         # permission model), applied BEFORE hashing so recorded modes match.
-        _, ok = conn.run(
-            f"chmod -R u+rwX,go+rX {staging_q}/{_PYTHON_ROOT}"
-            f" && chmod -R u+x {staging_q}/{_PYTHON_ROOT}/bin",
-            warn=True,
-        )
-        if not ok:
-            raise ServerOpsError(f"Failed to set venv permissions in {staging_dir}")
-        return
-
-    if installation_mode == "binary":
-        conn.run(f"mkdir -p {staging_q}/{_BINARY_ROOT}", warn=True, hide=True)
-        _, ok = conn.run(f"chmod 755 {dist_in_tree}", warn=True)
-        if not ok:
-            raise ServerOpsError(f"Failed to chmod dist file in {staging_dir}")
-        return
-
-    raise ServerOpsError(f"Unknown installation mode: {installation_mode}")
+        lines += [
+            f"chmod -R u+rwX,go+rX {staging_q}/{_PYTHON_ROOT} {_fail_marker('venv-mode')}",
+            f"chmod -R u+x {staging_q}/{_PYTHON_ROOT}/bin {_fail_marker('venv-exec')}",
+            # ``venv/`` is pruned from the tree-wide walks below, so the two
+            # bits they would have applied are applied here instead - in one
+            # traversal, after the venv ``u+x`` above so an executable file
+            # also keeps its group execute bit (as the sequential passes did).
+            f"find {staging_q}/{_PYTHON_ROOT}"
+            " -type d -exec chmod g+s {} +"
+            " -o -links 1 -type f -exec chmod g+rX {} +"
+            f" {_fail_marker('venv-tree')}",
+        ]
+    else:
+        # The dist file ships via the rsynced tree; only its directory and
+        # mode need enforcing. A failed mkdir surfaces through the chmod.
+        lines.append(f"mkdir -p {staging_q}/{_BINARY_ROOT} || true")
+        lines.append(f"chmod 755 {dist_in_tree} {_fail_marker('dist-mode')}")
+    lines += [
+        f"chmod 0640 {staging_q}/{ENV_PATH} {_fail_marker('env-mode')}",
+        f"sudo chgrp -R {shlex.quote(app_user)} {staging_q} {_fail_marker('chgrp')}",
+        # Directories: group-traversable, and setgid so late writes (hooks,
+        # runtime) keep inheriting the group.
+        f"sudo find {staging_q} -path {venv_q} -prune -o -type d"
+        f" -exec chmod g+rxs {{}} + {_fail_marker('dirs')}",
+        # Non-hardlinked files only.
+        f"sudo find {staging_q} -path {venv_q} -prune -o -links 1 -type f"
+        f" -exec chmod g+rX {{}} + {_fail_marker('files')}",
+    ]
+    return "\n".join(lines)
 
 
 def hash_server_built(
@@ -875,29 +1003,6 @@ def link_unchanged(
         raise ServerOpsError(f"Undecodable link output: {exc}") from exc
 
 
-def normalize_staging_ownership(conn: Any, staging_dir: str, app_user: str) -> None:
-    """Force the staged tree into the deploy permission model.
-
-    Files hardlinked from the previous release (``link_unchanged``) share
-    their inode with the live tree, so a blindly bit-adding ``chmod -R`` would
-    mutate the live release (immutability violation). chgrp covers them (the live
-    release's group is already ``{app_user}``) and chmod is applied only to
-    directories and to files private to the staging tree.
-    """
-    staging_q = shlex.quote(staging_dir)
-    _, ok = conn.run(
-        f"sudo chgrp -R {shlex.quote(app_user)} {staging_q} && "
-        # Directories: group-traversable, and setgid so late writes (hooks,
-        # runtime) keep inheriting the group.
-        f"sudo find {staging_q} -type d -exec chmod g+rxs {{}} + && "
-        # Non-hardlinked files only.
-        f"sudo find {staging_q} -links 1 -type f -exec chmod g+rX {{}} +",
-        warn=True,
-    )
-    if not ok:
-        raise ServerOpsError(f"Failed to normalize ownership of {staging_dir}")
-
-
 # =============================================================================
 # Systemd units
 # =============================================================================
@@ -911,11 +1016,18 @@ def install_units(
 ) -> None:
     """Install unit files (service/socket/timer) + dropins into
     ``/etc/systemd/system``, remove stale units of this app, and
-    ``daemon-reload``.
+    ``daemon-reload`` - all in ONE remote script.
 
     ``unit_files`` maps the unit file name (e.g. ``myapp-web@.service``) to
     its rendered content. ``dropins`` maps a unit name to
     ``{dropin-filename: content}``; the caller expands ``common.d`` per unit.
+
+    The script starts with the two read-only scans (installed tree at depth 2,
+    empty declared ``*.d`` dirs) so stale/prune decisions see the pre-write
+    state; both are printed between markers for diagnostics. Every mutating
+    step keeps the exact per-file ``sudo`` shapes the scoped sudoers rule
+    matches and appends a ``FUJIN-FAIL`` marker, so a failure names the
+    file/step it aborted on.
     """
     dropins = dropins or {}
     units = set(unit_files) | set(dropins)
@@ -923,99 +1035,130 @@ def install_units(
     # Dropin *files* are valid too: kept ``*.d/`` dirs must not accumulate
     # conf files from an older release (pruned at depth 2 below).
     valid |= {f"{unit}.d/{name}" for unit, files in dropins.items() for name in files}
-
-    _remove_stale_units(conn, app_name, valid)
-
-    for name, content in unit_files.items():
-        _sudo_write(conn, f"/etc/systemd/system/{name}", content)
-    for unit, files in dropins.items():
-        if not files:
-            continue
-        dir_path = f"/etc/systemd/system/{unit}.d"
-        # The dropin directory is not shipped as a unit file, so create it
-        # before writing into it (``mkdir -p`` is idempotent).
-        _, ok = conn.run(f"sudo mkdir -p {shlex.quote(dir_path)}", warn=True, hide=True)
-        if not ok:
-            raise ServerOpsError(f"Failed to create {dir_path} on server")
-        for name, content in files.items():
-            _sudo_write(conn, f"{dir_path}/{name}", content)
-
     # A unit that no longer declares dropins must not keep an empty
     # ``<unit>.d`` directory behind (systemd treats it as present, and a
     # stale empty dir confuses ``installed_unit_tree`` consumers).
-    _remove_empty_dropin_dirs(
-        conn,
-        app_name,
-        {f"{unit}.d" for unit in units}
-        - {f"{unit}.d" for unit, files in dropins.items() if files},
-    )
+    prune = {f"{unit}.d" for unit in units} - {
+        f"{unit}.d" for unit, files in dropins.items() if files
+    }
 
-    _, ok = conn.run("sudo systemctl daemon-reload", warn=True)
-    if not ok:
-        raise ServerOpsError("systemctl daemon-reload failed")
-
-
-def _remove_empty_dropin_dirs(conn: Any, app_name: str, candidates: set[str]) -> None:
-    """Remove empty ``<app>*.d`` dirs among *candidates* (relative names).
-
-    Only directories the server itself reports as empty are deleted, so a
-    dropin dir that still holds undeclared files is left for inspection.
-    """
-    if not candidates:
-        return
-    out, _ok = conn.run(
-        f"cd /etc/systemd/system && find . -maxdepth 1 -type d"
-        f" -name {shlex.quote(app_name + '*.d')} -empty -print 2>/dev/null",
+    out, ok = conn.run(
+        _install_units_script(app_name, unit_files, dropins, valid, prune),
         warn=True,
         hide=True,
     )
-    empty = {
-        line.strip().removeprefix("./") for line in out.splitlines() if line.strip()
-    }
-    targets = sorted(candidates & empty)
-    if not targets:
+    if ok:
         return
-    paths = " ".join(shlex.quote(f"/etc/systemd/system/{name}") for name in targets)
-    conn.run(f"sudo rm -rf {paths}", warn=True, hide=True)
+    step, _, target = (_failed_step(out) or "").partition(":")
+    if step == "daemon-reload":
+        raise ServerOpsError("systemctl daemon-reload failed")
+    if step == "mkdir":
+        raise ServerOpsError(f"Failed to create {target} on server")
+    if step == "write":
+        raise ServerOpsError(f"Failed to write {target} on server")
+    if step == "cd":
+        raise ServerOpsError(f"Failed to inspect {SYSTEMD_DIR} on server")
+    raise ServerOpsError(f"Failed to install systemd units for {app_name}")
 
 
-def _remove_stale_units(conn: Any, app_name: str, valid: set[str]) -> None:
-    """Disable + delete installed units and dropin files no longer declared.
+def _case_alternatives(names: Iterable[str]) -> str:
+    """``case`` alternatives matching *names* literally (quoted, no globs)."""
+    patterns = [shlex.quote(name) for name in sorted(names)]
+    # An empty alternative matches the empty string only, i.e. never.
+    return "|".join(patterns) if patterns else "''"
+
+
+def _stale_unit_lines(valid: set[str]) -> list[str]:
+    """Shell loop disabling/removing installed entries not in *valid*.
 
     Covers both depth 1 (``app-*.service``, ``app-*.socket``, ``app-*.timer``,
     ``app-*.d`` dirs) and depth 2 (files inside a kept ``app-*.d`` dir). A
     stale dropin file must go even when its directory remains in use.
+    ``find``'s output was captured *before* the writes, so this loop only
+    sees entries that were installed when the script started.
     """
-    # Quote the prefix pieces only; the globs must stay outside the quotes so
-    # the remote shell expands them. No match -> empty output, nothing stale.
-    out, _ok = conn.run(
-        f"cd /etc/systemd/system && find . -maxdepth 2 \\( "
+    return [
+        "while IFS= read -r name; do",
+        '  [ -n "$name" ] || continue',
+        "  rel=${name#./}",
+        '  case "$rel" in',
+        f"    {_case_alternatives(valid)}) ;;",
+        f'    */*) sudo rm -rf "{SYSTEMD_DIR}/$rel" || true ;;',
+        "    *@.service)",
+        '      sudo systemctl disable --quiet "$rel" || true',
+        '      sudo systemctl reset-failed "$rel" || true',
+        f'      sudo rm -rf "{SYSTEMD_DIR}/$rel" || true ;;',
+        "    *)",
+        '      sudo systemctl disable --now --quiet "$rel" || true',
+        '      sudo systemctl reset-failed "$rel" || true',
+        f'      sudo rm -rf "{SYSTEMD_DIR}/$rel" || true ;;',
+        "  esac",
+        "done <<EOF",
+        "$installed",
+        "EOF",
+    ]
+
+
+def _install_units_script(
+    app_name: str,
+    unit_files: Mapping[str, str],
+    dropins: Mapping[str, Mapping[str, str]],
+    valid: set[str],
+    prune: set[str],
+) -> str:
+    """The fused install script executed by :func:`install_units`."""
+    lines = [
+        f"cd {shlex.quote(SYSTEMD_DIR)} {_fail_marker('cd')}",
+        f"installed=$(find . -maxdepth 2 \\( "
         f"-name {shlex.quote(app_name + '*')} "
         f"-o -path {shlex.quote(f'./{app_name}*.d/*')} "
-        f"\\) -print 2>/dev/null | sort",
-        warn=True,
-        hide=True,
-    )
-    installed = [
-        line.strip().removeprefix("./") for line in out.splitlines() if line.strip()
+        "\\) -print 2>/dev/null | sort)",
+        "printf '%s\\n' \"$installed\"",
+        f"printf '%s\\n' {shlex.quote(INSTALL_INSTALLED_END)}",
     ]
-    stale = [name for name in installed if name not in valid]
-    if not stale:
-        return
-    # Only unit names can be disabled; dropin files/dirs are just removed.
-    stale_units = [name for name in stale if "/" not in name]
-    regular = [u for u in stale_units if not u.endswith("@.service")]
-    template = [u for u in stale_units if u.endswith("@.service")]
-    if regular:
-        conn.run(
-            f"sudo systemctl disable --now --quiet {q(*regular)}", warn=True, hide=True
+    # The dropin directory is not shipped as a unit file, so create it before
+    # writing into it (``mkdir -p`` is idempotent).
+    for unit, files in dropins.items():
+        if not files:
+            continue
+        dir_path = f"{SYSTEMD_DIR}/{unit}.d"
+        lines.append(
+            f"sudo mkdir -p {shlex.quote(dir_path)} {_fail_marker('mkdir', dir_path)}"
         )
-    if template:
-        conn.run(f"sudo systemctl disable --quiet {q(*template)}", warn=True, hide=True)
-    if stale_units:
-        conn.run(f"sudo systemctl reset-failed {q(*stale_units)}", warn=True, hide=True)
-    targets = " ".join(shlex.quote(f"/etc/systemd/system/{name}") for name in stale)
-    conn.run(f"sudo rm -rf {targets}", warn=True, hide=True)
+    for name, content in unit_files.items():
+        path = f"{SYSTEMD_DIR}/{name}"
+        lines.append(
+            f"{_sudo_write_command(path, content)} {_fail_marker('write', path)}"
+        )
+    for unit, files in dropins.items():
+        for name, content in files.items():
+            path = f"{SYSTEMD_DIR}/{unit}.d/{name}"
+            lines.append(
+                f"{_sudo_write_command(path, content)} {_fail_marker('write', path)}"
+            )
+    lines += _stale_unit_lines(valid)
+    if prune:
+        # Empty dirs are scanned *after* the stale removal above: a dir whose
+        # last file was just pruned must be seen as empty.
+        lines += [
+            "empty=$(find . -maxdepth 1 -type d"
+            f" -name {shlex.quote(app_name + '*.d')} -empty -print 2>/dev/null"
+            " | sort)",
+            "printf '%s\\n' \"$empty\"",
+            f"printf '%s\\n' {shlex.quote(INSTALL_EMPTY_END)}",
+            "while IFS= read -r name; do",
+            '  [ -n "$name" ] || continue',
+            "  rel=${name#./}",
+            '  case "$rel" in',
+            f"    {_case_alternatives(prune)})"
+            f' sudo rm -rf "{SYSTEMD_DIR}/$rel" || true ;;',
+            "  esac",
+            "done <<EOF",
+            "$empty",
+            "EOF",
+        ]
+    lines.append(f"sudo systemctl daemon-reload {_fail_marker('daemon-reload')}")
+    return "\n".join(lines)
 
 
 def installed_unit_tree(conn: Any, app_name: str) -> dict[str, str | None]:
@@ -1026,7 +1169,7 @@ def installed_unit_tree(conn: Any, app_name: str) -> dict[str, str | None]:
     unreadable file also maps to ``None`` (it is then reported as drifted by
     the caller, never silently ignored).
     """
-    parent = "/etc/systemd/system"
+    parent = SYSTEMD_DIR
     pattern = f"{app_name}*"
     dropin_glob = f"./{app_name}*.d/*"
     cmd = (
@@ -1185,42 +1328,19 @@ def read_current_manifest(conn: Any, app_dir: str) -> m.Manifest | None:
 
 
 # =============================================================================
-# Release-file permission fixups
-# =============================================================================
-
-
-def set_envfile_mode(conn: Any, release_dir: str) -> None:
-    """Enforce ``.env`` mode 0640 in a release or staging dir.
-
-    Ownership needs no sudo: the file is created by ``deploy_user`` inside a
-    setgid ``2755`` directory, so it already inherits the ``app_user`` group.
-    """
-    _, ok = conn.run(
-        f"chmod 0640 {shlex.quote(f'{release_dir}/{ENV_PATH}')}", warn=True, hide=True
-    )
-    if not ok:
-        raise ServerOpsError(f"Failed to chmod .env in {release_dir}")
-
-
-# =============================================================================
 # Template-instance convergence plan
 # =============================================================================
 
 
-def _list_template_instances(conn: Any, command: str, pattern: str) -> set[str]:
+def _template_instances(lines: Iterable[str]) -> set[str]:
     """Instance unit names reported by a ``systemctl`` listing (non-fatal).
 
     Both the enabled and the active view are queried: enablement alone misses
     an instance somebody stopped by hand, runtime state alone misses an
     enabled instance that is not running. Bare templates are dropped.
     """
-    out, _ok = conn.run(
-        f"{command} {shlex.quote(pattern)} 2>/dev/null || true",
-        warn=True,
-        hide=True,
-    )
     instances: set[str] = set()
-    for line in out.splitlines():
+    for line in lines:
         parts = line.split()
         if not parts:
             continue
@@ -1231,7 +1351,7 @@ def _list_template_instances(conn: Any, command: str, pattern: str) -> set[str]:
     return instances
 
 
-def _enabled_template_instances(conn: Any, pattern: str) -> set[str]:
+def _linked_template_instances(lines: Iterable[str]) -> set[str]:
     """Instances enabled on disk, derived from ``*.wants``/``*.requires`` links.
 
     ``systemctl list-unit-files`` lists the template unit file (``svc@.service``)
@@ -1240,17 +1360,31 @@ def _enabled_template_instances(conn: Any, pattern: str) -> set[str]:
     ``.wants``/``.requires`` directory, which this read-only scan finds - that
     is what makes a manually stopped (but still enabled) instance visible.
     """
-    out, _ok = conn.run(
-        f"find /etc/systemd/system -maxdepth 2 -type l"
-        f" -name {shlex.quote(pattern)} -printf '%f\\n' 2>/dev/null || true",
-        warn=True,
-        hide=True,
-    )
     return {
         name
-        for name in (line.strip() for line in out.splitlines())
+        for name in (line.strip() for line in lines)
         if name.endswith(".service") and not name.endswith("@.service")
     }
+
+
+def _split_plan_sections(output: str) -> tuple[list[str], list[str], list[str]]:
+    """Split the fused plan output at its end-of-section markers.
+
+    Yields ``(enabled listing, ``.wants`` links, active listing)``. A missing
+    marker leaves the remaining lines in the section they started in, so a
+    truncated probe degrades instead of misattributing lines.
+    """
+    sections: tuple[list[str], list[str], list[str]] = ([], [], [])
+    index = 0
+    for line in output.splitlines():
+        text = line.strip()
+        if text == PLAN_ENABLED_END:
+            index = 1
+        elif text == PLAN_LINKS_END:
+            index = 2
+        elif text:
+            sections[index].append(text)
+    return sections
 
 
 def template_instance_plan(
@@ -1263,16 +1397,29 @@ def template_instance_plan(
     names: ``start_specs`` sorted ascending covers instances that are missing,
     stopped-but-enabled or running-but-disabled; ``stop_specs`` are the
     present instances not desired, highest instance number first.
+
+    The three read-only queries (enabled listing, ``.wants``/``.requires``
+    symlink scan, active listing) run as one ``conn.run`` separated by
+    markers; the decision itself stays in :func:`store.convergence`.
     """
     pattern = f"{app_name}-*@*.service"
-    enabled = _list_template_instances(
-        conn, "systemctl list-unit-files --no-legend", pattern
-    ) | _enabled_template_instances(conn, pattern)
-    active = _list_template_instances(
-        conn,
-        "systemctl list-units --type=service --state=active --no-legend",
-        pattern,
+    pattern_q = shlex.quote(pattern)
+    out, _ok = conn.run(
+        f"systemctl list-unit-files --no-legend {pattern_q} 2>/dev/null || true\n"
+        f"printf '%s\\n' {shlex.quote(PLAN_ENABLED_END)}\n"
+        f"find {shlex.quote(SYSTEMD_DIR)} -maxdepth 2 -type l -name {pattern_q}"
+        f" -printf '%f\\n' 2>/dev/null || true\n"
+        f"printf '%s\\n' {shlex.quote(PLAN_LINKS_END)}\n"
+        f"systemctl list-units --type=service --state=active --no-legend"
+        f" {pattern_q} 2>/dev/null || true",
+        warn=True,
+        hide=True,
     )
+    enabled_lines, link_lines, active_lines = _split_plan_sections(out)
+    enabled = _template_instances(enabled_lines) | _linked_template_instances(
+        link_lines
+    )
+    active = _template_instances(active_lines)
 
     desired_units: set[str] = set()
     for unit in desired:
@@ -1313,6 +1460,71 @@ def stop_and_disable(conn: Any, units: Sequence[str]) -> bool:
     if ok:
         conn.run(f"sudo systemctl reset-failed {q(*units)}", warn=True, hide=True)
     return ok
+
+
+# =============================================================================
+# Post-restart readiness probe
+# =============================================================================
+
+
+def readiness_probe_command(units: Sequence[str], sockets: Mapping[str, str]) -> str:
+    """One read-only command answering every readiness question of a tick.
+
+    ``systemctl is-failed`` statuses come first (one line per unit, in
+    *units* order), then one ``FUJIN-SOCKET <unit>`` block per socket with
+    its ``test -S`` verdict and - only when the socket file exists - its
+    ``systemctl is-active`` state. The deploy command polls this and routes
+    failures exactly as before; no sudo (the deploy user reads its own
+    units).
+    """
+    lines = []
+    if units:
+        lines.append(f"systemctl is-failed {q(*units)} 2>/dev/null || true")
+    lines.append(f"printf '%s\\n' {shlex.quote(READINESS_STATUS_END)}")
+    for path, unit in sockets.items():
+        lines += [
+            f"printf '%s\\n' {shlex.quote(f'{READINESS_SOCKET_BEGIN} {unit}')}",
+            f"if test -S {shlex.quote(path)}; then"
+            f" printf '%s\\n' present;"
+            f" systemctl is-active {shlex.quote(unit)} 2>/dev/null || true;"
+            f" else printf '%s\\n' missing; fi",
+            f"printf '%s\\n' {shlex.quote(READINESS_SOCKET_END)}",
+        ]
+    return "\n".join(lines)
+
+
+def parse_readiness_probe(output: str) -> tuple[list[str], dict[str, bool]]:
+    """Split fused probe *output* into statuses and socket verdicts.
+
+    Returns ``(statuses, {socket unit: bound and active})``. Statuses are in
+    the order the units were passed to :func:`readiness_probe_command`; a
+    socket without a complete block is absent from the mapping (callers treat
+    that as not ready, like ``inactive``).
+    """
+    lines = [line.strip() for line in output.splitlines()]
+    statuses: list[str] = []
+    index = 0
+    while index < len(lines) and lines[index] != READINESS_STATUS_END:
+        if lines[index]:
+            statuses.append(lines[index])
+        index += 1
+    sockets: dict[str, bool] = {}
+    unit: str | None = None
+    present = active = False
+    for line in lines[index + 1 :]:
+        if line == READINESS_SOCKET_END:
+            if unit is not None:
+                sockets[unit] = present and active
+            unit = None
+        elif line.startswith(f"{READINESS_SOCKET_BEGIN} "):
+            unit = line[len(READINESS_SOCKET_BEGIN) :].strip()
+            present = active = False
+        elif unit is not None:
+            if line == "present":
+                present = True
+            elif line == "active":
+                active = True
+    return statuses, sockets
 
 
 # =============================================================================

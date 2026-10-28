@@ -146,6 +146,34 @@ class FakeConn:
         raise FileNotFoundError(remote)
 
 
+def plan_output(enabled=(), links=(), active=()):
+    """Fused ``template_instance_plan`` probe output."""
+    return "".join(
+        [
+            "".join(f"{name} enabled\n" for name in enabled),
+            f"{fujin.serverops.PLAN_ENABLED_END}\n",
+            "".join(f"{name}\n" for name in links),
+            f"{fujin.serverops.PLAN_LINKS_END}\n",
+            "".join(f"{name} loaded active running\n" for name in active),
+        ]
+    )
+
+
+def readiness_output(statuses=(), sockets=()):
+    """Fused readiness probe output; *sockets* is ``(unit, present, state)``."""
+    parts = [
+        "".join(f"{status}\n" for status in statuses),
+        f"{fujin.serverops.READINESS_STATUS_END}\n",
+    ]
+    for unit, present, state in sockets:
+        parts.append(f"{fujin.serverops.READINESS_SOCKET_BEGIN} {unit}\n")
+        parts.append("present\n" if present else "missing\n")
+        if present:
+            parts.append(f"{state}\n")
+        parts.append(f"{fujin.serverops.READINESS_SOCKET_END}\n")
+    return "".join(parts)
+
+
 def invoke(cmd) -> int:
     """Run a deploy; return its exit code (0 when it completed normally)."""
     try:
@@ -188,8 +216,16 @@ def setup_deploy(
     events: list = []
     conn = FakeConn(
         responses=[
-            ("list-unit-files", ("", True)),
-            ("is-failed", (is_failed + "active\nactive\nactive\n", True)),
+            ("list-unit-files", (plan_output(), True)),
+            (
+                "is-failed",
+                (
+                    readiness_output(
+                        [*is_failed.split(), "active", "active", "active"]
+                    ),
+                    True,
+                ),
+            ),
         ],
         events=events,
     )
@@ -209,13 +245,12 @@ def setup_deploy(
     monkeypatch.setattr(
         fujin.serverops, "read_current_manifest", lambda _c, _a: prev_manifest
     )
-    monkeypatch.setattr(fujin.serverops, "install_code_into_staging", MagicMock())
+    monkeypatch.setattr(fujin.serverops, "prepare_staging", MagicMock())
     link_unchanged = MagicMock(return_value=(0, []))
     monkeypatch.setattr(fujin.serverops, "link_unchanged", link_unchanged)
     monkeypatch.setattr(fujin.serverops, "hash_server_built", lambda *a, **k: {})
     install_units = MagicMock()
     monkeypatch.setattr(fujin.serverops, "install_units", install_units)
-    monkeypatch.setattr(fujin.serverops, "set_envfile_mode", MagicMock())
     write_states = []
     log_calls = []
     finalize_calls: list[dict] = []
@@ -377,8 +412,16 @@ def test_noop_still_runs_replica_convergence(monkeypatch, minimal_config, tmp_pa
     state = State(current="prev", client_digest="digest-x")
     cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=state)
     spies["conn"].responses = [
-        ("list-unit-files", ("testapp-worker@1.service enabled\n", True)),
-        ("list-units", ("testapp-worker@1.service loaded active running\n", True)),
+        (
+            "list-unit-files",
+            (
+                plan_output(
+                    enabled=["testapp-worker@1.service"],
+                    active=["testapp-worker@1.service"],
+                ),
+                True,
+            ),
+        )
     ]
     cmd()
 
@@ -415,20 +458,13 @@ def test_convergence_scale_down_stops_highest_first(
         (
             "list-unit-files",
             (
-                "\n".join(f"testapp-worker@{i}.service enabled" for i in range(1, 6)),
-                True,
-            ),
-        ),
-        (
-            "list-units",
-            (
-                "\n".join(
-                    f"testapp-worker@{i}.service loaded active running"
-                    for i in range(1, 6)
+                plan_output(
+                    enabled=[f"testapp-worker@{i}.service" for i in range(1, 6)],
+                    active=[f"testapp-worker@{i}.service" for i in range(1, 6)],
                 ),
                 True,
             ),
-        ),
+        )
     ]
     cmd()
 
@@ -450,12 +486,17 @@ def test_noop_convergence_restarts_stopped_but_enabled_instance(
         (
             "list-unit-files",
             (
-                "testapp-worker@1.service enabled\ntestapp-worker@2.service enabled\n",
+                plan_output(
+                    enabled=[
+                        "testapp-worker@1.service",
+                        "testapp-worker@2.service",
+                    ],
+                    # worker@1 was stopped by hand and is therefore not active
+                    active=["testapp-worker@2.service"],
+                ),
                 True,
             ),
-        ),
-        # worker@1 was stopped by hand and is therefore not active
-        ("list-units", ("testapp-worker@2.service loaded active running\n", True)),
+        )
     ]
     cmd()
 
@@ -475,9 +516,14 @@ def test_convergence_scale_up_starts_only_missing_instances(
     spies["conn"].responses = [
         (
             "list-unit-files",
-            ("testapp-worker@1.service enabled\n", True),
-        ),
-        ("list-units", ("testapp-worker@1.service loaded active running\n", True)),
+            (
+                plan_output(
+                    enabled=["testapp-worker@1.service"],
+                    active=["testapp-worker@1.service"],
+                ),
+                True,
+            ),
+        )
     ]
     cmd()
 
@@ -499,8 +545,16 @@ def test_convergence_stops_leftovers_when_template_removed(
         files={"systemd/testapp-web.service": WEB_UNIT},
     )
     spies["conn"].responses = [
-        ("list-unit-files", ("testapp-worker@1.service enabled\n", True)),
-        ("list-units", ("testapp-worker@2.service loaded active running\n", True)),
+        (
+            "list-unit-files",
+            (
+                plan_output(
+                    enabled=["testapp-worker@1.service"],
+                    active=["testapp-worker@2.service"],
+                ),
+                True,
+            ),
+        )
     ]
     cmd()
 
@@ -519,15 +573,19 @@ def test_convergence_starts_running_but_disabled_instance(
     )
     spies["conn"].responses = [
         # worker@2 runs but is not enabled -> needs `enable --now`
-        ("list-unit-files", ("testapp-worker@1.service enabled\n", True)),
         (
-            "list-units",
+            "list-unit-files",
             (
-                "testapp-worker@1.service loaded active running\n"
-                "testapp-worker@2.service loaded active running\n",
+                plan_output(
+                    enabled=["testapp-worker@1.service"],
+                    active=[
+                        "testapp-worker@1.service",
+                        "testapp-worker@2.service",
+                    ],
+                ),
                 True,
             ),
-        ),
+        )
     ]
     cmd()
 
@@ -548,19 +606,19 @@ def test_convergence_stops_non_numeric_instance_without_crashing(
         (
             "list-unit-files",
             (
-                "testapp-worker@1.service enabled\n"
-                "testapp-worker@canary.service enabled\n",
+                plan_output(
+                    enabled=[
+                        "testapp-worker@1.service",
+                        "testapp-worker@canary.service",
+                    ],
+                    active=[
+                        "testapp-worker@1.service",
+                        "testapp-worker@canary.service",
+                    ],
+                ),
                 True,
             ),
-        ),
-        (
-            "list-units",
-            (
-                "testapp-worker@1.service loaded active running\n"
-                "testapp-worker@canary.service loaded active running\n",
-                True,
-            ),
-        ),
+        )
     ]
     cmd()
 
@@ -1804,6 +1862,10 @@ def _probe_calls(conn, prefix):
     return [c for c, _ in conn.calls if c.startswith(prefix)]
 
 
+def _probe_containing(conn, needle):
+    return [c for c, _ in conn.calls if needle in c]
+
+
 def test_notify_service_excluded_from_is_failed_poll(
     monkeypatch, minimal_config, tmp_path
 ):
@@ -1980,15 +2042,18 @@ def test_socket_readiness_retries_until_file_appears(
     minimal_config.replicas = {}
     cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, files=SOCKET_FILES)
     conn = spies["conn"]
-    conn.append_response("systemctl is-active", "active\n")
     original_run = conn.run
     attempts = {"n": 0}
 
     def flaky_run(command, **kwargs):
-        if command.startswith("test -S "):
+        if "test -S /run/testapp/web.sock" in command:
             attempts["n"] += 1
             conn.calls.append((command, kwargs))
-            return "", attempts["n"] > 1
+            present = attempts["n"] > 1
+            return (
+                readiness_output(sockets=[("testapp-web.socket", present, "active")]),
+                True,
+            )
         return original_run(command, **kwargs)
 
     conn.run = flaky_run
@@ -1998,7 +2063,7 @@ def test_socket_readiness_retries_until_file_appears(
 
     # the missing socket is retried within the poll loop, not failed at once
     assert attempts["n"] >= 2
-    assert any(c == "test -S /run/testapp/web.sock" for c, _ in conn.calls)
+    assert any("test -S /run/testapp/web.sock" in c for c, _ in conn.calls)
 
 
 def test_missing_socket_file_retries_then_fails_readiness(
@@ -2018,17 +2083,25 @@ def test_missing_socket_file_retries_then_fails_readiness(
         "/opt/fujin/testapp/releases/prev/manifest.json",
         manifest_json(dist="dist-old", files=SOCKET_FILES),
     )
-    spies["conn"].append_response("test -S", "", False)
-    spies["conn"].append_response("systemctl is-active", "active\n")
+    spies["conn"].responses.insert(
+        0,
+        (
+            "test -S",
+            (
+                readiness_output(sockets=[("testapp-web.socket", False, "active")]),
+                True,
+            ),
+        ),
+    )
     clock = _FakeClock()
     monkeypatch.setattr(deploy_mod, "time", clock)
 
     assert invoke(cmd) == EXIT_DEPLOY_ROLLED_BACK
 
-    checks = _probe_calls(spies["conn"], "test -S ")
+    checks = _probe_containing(spies["conn"], "test -S")
     assert len(checks) >= 2
     # Exactly the command `serverops.q` renders for the ListenStream path.
-    assert checks[0] == f"test -S {fujin.serverops.q('/run/testapp/web.sock')}"
+    assert f"test -S {fujin.serverops.q('/run/testapp/web.sock')}" in checks[0]
     assert clock.now >= deploy_mod.READINESS_TIMEOUT
     assert any(
         "journalctl" in c and "testapp-web.socket" in c for c, _ in spies["conn"].calls
@@ -2045,17 +2118,26 @@ def test_socket_file_alone_is_not_ready_without_active_socket_unit(
     owning socket unit is still activating is not ready."""
     minimal_config.replicas = {}
     cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, files=SOCKET_FILES)
-    spies["conn"].append_response("test -S", "", True)
-    spies["conn"].append_response("systemctl is-active", "activating\n", False)
+    spies["conn"].responses.insert(
+        0,
+        (
+            "test -S",
+            (
+                readiness_output(sockets=[("testapp-web.socket", True, "activating")]),
+                True,
+            ),
+        ),
+    )
     clock = _FakeClock()
     monkeypatch.setattr(deploy_mod, "time", clock)
 
     assert invoke(cmd) == EXIT_DEPLOY_FAILED
 
-    active_calls = _probe_calls(spies["conn"], "systemctl is-active ")
-    assert active_calls
-    assert active_calls[0] == (
+    probe_calls = _probe_containing(spies["conn"], "test -S")
+    assert probe_calls
+    assert (
         f"systemctl is-active {fujin.serverops.q('testapp-web.socket')}"
+        in probe_calls[0]
     )
     assert clock.now >= deploy_mod.READINESS_TIMEOUT
     assert any(
@@ -2072,12 +2154,51 @@ def test_socket_dropin_listen_stream_is_discovered(
     cmd, spies = setup_deploy(
         monkeypatch, minimal_config, tmp_path, files=SOCKET_DROPIN_FILES
     )
-    spies["conn"].append_response("test -S /run/testapp/dropin.sock", "", True)
-    spies["conn"].append_response("systemctl is-active", "active\n")
+    spies["conn"].responses.insert(
+        0,
+        (
+            "test -S /run/testapp/dropin.sock",
+            (
+                readiness_output(sockets=[("testapp-web.socket", True, "active")]),
+                True,
+            ),
+        ),
+    )
 
     assert invoke(cmd) == 0
 
-    assert any(c == "test -S /run/testapp/dropin.sock" for c, _ in spies["conn"].calls)
+    assert any("test -S /run/testapp/dropin.sock" in c for c, _ in spies["conn"].calls)
+
+
+def test_readiness_poll_is_one_round_trip_per_tick(minimal_config, monkeypatch):
+    """2 service units + 1 socket used to cost 1 + 2 RTTs per tick; the fused
+    probe answers everything in one read-only command."""
+    cmd = Deploy(no_input=True)
+    cmd.config = minimal_config
+    conn = MagicMock()
+    conn.run.return_value = (
+        readiness_output(
+            ["active", "active"],
+            sockets=[("testapp-web.socket", True, "active")],
+        ),
+        True,
+    )
+    monkeypatch.setattr(deploy_mod, "time", _FakeClock())
+
+    checked = cmd._wait_for_units(
+        conn,
+        manifest_for(),
+        set(),
+        sockets={"/run/testapp/web.sock": "testapp-web.socket"},
+    )
+
+    assert conn.run.call_count == 1
+    probe = conn.run.call_args[0][0]
+    assert "systemctl is-failed" in probe
+    assert "test -S /run/testapp/web.sock" in probe
+    assert "systemctl is-active testapp-web.socket" in probe
+    assert conn.run.call_args.kwargs["idle_timeout"] == 15
+    assert checked == ["testapp-web.service", "testapp-worker@1.service"]
 
 
 def test_readiness_waits_through_activating_then_active(
@@ -2091,11 +2212,11 @@ def test_readiness_waits_through_activating_then_active(
     attempts = {"n": 0}
 
     def staged_run(command, **kwargs):
-        if command.startswith("systemctl is-failed"):
+        if "systemctl is-failed" in command:
             attempts["n"] += 1
             conn.calls.append((command, kwargs))
             status = "activating" if attempts["n"] == 1 else "active"
-            return f"{status}\n{status}\n{status}\n", True
+            return readiness_output([status, status, status]), True
         return original_run(command, **kwargs)
 
     conn.run = staged_run
@@ -2119,10 +2240,10 @@ def test_unit_stuck_activating_fails_after_fallback_window(
     attempts = {"n": 0}
 
     def stuck_run(command, **kwargs):
-        if command.startswith("systemctl is-failed"):
+        if "systemctl is-failed" in command:
             attempts["n"] += 1
             conn.calls.append((command, kwargs))
-            return "activating\nactivating\nactivating\n", True
+            return readiness_output(["activating", "activating", "activating"]), True
         return original_run(command, **kwargs)
 
     conn.run = stuck_run
@@ -2176,9 +2297,7 @@ MUTATION_TARGETS = {
         "stop_and_disable",
         "link_unchanged",
         "hash_server_built",
-        "install_code_into_staging",
-        "normalize_staging_ownership",
-        "set_envfile_mode",
+        "prepare_staging",
         "collect_garbage",
         "finalize_deploy",
         "install_caddyfile",
@@ -2277,21 +2396,15 @@ def _dry_run_setup(
         lambda *a, **k: pytest.fail("dry-run must not resolve secrets"),
     )
 
-    enabled = enabled_instances or []
-    active = active_instances or []
     conn = FakeConn(
         responses=[
             (
                 "list-unit-files",
                 (
-                    "".join(f"{name} enabled\n" for name in enabled),
-                    True,
-                ),
-            ),
-            (
-                "list-units",
-                (
-                    "".join(f"{name} loaded active running\n" for name in active),
+                    plan_output(
+                        enabled=enabled_instances or [],
+                        active=active_instances or [],
+                    ),
                     True,
                 ),
             ),
@@ -2331,16 +2444,10 @@ def _assert_no_mutations(spies, conn):
         assert not spy.called, f"{name} must not run during --dry-run"
     assert conn.uploads == []
     for command, _kw in conn.calls:
-        assert command.startswith(
-            (
-                "readlink ",
-                "systemctl list-unit-files",
-                "systemctl list-units",
-                # Read-only: enabled template instances live as ``.wants``
-                # symlinks, which list-unit-files never reports.
-                "find /etc/systemd/system",
-            )
-        ), command
+        # ``systemctl list-unit-files`` opens the fused plan probe: it embeds
+        # the ``.wants``/``.requires`` scan (enabled instances are symlinks,
+        # which list-unit-files never reports) and the active listing.
+        assert command.startswith(("readlink ", "systemctl list-unit-files")), command
 
 
 def test_dry_run_fresh_host_prints_first_deploy_plan(

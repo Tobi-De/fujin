@@ -554,15 +554,12 @@ def test_convergence_starts_missing_stops_extra(monkeypatch, minimal_config):
             (
                 "testapp-worker@2.service enabled\n"
                 "testapp-worker@3.service enabled\n"
-                "testapp-worker@.service enabled\n",
+                "testapp-worker@.service enabled\n"
+                f"{fujin.serverops.PLAN_ENABLED_END}\n"
+                f"{fujin.serverops.PLAN_LINKS_END}\n"
+                "testapp-worker@2.service loaded active running\n",
                 True,
             ),
-        )
-    )
-    conn.responses.append(
-        (
-            "systemctl list-units",
-            ("testapp-worker@2.service loaded active running\n", True),
         )
     )
     state = State(current="b-digest", previous=["a-digest"])

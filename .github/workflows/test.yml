@@ -39,4 +39,4 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Run integration tests
-        run: just test-integration
+        run: just test-integration -n 4
