@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Features
 
+- *(cli)* Documented exit-code taxonomy 0-6 (#91)
 - *(deploy)* Readiness tiers with health_check probe and auto-rollback (#88)
 - *(deploy)* Converge replica instances in both directions (#89)
 - *(config)* Project env template with host-scoped overlays (#84)

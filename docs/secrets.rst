@@ -57,6 +57,84 @@ Additional secret adapters are available as separate plugin packages:
 - `fujin-secrets-1password <https://pypi.org/project/fujin-secrets-1password/>`_ - 1Password CLI integration
 - `fujin-secrets-doppler <https://pypi.org/project/fujin-secrets-doppler/>`_ - Doppler secrets management
 
+Bitwarden and Vaultwarden
+-------------------------
+
+The ``fujin-secrets-bitwarden`` plugin resolves refs from a Bitwarden vault
+using the ``bw`` CLI. Vaultwarden is Bitwarden-API compatible, so no server-side
+change is needed; point the CLI at your instance before logging in:
+
+.. code-block:: bash
+
+    bw config server https://vault.example.com
+    bw login
+    export BW_SESSION="$(bw unlock --raw)"
+
+Configuration with folder-scoped resolution:
+
+.. code-block:: toml
+    :caption: fujin.toml
+
+    [secrets]
+    adapter = "bitwarden"
+
+    [secrets.options]
+    password_env = "BW_PASSWORD"
+    folders = ["fujin/myapp/prod", "fujin/shared"]
+
+.. list-table::
+    :header-rows: 1
+
+    * - Option
+      - Type
+      - Description
+    * - ``password_env``
+      - string
+      - Environment variable holding the vault password, used to unlock when
+        ``BW_SESSION`` is not set.
+    * - ``folders``
+      - string or list of strings
+      - Folder names to resolve refs from, in lookup order (first match wins).
+        A bare string is accepted as a one-element order. An empty list is
+        rejected at config load; omit the option to resolve every ref by item
+        name across the whole vault.
+
+Recommended folder layout — app secrets live under ``fujin/`` so personal
+logins cannot collide with app env refs:
+
+.. code-block:: text
+
+    fujin/
+    ├── myapp/
+    │   ├── prod/          # prod-only secrets
+    │   └── staging/
+    └── shared/            # cross-app secrets (SMTP, S3, DB URLs)
+
+Resolution order and batching:
+
+* Folder names are resolved to ids once per deploy, then Fujin issues **one**
+  ``bw list items --folderid <id> --raw`` call per configured folder. Refs are
+  resolved from an in-process ``{item name: password}`` map, so there is no
+  ``bw get password`` call on this path.
+* ``$DB_PASSWORD`` resolves from ``fujin/myapp/prod`` first, then
+  ``fujin/shared``. The first folder containing an item with that exact name
+  wins; duplicate item names in later folders are ignored.
+* Folder names must be unique in the vault. If ``bw list folders`` returns two
+  folders with the same configured name, resolution fails closed and names
+  the duplicated folder instead of picking one arbitrarily.
+* A ref containing a slash names its folder explicitly:
+  ``$fujin/shared/postgres`` resolves only from ``fujin/shared``. This
+  disambiguates items that share a name across folders.
+* A ref that no folder provides fails closed before anything is uploaded. The
+  error names the env key, the ref and the folders that were tried, and never
+  echoes resolved values.
+* Only **login** items with a password are resolved. Secure notes, cards,
+  identities and passwordless logins are skipped.
+
+Without ``folders``, the adapter keeps its historical behaviour: one
+concurrent ``bw get password <name> --raw`` per ref, matched by item name
+across the whole vault.
+
 Custom Adapters
 --------------
 

@@ -140,7 +140,7 @@ lint.isort.required-imports = [ "from __future__ import annotations" ]
 lint.pyupgrade.keep-runtime-typing = true
 
 [tool.pytest.ini_options]
-testpaths = [ "tests" ]
+testpaths = [ "tests", "plugins" ]
 markers = [
   "unit: Fast unit tests with no external dependencies",
   "integration: Integration tests requiring Docker",
