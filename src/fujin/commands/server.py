@@ -339,8 +339,7 @@ class Server(BaseCommand):
         This is an **administrator action**: it runs as one ``sudo bash``
         script, so the connecting user needs full sudo (the scoped rule does
         not grant ``bash``/``visudo``).  The script backs up and restores
-        everything it touches on any failure; see
-        :func:`fujin.sudoers.harden_script`.
+        everything it touches on any failure (see ``fujin.sudoers``).
         """
         user = self.selected_host.user
         app_user = self.config.app_user
