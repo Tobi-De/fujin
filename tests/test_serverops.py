@@ -400,15 +400,21 @@ def test_prepare_staging_python_permission_pass_is_one_call(conn):
     assert "chmod -R u+x /opt/fujin/myapp/releases/.staging-1/venv/bin" in script
     assert "chmod 0640 /opt/fujin/myapp/releases/.staging-1/.env" in script
     assert "sudo chgrp -R myapp /opt/fujin/myapp/releases/.staging-1" in script
+    # the privileged directory walk covers venv/ too: setgid can only be set
+    # by root here (the deploy user is not in the app group)
     assert (
-        "sudo find /opt/fujin/myapp/releases/.staging-1 -path"
-        " /opt/fujin/myapp/releases/.staging-1/venv -prune -o -type d"
+        "sudo find /opt/fujin/myapp/releases/.staging-1 -type d"
         " -exec chmod g+rxs {} +" in script
     )
+    # no unprivileged setgid chmod survives: an unprivileged chmod on a
+    # deploy:app entry beneath a setgid parent drops S_ISGID or fails
+    assert "chmod g+s " not in script
+    assert "-exec chmod g+s {} +" not in script
+    # only the file walk prunes venv/ (its files already got go+rX above)
     assert "-prune -o -links 1 -type f -exec chmod g+rX {} +" in script
-    # venv/ is pruned from the tree-wide walks: its modes come from the
-    # venv-specific chmod above (one walk over venv instead of three).
-    assert script.count("-prune -o") == 2
+    # venv/ is traversed three times instead of four: the two venv chmods
+    # plus the privileged directory walk; the file walk prunes it.
+    assert script.count("-prune -o") == 1
     assert "sudo" not in script.split("sudo chgrp")[0]
 
 
@@ -517,6 +523,17 @@ def test_prepare_staging_permission_script_runs_locally(tmp_path, monkeypatch):
         'if [ "$1" = chgrp ]; then exit 0; fi\nexec "$@"\n'
     )
     (bindir / "sudo").chmod(0o755)
+    import shutil
+
+    real_chmod = shutil.which("chmod")
+    # Record which paths the privileged setgid walk actually matched: the
+    # wrapper only logs ``g+rxs`` batches and then runs the real chmod.
+    (bindir / "chmod").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in *g+rxs*) printf "%s\\n" "CHMOD $*" >> "$SUDO_LOG" ;; esac\n'
+        f'exec {real_chmod} "$@"\n'
+    )
+    (bindir / "chmod").chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
     monkeypatch.setenv("SUDO_LOG", str(tmp_path / "sudo.log"))
 
@@ -544,6 +561,20 @@ def test_prepare_staging_permission_script_runs_locally(tmp_path, monkeypatch):
     assert "sudo chgrp -R myapp" in sudo_log
     assert "-exec chmod g+rxs {} +" in sudo_log
     assert "-exec chmod g+rX {} +" in sudo_log
+    # The setgid bits come from the privileged walk, and that walk covers
+    # venv/ (it is not pruned): the unprivileged chmod could not set S_ISGID
+    # on entries whose group the runner does not own.
+    dirs_pass = [
+        line for line in sudo_log.splitlines() if "-exec chmod g+rxs {} +" in line
+    ]
+    assert dirs_pass, sudo_log
+    assert "-prune" not in dirs_pass[0]
+    setgid_paths = [
+        line for line in sudo_log.splitlines() if line.startswith("CHMOD g+rxs ")
+    ]
+    assert setgid_paths, sudo_log
+    assert str(venv_lib) in setgid_paths[0]
+    assert str(root / "assets") in setgid_paths[0]
 
 
 # =============================================================================
@@ -737,11 +768,18 @@ def test_install_units_script_runs_locally(tmp_path, monkeypatch):
     root.mkdir()
     (root / "myapp-old.service").write_text("[Unit]\n")
     (root / "myapp-gone@.service").write_text("[Unit]\n")
+    (root / "myapp-$weird.service").write_text("[Unit]\n")
     (root / "myapp-web.service").write_text("[Unit]\nold=1\n")
     (root / "myapp-web.service.d").mkdir()
     (root / "myapp-web.service.d" / "old.conf").write_text("[Service]\n")
     (root / "myapp-web.socket.d").mkdir()  # declared unit without dropins
     (root / "unrelated.service").write_text("[Unit]\n")
+    # systemd's own enablement symlink points at a unit of this app but lives
+    # outside the app namespace: it is never "stale".
+    (root / "multi-user.target.wants").mkdir()
+    (root / "multi-user.target.wants" / "myapp-web.service").symlink_to(
+        "../myapp-web.service"
+    )
 
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -773,6 +811,14 @@ def test_install_units_script_runs_locally(tmp_path, monkeypatch):
     assert not (root / "myapp-web.socket.d").exists()
     assert (root / "unrelated.service").exists()
 
+    # the depth-2 ``<app>*`` name match must not swallow systemd's own
+    # enablement symlinks
+    assert (root / "multi-user.target.wants" / "myapp-web.service").is_symlink()
+    assert not any(
+        line.startswith(f"rm -rf {root}/multi-user.target.wants")
+        for line in log.read_text().splitlines()
+    )
+
     lines = [line for line in log.read_text().splitlines() if line]
     assert "systemctl disable --now --quiet myapp-old.service" in lines
     assert "systemctl disable --quiet myapp-gone@.service" in lines
@@ -782,10 +828,16 @@ def test_install_units_script_runs_locally(tmp_path, monkeypatch):
         line.startswith(f"rm -rf {root}/myapp-web.service.d/old.conf") for line in lines
     )
     assert any(line.startswith(f"rm -rf {root}/myapp-web.socket.d") for line in lines)
+    # the ``$`` name reached the stale loop verbatim and was removed
+    assert any(line.startswith(f"rm -rf {root}/myapp-$weird.service") for line in lines)
+    assert not (root / "myapp-$weird.service").exists()
     # one daemon-reload, after every write and removal
     reloads = [line for line in lines if line == "systemctl daemon-reload"]
     assert len(reloads) == 1
     assert lines[-1] == "SYSTEMCTL daemon-reload"
+    # the data never rides an unquoted heredoc (which would expand ``$``)
+    assert "<<EOF" not in conn.calls[0]
+    assert "<<'EOF'" not in conn.calls[0]
 
 
 def test_install_units_script_reports_write_failure_locally(tmp_path, monkeypatch):
@@ -957,6 +1009,32 @@ def test_parse_readiness_probe_socket_verdicts():
         "myapp-db.socket": False,
         "myapp-cache.socket": False,
     }
+
+
+def test_parse_readiness_probe_and_verdicts_per_unit_for_multiple_paths():
+    """One socket unit may own several ``ListenStream=`` paths: it is ready
+    only when every path is bound (HEAD ANDed them; keying by unit alone let
+    the last path overwrite the earlier verdict)."""
+
+    def block(present: bool) -> str:
+        lines = [
+            f"{serverops.READINESS_SOCKET_BEGIN} myapp-web.socket",
+            "present" if present else "missing",
+        ]
+        if present:
+            lines.append("active")
+        lines.append(serverops.READINESS_SOCKET_END)
+        return "\n".join(lines) + "\n"
+
+    output = f"{serverops.READINESS_STATUS_END}\n" + block(False) + block(True)
+    statuses, sockets = serverops.parse_readiness_probe(output)
+    assert statuses == []
+    assert sockets == {"myapp-web.socket": False}
+
+    # order must not matter: the bound path alone is not enough
+    output = f"{serverops.READINESS_STATUS_END}\n" + block(True) + block(False)
+    _statuses, sockets = serverops.parse_readiness_probe(output)
+    assert sockets == {"myapp-web.socket": False}
 
 
 def test_parse_readiness_probe_missing_status_marker():
@@ -1457,3 +1535,20 @@ def test_read_remote_file_fatal_message(conn):
 
     assert excinfo.value.code == 1
     assert excinfo.value.message == "Cannot read unit"
+
+
+def test_installed_unit_tree_never_lists_enablement_symlinks(conn):
+    """``*.wants``/``*.requires`` links are enablement state, not unit files.
+
+    A depth-2 ``-name '<app>*'`` scan would match
+    ``multi-user.target.wants/<app>-web.service`` and doctor would report it as
+    a stray unit (and try to remove it).
+    """
+    conn.run.return_value = ("./myapp-web.service\n", True)
+
+    serverops.installed_unit_tree(conn, "myapp")
+
+    cmd = conn.run.call_args_list[0][0][0]
+    assert "-maxdepth 1 -name 'myapp*'" in cmd
+    assert "-maxdepth 2 -path './myapp*.d/*'" in cmd
+    assert "-maxdepth 2 \\( -name" not in cmd

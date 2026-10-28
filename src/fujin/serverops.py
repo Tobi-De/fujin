@@ -767,10 +767,12 @@ def prepare_staging(
     - ``binary``: the rsynced dist file plus the fused permission pass (1).
 
     The permission pass is one ``conn.run`` that sets the ``.env`` mode, the
-    venv modes and the deploy-wide group/setgid model. ``venv/`` is pruned
-    from the tree-wide ``find`` walks: its entries already get their exact
-    modes from the venv-specific passes above, so the venv tree is no longer
-    traversed by every pass of the normalization.
+    venv modes and the deploy-wide group/setgid model. ``venv/`` is only
+    pruned from the *file* walk: its files already carry ``go+rX`` from the
+    venv-specific ``chmod -R`` above, while its directories must still go
+    through the privileged directory walk so they end up setgid (an
+    unprivileged ``chmod`` strips ``S_ISGID`` on entries the deploy user does
+    not own the group of).
 
     ``requirements`` is the local requirements.txt path; the build committed
     the same file into the staging tree that rsync uploaded, so it is never
@@ -834,7 +836,6 @@ _STAGING_STEP_ERRORS: dict[str, str] = {
     "env-mode": "Failed to chmod .env in {staging}",
     "venv-mode": "Failed to set venv permissions in {staging}",
     "venv-exec": "Failed to set venv permissions in {staging}",
-    "venv-tree": "Failed to set venv permissions in {staging}",
     "chgrp": "Failed to normalize ownership of {staging}",
     "dirs": "Failed to normalize ownership of {staging}",
     "files": "Failed to normalize ownership of {staging}",
@@ -857,10 +858,15 @@ def _staging_permissions_script(
     """One shell script applying every staging mode/ownership rule.
 
     Modes are unchanged from the sequential implementation; only the
-    round-trips are fused. ``venv/`` is pruned from the tree-wide walks
-    because the venv-specific passes above already apply those bits - one
-    combined ``find`` over the venv covers both the setgid directories and
-    the group-readable private files.
+    round-trips are fused.
+
+    ``venv/`` is pruned from the tree-wide *file* walk only: the
+    venv-specific ``chmod -R`` above already applies ``u+rwX,go+rX`` there.
+    Its directories must go through the privileged directory walk below,
+    because they need the setgid bit and an unprivileged ``chmod`` on an
+    entry the deploy user does not own the group of (the staging tree is
+    ``deploy:app`` under a setgid parent) silently drops ``S_ISGID`` or
+    fails outright.
 
     Directories are handled separately from files: a bit-adding ``chmod -R``
     over the whole tree would mutate the inodes hardlinked from the live
@@ -876,14 +882,6 @@ def _staging_permissions_script(
         lines += [
             f"chmod -R u+rwX,go+rX {staging_q}/{_PYTHON_ROOT} {_fail_marker('venv-mode')}",
             f"chmod -R u+x {staging_q}/{_PYTHON_ROOT}/bin {_fail_marker('venv-exec')}",
-            # ``venv/`` is pruned from the tree-wide walks below, so the two
-            # bits they would have applied are applied here instead - in one
-            # traversal, after the venv ``u+x`` above so an executable file
-            # also keeps its group execute bit (as the sequential passes did).
-            f"find {staging_q}/{_PYTHON_ROOT}"
-            " -type d -exec chmod g+s {} +"
-            " -o -links 1 -type f -exec chmod g+rX {} +"
-            f" {_fail_marker('venv-tree')}",
         ]
     else:
         # The dist file ships via the rsynced tree; only its directory and
@@ -893,11 +891,11 @@ def _staging_permissions_script(
     lines += [
         f"chmod 0640 {staging_q}/{ENV_PATH} {_fail_marker('env-mode')}",
         f"sudo chgrp -R {shlex.quote(app_user)} {staging_q} {_fail_marker('chgrp')}",
-        # Directories: group-traversable, and setgid so late writes (hooks,
-        # runtime) keep inheriting the group.
-        f"sudo find {staging_q} -path {venv_q} -prune -o -type d"
+        # Directories (venv included): group-traversable, and setgid so late
+        # writes (hooks, runtime) keep inheriting the group.
+        f"sudo find {staging_q} -type d"
         f" -exec chmod g+rxs {{}} + {_fail_marker('dirs')}",
-        # Non-hardlinked files only.
+        # Non-hardlinked files only; venv files already got go+rX above.
         f"sudo find {staging_q} -path {venv_q} -prune -o -links 1 -type f"
         f" -exec chmod g+rX {{}} + {_fail_marker('files')}",
     ]
@@ -1022,11 +1020,12 @@ def install_units(
     its rendered content. ``dropins`` maps a unit name to
     ``{dropin-filename: content}``; the caller expands ``common.d`` per unit.
 
-    The script starts with the two read-only scans (installed tree at depth 2,
-    empty declared ``*.d`` dirs) so stale/prune decisions see the pre-write
-    state; both are printed between markers for diagnostics. Every mutating
-    step keeps the exact per-file ``sudo`` shapes the scoped sudoers rule
-    matches and appends a ``FUJIN-FAIL`` marker, so a failure names the
+    The script starts with the two read-only scans (installed units at depth 1
+    plus dropin *files* at depth 2, and empty declared ``*.d`` dirs) so
+    stale/prune decisions see the pre-write state; both are printed between
+    markers for diagnostics. Every mutating step keeps the exact per-file
+    ``sudo`` shapes the scoped sudoers rule matches and appends a
+    ``FUJIN-FAIL`` marker, so a failure names the
     file/step it aborted on.
     """
     dropins = dropins or {}
@@ -1078,7 +1077,7 @@ def _stale_unit_lines(valid: set[str]) -> list[str]:
     sees entries that were installed when the script started.
     """
     return [
-        "while IFS= read -r name; do",
+        "printf '%s\\n' \"$installed\" | while IFS= read -r name; do",
         '  [ -n "$name" ] || continue',
         "  rel=${name#./}",
         '  case "$rel" in',
@@ -1093,9 +1092,7 @@ def _stale_unit_lines(valid: set[str]) -> list[str]:
         '      sudo systemctl reset-failed "$rel" || true',
         f'      sudo rm -rf "{SYSTEMD_DIR}/$rel" || true ;;',
         "  esac",
-        "done <<EOF",
-        "$installed",
-        "EOF",
+        "done",
     ]
 
 
@@ -1107,12 +1104,19 @@ def _install_units_script(
     prune: set[str],
 ) -> str:
     """The fused install script executed by :func:`install_units`."""
+    # Two scans, because a single depth-2 ``-name '<app>*'`` also matched the
+    # enablement symlinks systemd owns (``./multi-user.target.wants/<app>*.service``)
+    # and the stale-removal loop then deleted them as "stale" (breaking boot
+    # enablement). Depth 1 covers units and dropin dirs; depth 2 is limited to
+    # files inside an ``<app>*.d`` dropin dir.
+    installed_scan = (
+        f"{{ find . -maxdepth 1 -name {shlex.quote(app_name + '*')} -print;"
+        f" find . -maxdepth 2 -path {shlex.quote(f'./{app_name}*.d/*')} -print; }}"
+        " 2>/dev/null | sort"
+    )
     lines = [
         f"cd {shlex.quote(SYSTEMD_DIR)} {_fail_marker('cd')}",
-        f"installed=$(find . -maxdepth 2 \\( "
-        f"-name {shlex.quote(app_name + '*')} "
-        f"-o -path {shlex.quote(f'./{app_name}*.d/*')} "
-        "\\) -print 2>/dev/null | sort)",
+        f"installed=$({installed_scan})",
         "printf '%s\\n' \"$installed\"",
         f"printf '%s\\n' {shlex.quote(INSTALL_INSTALLED_END)}",
     ]
@@ -1146,16 +1150,14 @@ def _install_units_script(
             " | sort)",
             "printf '%s\\n' \"$empty\"",
             f"printf '%s\\n' {shlex.quote(INSTALL_EMPTY_END)}",
-            "while IFS= read -r name; do",
+            "printf '%s\\n' \"$empty\" | while IFS= read -r name; do",
             '  [ -n "$name" ] || continue',
             "  rel=${name#./}",
             '  case "$rel" in',
             f"    {_case_alternatives(prune)})"
             f' sudo rm -rf "{SYSTEMD_DIR}/$rel" || true ;;',
             "  esac",
-            "done <<EOF",
-            "$empty",
-            "EOF",
+            "done",
         ]
     lines.append(f"sudo systemctl daemon-reload {_fail_marker('daemon-reload')}")
     return "\n".join(lines)
@@ -1172,10 +1174,14 @@ def installed_unit_tree(conn: Any, app_name: str) -> dict[str, str | None]:
     parent = SYSTEMD_DIR
     pattern = f"{app_name}*"
     dropin_glob = f"./{app_name}*.d/*"
+    # Two scans on purpose: a depth-2 `-name '<app>*'` would also match
+    # `multi-user.target.wants/<app>-web.service` (enablement symlinks are not
+    # unit files and must never be reported as stray or removed).
     cmd = (
         f"cd {shlex.quote(parent)} 2>/dev/null && "
-        f"find . -maxdepth 2 \\( -name {shlex.quote(pattern)}"
-        f" -o -path {shlex.quote(dropin_glob)} \\) -print 2>/dev/null | sort"
+        f"{{ find . -maxdepth 1 -name {shlex.quote(pattern)} -print; "
+        f"find . -maxdepth 2 -path {shlex.quote(dropin_glob)} -print; }}"
+        f" 2>/dev/null | sort"
     )
     out, _ok = conn.run(cmd, warn=True, hide=True)
     entries = [
@@ -1500,6 +1506,10 @@ def parse_readiness_probe(output: str) -> tuple[list[str], dict[str, bool]]:
     the order the units were passed to :func:`readiness_probe_command`; a
     socket without a complete block is absent from the mapping (callers treat
     that as not ready, like ``inactive``).
+
+    A socket unit may own several ``ListenStream=`` paths (one block each,
+    same unit name), so verdicts are ANDed per unit: the unit is ready only
+    when *every* one of its paths is bound and the unit is active.
     """
     lines = [line.strip() for line in output.splitlines()]
     statuses: list[str] = []
@@ -1514,7 +1524,8 @@ def parse_readiness_probe(output: str) -> tuple[list[str], dict[str, bool]]:
     for line in lines[index + 1 :]:
         if line == READINESS_SOCKET_END:
             if unit is not None:
-                sockets[unit] = present and active
+                verdict = present and active
+                sockets[unit] = sockets.get(unit, True) and verdict
             unit = None
         elif line.startswith(f"{READINESS_SOCKET_BEGIN} "):
             unit = line[len(READINESS_SOCKET_BEGIN) :].strip()

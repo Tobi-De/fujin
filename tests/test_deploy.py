@@ -1831,6 +1831,15 @@ SOCKET_FILES = {
     "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
 }
 
+MULTI_LISTEN_FILES = {
+    "systemd/testapp-web.socket": (
+        "[Socket]\n"
+        "ListenStream=/run/testapp/web.sock\n"
+        "ListenStream=/run/testapp/extra.sock\n"
+    ),
+    "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
+}
+
 SOCKET_DROPIN_FILES = {
     "systemd/testapp-web.socket": "[Socket]\n",
     "systemd/testapp-web.socket.d/listen.conf": (
@@ -2109,6 +2118,42 @@ def test_missing_socket_file_retries_then_fails_readiness(
     swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
     assert "prev" in swap_digests
     assert spies["write_states"][0].deploys[-1].result == "rollback"
+
+
+def test_socket_unit_with_two_paths_needs_both_bound(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A unit with two ``ListenStream=`` paths is ready only when both are
+    bound; the parser used to let the last path's block overwrite the first."""
+    minimal_config.replicas = {}
+    cmd, spies = setup_deploy(
+        monkeypatch, minimal_config, tmp_path, files=MULTI_LISTEN_FILES
+    )
+    spies["conn"].responses.insert(
+        0,
+        (
+            "test -S /run/testapp/web.sock",
+            (
+                readiness_output(
+                    sockets=[
+                        ("testapp-web.socket", False, "active"),
+                        ("testapp-web.socket", True, "active"),
+                    ]
+                ),
+                True,
+            ),
+        ),
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(deploy_mod, "time", clock)
+
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
+
+    assert _probe_containing(spies["conn"], "test -S /run/testapp/extra.sock")
+    assert clock.now >= deploy_mod.READINESS_TIMEOUT
+    assert any(
+        "journalctl" in c and "testapp-web.socket" in c for c, _ in spies["conn"].calls
+    )
 
 
 def test_socket_file_alone_is_not_ready_without_active_socket_unit(
