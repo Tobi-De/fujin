@@ -26,6 +26,8 @@ Design notes:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 import os
 import shutil
@@ -43,6 +45,7 @@ from fujin.manifest import InputFile, bundle_key, hash_bytes
 logger = logging.getLogger(__name__)
 
 CACHE_ROOT_DIR = "bundles"  # under ``.fujin/cache/``
+BUILD_LOCK_NAME = ".build.lock"  # under ``.fujin/cache/``
 BUILT_FILENAME = "built.json"
 SYSTEMD_DIR = "systemd"
 CADDYFILE_NAME = "Caddyfile"
@@ -482,7 +485,43 @@ def prebuild(
     )
 
 
+@contextlib.contextmanager
+def build_lock(config: Config):
+    """Serialize concurrent local builds of the same project.
+
+    The cache is written in place (``_assemble_staging`` replaces the bundle
+    directory), so two builds of the same project racing on
+    ``.fujin/cache/bundles/<key>/`` can corrupt each other. An exclusive
+    ``flock`` on ``.fujin/cache/.build.lock`` serializes them; the lock is
+    advisory and scope-local to this project's cache directory.
+    """
+    lock_dir = config.local_config_dir / "cache"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with (lock_dir / BUILD_LOCK_NAME).open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def run_build(
+    config: Config,
+    *,
+    no_cache: bool = False,
+    host: HostConfig | None = None,
+    assets: dict[str, str | bytes] | None = None,
+) -> BuildResult:
+    """Build the app (or reuse the local build cache) and return the staging tree.
+
+    Concurrent builds of the same project (e.g. two deploys) serialize on
+    :func:`build_lock`; ``--no-cache`` still rebuilds from scratch.
+    """
+    with build_lock(config):
+        return _run_build_locked(config, no_cache=no_cache, host=host, assets=assets)
+
+
+def _run_build_locked(
     config: Config,
     *,
     no_cache: bool = False,

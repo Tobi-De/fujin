@@ -338,3 +338,47 @@ def test_prebuild_and_run_build_reject_empty_systemd_dir(tmp_path, monkeypatch):
     assert str(pre_err.value.message) == "No systemd units found, nothing to build"
     assert build_err.value.message == pre_err.value.message
     assert build_err.value.code == pre_err.value.code
+
+
+def test_concurrent_builds_serialize_on_the_local_lock(project, monkeypatch):
+    """The cache is written in place, so parallel builds of the same project
+    must serialize on ``.fujin/cache/.build.lock`` (no interleaved runs)."""
+    import fcntl
+    import threading
+    import time
+
+    counter_lock = threading.Lock()
+    state = {"active": 0, "max_active": 0}
+    errors: list[BaseException] = []
+
+    def slow_run(*_a, **_kw):
+        with counter_lock:
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+        time.sleep(0.2)
+        with counter_lock:
+            state["active"] -= 1
+        return subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr("fujin.build.subprocess.run", slow_run)
+
+    def worker() -> None:
+        try:
+            run_build(make_config(project), no_cache=True)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not errors
+    assert state["max_active"] == 1, "build commands overlapped despite the lock"
+    # Both finished; the lock is released and free to re-acquire.
+    lock_path = project / ".fujin" / "cache" / ".build.lock"
+    assert lock_path.exists()
+    with lock_path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle, fcntl.LOCK_UN)

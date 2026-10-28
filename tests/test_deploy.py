@@ -25,7 +25,12 @@ import fujin.transfer
 from fujin.build import BuildResult
 from fujin.commands.deploy import Deploy
 from fujin.config import HealthCheckConfig, InstallationMode
-from fujin.errors import ConnectionError, DeploymentError, ImproperlyConfiguredError
+from fujin.errors import (
+    BuildError,
+    ConnectionError,
+    DeploymentError,
+    ImproperlyConfiguredError,
+)
 from fujin.exit_codes import (
     EXIT_DEPLOY_FAILED,
     EXIT_DEPLOY_ROLLED_BACK,
@@ -1857,6 +1862,87 @@ def test_build_failure_as_cappa_exit_preserves_code_and_redacts(
     spies["rsync"].assert_not_called()
 
 
+def test_build_failure_aborts_before_ssh_and_remote_lock(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A build failure exits 4 without opening a connection or taking the
+    remote deploy lock: the build runs before any server I/O."""
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    monkeypatch.setattr(
+        deploy_mod.build,
+        "run_build",
+        MagicMock(side_effect=BuildError("build failed", code=EXIT_DEPLOY_FAILED)),
+    )
+    ensure_layout = MagicMock()
+    acquire_lock = MagicMock()
+    monkeypatch.setattr(fujin.serverops, "ensure_layout", ensure_layout)
+    monkeypatch.setattr(fujin.serverops, "acquire_lock", acquire_lock)
+
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
+
+    assert spies["conn_ctx"].call_count == 0
+    ensure_layout.assert_not_called()
+    acquire_lock.assert_not_called()
+    assert spies["released"] == []
+
+
+def test_build_runs_before_server_layout_and_lock(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Event order: local build → ensure_layout → acquire_lock."""
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    events = spies["events"]
+    run_build = deploy_mod.build.run_build
+
+    def _run_build(*a, **k):
+        events.append(("build", None))
+        return run_build(*a, **k)
+
+    monkeypatch.setattr(deploy_mod.build, "run_build", _run_build)
+    monkeypatch.setattr(
+        fujin.serverops,
+        "ensure_layout",
+        lambda *a, **k: events.append(("ensure_layout", None)),
+    )
+    monkeypatch.setattr(
+        fujin.serverops,
+        "acquire_lock",
+        lambda *a, **k: (events.append(("acquire_lock", None)), "flock:1")[1],
+    )
+
+    assert invoke(cmd) == 0
+
+    names = [event[0] for event in events]
+    assert "build" in names
+    assert names.index("build") < names.index("ensure_layout")
+    assert names.index("build") < names.index("acquire_lock")
+
+
+def test_noop_still_builds_then_short_circuits(monkeypatch, minimal_config, tmp_path):
+    """No-op detection needs server state, so it stays after connecting, but
+    the local build has already run by then."""
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="prev", client_digest="digest-x")
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=state)
+    events = spies["events"]
+    run_build = deploy_mod.build.run_build
+
+    def _run_build(*a, **k):
+        events.append(("build", None))
+        return run_build(*a, **k)
+
+    monkeypatch.setattr(deploy_mod.build, "run_build", _run_build)
+
+    assert invoke(cmd) == 0
+
+    assert [event[0] for event in events].count("build") == 1
+    # The build precedes every server interaction (connection runs included).
+    assert events[0][0] == "build"
+    spies["rsync"].assert_not_called()
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_not_called()
+
+
 # ===========================================================================
 # Deploy-time readiness tiers (#88)
 # ===========================================================================
@@ -2938,6 +3024,24 @@ def test_dry_run_validates_health_check_probe_before_output(
     assert "missing" in str(exc.value.message)
     assert printer.lines == []
     assert conn.calls == []
+
+
+def test_dry_run_never_builds_or_takes_the_build_lock(
+    monkeypatch, minimal_config, tmp_path
+):
+    """The reordered build stays behind the --dry-run short-circuit."""
+    cmd, _printer, _conn, _spies = _dry_run_setup(monkeypatch, minimal_config, tmp_path)
+    run_build = MagicMock()
+    build_lock = MagicMock(
+        side_effect=AssertionError("dry-run must not take the build lock")
+    )
+    monkeypatch.setattr(deploy_mod.build, "run_build", run_build)
+    monkeypatch.setattr(deploy_mod.build, "build_lock", build_lock)
+
+    assert invoke(cmd) == 0
+
+    run_build.assert_not_called()
+    build_lock.assert_not_called()
 
 
 # ===========================================================================

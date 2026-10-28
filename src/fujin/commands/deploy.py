@@ -391,6 +391,12 @@ class Deploy(BaseCommand):
         # (fail-closed) and after activation there is nothing left to render.
         probe = self._build_health_probe(context)
 
+        # The build is local and independent of the server (the bundle key
+        # excludes secret values), so it runs before any SSH I/O: a slow build
+        # no longer holds an idle connection and the remote deploy lock, and a
+        # build failure aborts before the server is touched.
+        result, client_manifest, client_digest = self._build(resolved_env)
+
         with connection.connection(host=host, compress=False) as conn:
             self._notice_old_layout(conn)
             serverops.ensure_app_user(conn, config.app_user or config.app_name)
@@ -402,7 +408,15 @@ class Deploy(BaseCommand):
                 # Inside the lock: a concurrent deploy's staging dir is not
                 # ours to delete.
                 transfer.sweep_stale_staging(conn, app_dir)
-                self._deploy(conn, resolved_env, context, probe)
+                self._deploy(
+                    conn,
+                    result,
+                    client_manifest,
+                    client_digest,
+                    resolved_env,
+                    context,
+                    probe,
+                )
             finally:
                 serverops.release_lock(conn, app_dir, lock)
 
@@ -744,15 +758,14 @@ class Deploy(BaseCommand):
     # Orchestration
     # =======================================================================================
 
-    def _deploy(
-        self,
-        conn,
-        resolved_env: str,
-        context: Mapping[str, object],
-        probe: HealthProbe | None,
-    ) -> None:
+    def _build(self, resolved_env: str) -> tuple[build.BuildResult, m.Manifest, str]:
+        """Run the local build and derive the client manifest and digest.
+
+        Runs before any SSH I/O (see :meth:`__call__`); build failures keep
+        their exit-code taxonomy and never leak secret values through the
+        message.
+        """
         config = self.config
-        app_dir = config.app_dir
 
         self.output.info("Building application ...")
         try:
@@ -796,7 +809,21 @@ class Deploy(BaseCommand):
             host=self.selected_host.name or self.selected_host.address,
             python_version=config.python_version or "",
         )
-        client_digest = m.release_digest(client_manifest)
+        return result, client_manifest, m.release_digest(client_manifest)
+
+    def _deploy(
+        self,
+        conn,
+        result: build.BuildResult,
+        client_manifest: m.Manifest,
+        client_digest: str,
+        resolved_env: str,
+        context: Mapping[str, object],
+        probe: HealthProbe | None,
+    ) -> None:
+        config = self.config
+        app_dir = config.app_dir
+        files = dict(result.files)
 
         state = serverops.read_state(conn, app_dir)
         if state is not None and not self.force and store.is_noop(client_digest, state):
