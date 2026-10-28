@@ -64,7 +64,7 @@ def test_caddyfile_shared_dir_is_interpolated(project):
     )
     config = make_config(project)
 
-    _sources, _tree, caddyfile, _assets, unresolved = _gather_sources(
+    _sources, _tree, caddyfile, _assets, unresolved, _rewrites = _gather_sources(
         config, host=config.hosts[0], assets=None
     )
 

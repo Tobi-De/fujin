@@ -400,6 +400,14 @@ def test_prepare_staging_python_round_trips(conn):
     assert not any(".distfile" in c for c in cmds)
 
 
+def test_prepare_staging_full_install_gets_a_long_idle_timeout(conn):
+    """A silent dependency install is not declared wedged at 300s: the
+    full-install `uv pip install -r` gets a 900s idle deadline."""
+    _prepare(conn)
+    pip_call = conn.run.call_args_list[1]
+    assert pip_call[1]["idle_timeout"] == 900
+
+
 def test_prepare_staging_python_permission_pass_is_one_call(conn):
     _prepare(conn)
     script = conn.run.call_args_list[-1][0][0]

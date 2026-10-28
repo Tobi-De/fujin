@@ -11,6 +11,7 @@ that flow.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from unittest.mock import MagicMock
 
@@ -852,6 +853,141 @@ def test_hook_commands_interpolate_app_dir_to_new_release(
         for c in post_cmds
     )
     assert any("/releases/" in c and ".env" in c for c in post_cmds)
+
+
+def _hook_calls(conn, needle):
+    return [c for c, _ in conn.calls if needle in c]
+
+
+def test_pre_install_hook_runs_in_live_release(monkeypatch, minimal_config, tmp_path):
+    """pre_install concerns the release that is live: cwd, {app_dir} and the
+    sourced .env all point at ``{app_dir}/current``; {shared_dir} stays
+    absolute."""
+    from fujin.config import HooksConfig
+
+    hooks = HooksConfig(pre_install=["{app_dir}/bin/tool --state {shared_dir}/state"])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(),
+        hooks=hooks,
+    )
+
+    assert invoke(cmd) == 0
+
+    cmds = _hook_calls(spies["conn"], "bin/tool")
+    assert len(cmds) == 1, cmds
+    assert "cd /opt/fujin/testapp/current 2>/dev/null" in cmds[0]
+    assert "/opt/fujin/testapp/current/bin/tool" in cmds[0]
+    assert "/opt/fujin/testapp/shared/state" in cmds[0]
+    assert "source /opt/fujin/testapp/current/.env" in cmds[0]
+
+
+def test_post_install_and_post_start_hooks_run_in_new_release(
+    monkeypatch, minimal_config, tmp_path
+):
+    from fujin.config import HooksConfig
+
+    hooks = HooksConfig(
+        post_install=["{app_dir}/bin/migrate"],
+        post_start=["{app_dir}/bin/start-notify"],
+    )
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(),
+        hooks=hooks,
+    )
+
+    assert invoke(cmd) == 0
+
+    release_dir = r"/opt/fujin/testapp/releases/[0-9a-f]{64}"
+    for needle in ("bin/migrate", "bin/start-notify"):
+        cmds = _hook_calls(spies["conn"], needle)
+        assert len(cmds) == 1, (needle, cmds)
+        assert re.search(rf"cd {release_dir} && ", cmds[0])
+        assert re.search(rf"source {release_dir}/\.env", cmds[0])
+        assert f"{minimal_config.app_dir}/current" not in cmds[0]
+
+
+def test_noop_post_start_hook_runs_in_live_release(
+    monkeypatch, minimal_config, tmp_path
+):
+    """The no-op path transfers nothing, so post_start concerns the live
+    release (no new release directory exists)."""
+    from fujin.config import HooksConfig
+
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    hooks = HooksConfig(post_start=["{app_dir}/bin/notify"])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="digest-x"),
+        hooks=hooks,
+    )
+
+    assert invoke(cmd) == 0
+    spies["rsync"].assert_not_called()
+
+    cmds = _hook_calls(spies["conn"], "bin/notify")
+    assert len(cmds) == 1, cmds
+    assert "cd /opt/fujin/testapp/current 2>/dev/null" in cmds[0]
+    assert "/opt/fujin/testapp/current/bin/notify" in cmds[0]
+
+
+def test_deploy_warns_once_about_rewritten_legacy_units(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    """The build result names the rewritten files; deploy prints one warning
+    line before any transfer."""
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    _staging, result = build_result_for(tmp_path)
+    rewritten = BuildResult(
+        staging_dir=result.staging_dir,
+        bundle_key=result.bundle_key,
+        files=result.files,
+        dist_path=result.dist_path,
+        dist_sha256=result.dist_sha256,
+        legacy_rewrites=(".fujin/systemd/web.service",),
+    )
+    monkeypatch.setattr(deploy_mod.build, "run_build", lambda *a, **k: rewritten)
+
+    cmd._build("")
+
+    err = capsys.readouterr().err
+    assert err.count("legacy .install references") == 1
+    assert ".fujin/systemd/web.service" in err
+
+
+def test_legacy_install_reference_aborts_before_ssh(
+    monkeypatch, minimal_config, tmp_path
+):
+    """An unmappable .install reference fails in the local build, before the
+    SSH connection (and therefore before any server state is touched)."""
+    systemd = minimal_config.local_config_dir / "systemd"
+    systemd.mkdir(parents=True)
+    (systemd / "web.service").write_text(
+        "[Service]\nExecStart={install_dir}/data/tool run\n"
+    )
+    conn_ctx = MagicMock()
+    monkeypatch.setattr(fujin.connection, "connection", conn_ctx)
+
+    cmd = Deploy(no_input=True)
+    cmd.config = minimal_config
+
+    # Deploy re-wraps build failures as a plain cappa.Exit while preserving
+    # the taxonomy code; the message still names the offending file.
+    with pytest.raises(cappa.Exit) as exc_info:
+        cmd()
+    assert exc_info.value.code == EXIT_USER_ABORTED
+    assert "web.service" in str(exc_info.value.message)
+    assert "{shared_dir}" in str(exc_info.value.message)
+    conn_ctx.assert_not_called()
 
 
 # ===========================================================================

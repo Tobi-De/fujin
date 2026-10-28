@@ -10,6 +10,8 @@ deleted along with that flow.
 from __future__ import annotations
 
 import json
+import re
+import shlex
 from unittest.mock import MagicMock
 
 import pytest
@@ -69,6 +71,8 @@ class FakeConn:
         for marker, (out, ok) in self.responses:
             if marker in cmd:
                 return out, ok
+        if fujin.serverops.READINESS_STATUS_END in cmd:
+            return self._readiness_output(cmd), True
         # Existence checks follow the manifest marker registry: a test
         # -d/-f target exists iff some marker is that path or inside it.
         # A blind ok=True default would break digest-vs-version targeting;
@@ -93,6 +97,28 @@ class FakeConn:
                     fh.write(out)
                 return
         raise FileNotFoundError(remote)
+
+    @staticmethod
+    def _readiness_output(cmd):
+        """Default verdict for the fused readiness probe: everything ready.
+
+        Parses the units/sockets the command asks about, so a test only has
+        to register an ``is-failed`` response to simulate a failure.
+        """
+        units_match = re.search(r"systemctl is-failed (.*?) 2>/dev/null", cmd)
+        units = shlex.split(units_match.group(1)) if units_match else []
+        parts = [
+            "".join("active\n" for _ in units),
+            f"{fujin.serverops.READINESS_STATUS_END}\n",
+        ]
+        for unit in dict.fromkeys(re.findall(r"FUJIN-SOCKET ([^\s']+)", cmd)):
+            parts += [
+                f"{fujin.serverops.READINESS_SOCKET_BEGIN} {unit}\n",
+                "present\n",
+                "active\n",
+                f"{fujin.serverops.READINESS_SOCKET_END}\n",
+            ]
+        return "".join(parts)
 
 
 def manifest_response(digest, version, dist, files=None):
@@ -483,6 +509,54 @@ def test_restart_failure_is_loud_and_no_recursion(monkeypatch, minimal_config):
     assert exit_code_of(lambda: cmd()) == EXIT_ROLLBACK_FAILED
     swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "a-digest")
     write_state.assert_not_called()
+
+
+def test_readiness_failure_after_restart_exits_6(monkeypatch, minimal_config):
+    """A restart that leaves a unit failed is a failed rollback (6), recorded
+    nowhere: the rollback readiness check uses the same poll deploy uses."""
+    conn = FakeConn(
+        [
+            *DEFAULT_CONN_RESPONSES,
+            ("systemctl is-failed", ("failed\n", True)),
+        ]
+    )
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, write_state, swap_current, _v, _iu = setup_rollback(
+        monkeypatch, minimal_config, conn, state=state, current_manifest=current
+    )
+
+    assert exit_code_of(lambda: cmd()) == EXIT_ROLLBACK_FAILED
+
+    swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "a-digest")
+    write_state.assert_not_called()
+    assert any("systemctl restart --quiet" in c for c in conn.calls)
+    assert any("journalctl -u testapp-web.service" in c for c in conn.calls)
+
+
+def test_health_check_failure_after_restart_exits_6(monkeypatch, minimal_config):
+    """The configured [health_check] runs after a rollback restart too."""
+    from fujin.config import HealthCheckConfig
+
+    minimal_config.health_check = HealthCheckConfig(
+        http="http://127.0.0.1:8000/health", timeout=1
+    )
+    conn = FakeConn(
+        [
+            *DEFAULT_CONN_RESPONSES,
+            ("curl -sf", ("connection refused", False)),
+        ]
+    )
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, write_state, _swap, _v, _iu = setup_rollback(
+        monkeypatch, minimal_config, conn, state=state, current_manifest=current
+    )
+
+    assert exit_code_of(lambda: cmd()) == EXIT_ROLLBACK_FAILED
+
+    write_state.assert_not_called()
+    assert any(c.startswith("curl -sf") for c in conn.calls)
 
 
 def test_swap_current_failure_exits_6(monkeypatch, minimal_config):

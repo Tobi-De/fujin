@@ -22,7 +22,7 @@ import msgspec
 
 from fujin import serverops, store
 from fujin.commands.doctor import FAIL, OK, WARN, Doctor
-from fujin.config import Config
+from fujin.config import Config, InstallationMode
 from fujin.manifest import build_manifest, manifest_to_dict
 from fujin.store import DeployRecord, State
 
@@ -78,6 +78,7 @@ class FakeConn:
         enabled=(INSTANCE,),
         active=(INSTANCE,),
         audit=(),
+        uv_relocatable=True,
     ):
         self.link = link
         self.state = state
@@ -103,6 +104,7 @@ class FakeConn:
         self.enabled = list(enabled)
         self.active = list(active)
         self.audit = list(audit)
+        self.uv_relocatable = uv_relocatable
         self.calls: list[str] = []
         self.gets: list[tuple[str, str]] = []
 
@@ -236,6 +238,14 @@ class FakeConn:
 
         if "command -v caddy" in cmd:
             return ("/usr/bin/caddy", True) if self.caddy else ("", False)
+
+        if cmd.startswith("uv venv --help"):
+            flags = (
+                "--relocatable  Create a relocatable virtual environment"
+                if (self.uv_relocatable)
+                else "--python  Interpreters to use"
+            )
+            return f"Usage: uv venv [OPTIONS] [PATH]\n\nOptions:\n  {flags}\n", True
 
         if "caddy validate" in cmd:
             return (
@@ -740,6 +750,56 @@ def test_caddy_validate_failure_reported(minimal_config_dict, monkeypatch):
     )
     assert exit_code == 1
     assert "caddy validate failed" in "\n".join(messages)
+
+
+# ============================================================================
+# uv capability (relocatable venv)
+# ============================================================================
+
+
+def test_uv_relocatable_capability_probed_and_reported(
+    minimal_config_dict, monkeypatch
+):
+    """One read-only probe of `uv venv --help`; a capable uv is OK."""
+    conn = clean_conn()
+    messages, exit_code = run_doctor(
+        monkeypatch, make_config(minimal_config_dict), conn
+    )
+
+    assert exit_code == 0
+    assert "uv venv supports --relocatable" in "\n".join(messages)
+    help_calls = [cmd for cmd in conn.calls if cmd.startswith("uv venv --help")]
+    assert help_calls == ["uv venv --help 2>&1"]
+
+
+def test_uv_not_required_for_binary_install(minimal_config_dict, monkeypatch):
+    """Binary mode never runs uv: no probe and no failure on an old uv."""
+    config = make_config(minimal_config_dict)
+    config.installation_mode = InstallationMode.BINARY
+    conn = clean_conn(uv_relocatable=False)
+
+    messages, exit_code = run_doctor(monkeypatch, config, conn)
+
+    assert exit_code == 0
+    assert "not used in binary mode" in "\n".join(messages)
+    assert not [cmd for cmd in conn.calls if cmd.startswith("uv ")]
+
+
+def test_old_uv_is_actionable_failure_and_never_repaired(
+    minimal_config_dict, monkeypatch
+):
+    """An old uv (no --relocatable) fails the check with `fujin server
+    upgrade` guidance; --fix must not try to upgrade anything."""
+    conn = clean_conn(uv_relocatable=False)
+    messages, exit_code = run_doctor(
+        monkeypatch, make_config(minimal_config_dict), conn, fix=True
+    )
+
+    assert exit_code == 1
+    text = "\n".join(messages)
+    assert "--relocatable" in text
+    assert "fujin server upgrade" in text
+    assert mutating(conn.calls) == []
 
 
 # ============================================================================

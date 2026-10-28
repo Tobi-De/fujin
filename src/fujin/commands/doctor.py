@@ -21,6 +21,7 @@ import cappa
 from fujin import connection, serverops, store
 from fujin.audit import read_logs
 from fujin.commands import BaseCommand
+from fujin.config import InstallationMode
 from fujin.exit_codes import EXIT_USER_ABORTED
 
 OK = "OK"
@@ -81,8 +82,9 @@ class Check:
     help="Check server state and repair safe inconsistencies",
     description=(
         "Runs read-only integrity checks over the release store, systemd units,"
-        " permissions, Caddy, the deploy lock and the audit log. With --fix,"
-        " safe problems are repaired; nothing is mutated without it."
+        " permissions, Caddy, the deploy lock, the uv toolchain capability and"
+        " the audit log. With --fix, safe problems are repaired; nothing is"
+        " mutated without it."
     ),
 )
 @dataclass
@@ -158,6 +160,7 @@ class Doctor(BaseCommand):
         )
         checks.extend(self._check_permissions(conn))
         checks.append(self._check_caddy(conn))
+        checks.append(self._check_uv(conn))
         checks.extend(self._check_lock(conn, app_dir, probe))
         checks.append(self._check_audit(conn, releases))
         return checks
@@ -772,7 +775,41 @@ class Doctor(BaseCommand):
         return Check(FAIL, "caddy", detail)
 
     # ------------------------------------------------------------------
-    # 7. deploy lock + orphaned staging dirs
+    # 7. uv capability (report-only)
+    # ------------------------------------------------------------------
+
+    def _check_uv(self, conn) -> Check:
+        """Report whether the server's uv supports ``uv venv --relocatable``.
+
+        The venv-clone install path requires ``--relocatable`` (it hardlink-
+        copies the live release's venv into the new one); older uv releases
+        do not accept the flag, so a deploy would fail late. One read-only
+        round trip; report-only, never repaired by ``--fix`` (upgrading uv is
+        an explicit operator action).
+        """
+        if self.config.installation_mode is not InstallationMode.PY_PACKAGE:
+            # Binary deployments never run uv: a missing/old uv there is not
+            # a problem and must not fail the check.
+            return Check(OK, "uv", "not used in binary mode; skipped")
+        out, ok = conn.run("uv venv --help 2>&1", warn=True, hide=True)
+        if not ok:
+            return Check(
+                WARN,
+                "uv",
+                "uv is not installed (or not on PATH); python-package deploys"
+                " need it - install it with `fujin server bootstrap`",
+            )
+        if "--relocatable" in out:
+            return Check(OK, "uv", "uv venv supports --relocatable")
+        return Check(
+            FAIL,
+            "uv",
+            "uv venv does not support --relocatable (required for the venv"
+            " clone install path); upgrade uv with `fujin server upgrade`",
+        )
+
+    # ------------------------------------------------------------------
+    # 8. deploy lock + orphaned staging dirs
     # ------------------------------------------------------------------
 
     def _check_lock(
@@ -863,7 +900,7 @@ class Doctor(BaseCommand):
         return checks
 
     # ------------------------------------------------------------------
-    # 8. audit log integrity
+    # 9. audit log integrity
     # ------------------------------------------------------------------
 
     def _check_audit(self, conn, releases: list[str]) -> Check:

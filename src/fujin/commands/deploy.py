@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shlex
 import signal
 import sys
@@ -29,7 +28,6 @@ from fujin.errors import (
     CommandError,
     ConnectionError,
     DeploymentError,
-    ImproperlyConfiguredError,
 )
 from fujin.exit_codes import (
     EXIT_DEPLOY_FAILED,
@@ -49,13 +47,14 @@ from rich.prompt import Confirm
 
 logger = logging.getLogger(__name__)
 
-#: Fallback readiness window (tier 1): a unit must reach ``active`` within
-#: this many seconds of the restart, regardless of any probe configuration.
-READINESS_TIMEOUT = 30.0
-READINESS_INTERVAL = 0.5
+#: Readiness/health timing lives in :mod:`fujin.serverops` (one code path
+#: shared with ``fujin rollback``); re-exported here for deploy callers.
+READINESS_TIMEOUT = serverops.READINESS_TIMEOUT
+READINESS_INTERVAL = serverops.READINESS_INTERVAL
+HEALTH_CHECK_INTERVAL = serverops.HEALTH_CHECK_INTERVAL
 
-#: Retry interval of the optional health-check probe (tier 3), in seconds.
-HEALTH_CHECK_INTERVAL = 1.0
+#: A ``[health_check]`` probe rendered once, before any server I/O.
+HealthProbe = serverops.HealthProbe
 
 
 def _comparable(manifest: m.Manifest) -> m.Manifest:
@@ -85,20 +84,6 @@ def _comparable(manifest: m.Manifest) -> m.Manifest:
         python_version=manifest.python_version,
         created_at=manifest.created_at,
     )
-
-
-@dataclass(frozen=True)
-class HealthProbe:
-    """A ``[health_check]`` probe rendered once, before any server I/O.
-
-    ``command`` is the exact remote command (bounded by ``min(5, timeout)``),
-    ``timeout`` the overall retry window, ``display`` the redacted source
-    text for user-facing output.
-    """
-
-    command: str
-    timeout: int
-    display: str
 
 
 def _probe(conn, command: str, *, attempts: int = 2, idle_timeout: float = 15):
@@ -158,72 +143,6 @@ def _has_template_unit(manifest: m.Manifest | None) -> bool:
         and serverops.unit_rel_name(path).endswith("@.service")
         for path, entry in manifest.entries.items()
     )
-
-
-_TYPE_NOTIFY_RE = re.compile(r"^\s*Type\s*=\s*notify\s*$", re.IGNORECASE | re.MULTILINE)
-_LISTEN_STREAM_RE = re.compile(
-    r"^\s*ListenStream\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE
-)
-
-
-def notify_units(unit_files: Mapping[str, str]) -> set[str]:
-    """Service units in the staging tree that declare ``Type=notify``.
-
-    ``systemctl restart`` on a notify unit blocks until the unit sends
-    ``READY=1``; the command fails when that does not happen within its
-    timeout. A notify unit therefore never reaches the ``is-failed`` poll as
-    a "maybe still starting" unit: a hung notify unit has already failed the
-    restart, which routes through the same failure/rollback path. Polling it
-    again would only duplicate that verdict (and report a unit that systemd
-    may not even have marked ``failed`` yet).
-    """
-    return {
-        name
-        for name, content in unit_files.items()
-        if name.endswith(".service") and _TYPE_NOTIFY_RE.search(content)
-    }
-
-
-def socket_paths(
-    unit_files: Mapping[str, str],
-    dropins: Mapping[str, Mapping[str, str]] | None = None,
-) -> dict[str, str]:
-    """Absolute ``ListenStream=`` paths declared by socket units.
-
-    Scans the socket unit files *and* their ``*.socket.d/*.conf`` dropins
-    (``dropins`` is keyed by unit name, the :func:`serverops.expand_dropins`
-    contract). Returns ``{path: socket_unit_name}``. Abstract (``@...``) and
-    relative addresses are ignored: only an absolute filesystem path can be
-    probed with ``test -S``.
-    """
-    paths: dict[str, str] = {}
-
-    def scan(name: str, contents: Iterable[str]) -> None:
-        for content in contents:
-            for match in _LISTEN_STREAM_RE.finditer(content):
-                path = match.group(1)
-                if path.startswith("/"):
-                    paths[path] = name
-
-    for name, content in unit_files.items():
-        if name.endswith(".socket"):
-            scan(name, [content])
-    for unit, files in (dropins or {}).items():
-        if unit.endswith(".socket"):
-            scan(unit, files.values())
-    return paths
-
-
-def _is_notify(unit: str, notify: set[str]) -> bool:
-    """True when *unit* (a concrete instance) is backed by a ``Type=notify``
-    unit file, i.e. ``worker@1.service`` for ``worker@.service``."""
-    if unit in notify:
-        return True
-    if "@" in unit:
-        template = f"{unit.rsplit('@', 1)[0]}@.service"
-        if template in notify:
-            return True
-    return False
 
 
 def venv_clone_eligible(
@@ -776,30 +695,10 @@ class Deploy(BaseCommand):
         """Render the configured ``[health_check]`` probe, or ``None``.
 
         Unresolved placeholders raise :class:`ImproperlyConfiguredError`
-        naming them; this must happen before any server I/O.
+        naming them; this must happen before any server I/O. Rendering is
+        shared with ``fujin rollback`` (:func:`serverops.build_health_probe`).
         """
-        health = self.config.health_check
-        if health is None:
-            return None
-        raw = health.http if health.http is not None else health.command
-        assert raw is not None  # guaranteed by HealthCheckConfig
-        rendered, unresolved = safe_format(raw, **context)
-        if unresolved:
-            raise ImproperlyConfiguredError(
-                "[health_check] references unknown variables:"
-                f" {', '.join(sorted(unresolved))}."
-            )
-        # Per-attempt bound: a hung probe must not eat the whole retry window.
-        budget = min(5, health.timeout)
-        if health.http is not None:
-            command = (
-                f"curl -sf -o /dev/null --max-time {budget} {serverops.q(rendered)}"
-            )
-        else:
-            command = f"timeout {budget} bash -lc {serverops.q(rendered)}"
-        return HealthProbe(
-            command=command, timeout=health.timeout, display=redact(rendered)
-        )
+        return serverops.build_health_probe(self.config.health_check, context)
 
     # =======================================================================================
     # Orchestration
@@ -842,6 +741,14 @@ class Deploy(BaseCommand):
             wrapped = redact(raw)
             raise DeploymentError(wrapped) from (exc if wrapped == raw else None)
         files = dict(result.files)
+        if result.legacy_rewrites:
+            # 0.27 units point at the preserved .install directory; the build
+            # already rewrote them to the release tree. Say so once, before any
+            # SCP/rsync, so a silent venv/user miss is explainable.
+            self.output.warning(
+                "Rewrote legacy .install references to {app_dir}/current/..."
+                " in: " + ", ".join(result.legacy_rewrites)
+            )
 
         # The rendered .env is deploy-time state (kind ``env``), never
         # build-cache content (#77): it is written into the staging tree for
@@ -1249,8 +1156,8 @@ class Deploy(BaseCommand):
                 conn,
                 final_manifest,
                 oneshots,
-                notify=notify_units(unit_files),
-                sockets=socket_paths(unit_files, dropins),
+                notify=serverops.notify_units(unit_files),
+                sockets=serverops.socket_paths(unit_files, dropins),
             )
             self._run_health_check(conn, readiness_units, probe)
             self._run_hooks(conn, "post_start", context, release_path=release_path)
@@ -1555,56 +1462,6 @@ class Deploy(BaseCommand):
                 )
             self._handle_failed_units(conn, start)
 
-    def _readiness_units(
-        self,
-        manifest: m.Manifest,
-        oneshots: set[str],
-        notify: set[str] | None = None,
-    ) -> list[str]:
-        """Runtime service units to health-check, derived from the release
-        manifest (same semantics the old installer used): oneshots and
-        services that have a socket or timer in the tree are exempt (the
-        socket/timer governs their lifecycle); template services poll their
-        ``svc@1..N`` instances.
-
-        ``Type=notify`` units are excluded: ``systemctl restart`` already
-        blocked on their ``READY=1``, so a failed/timed-out activation was
-        caught there. See :func:`notify_units`.
-        """
-        notify = notify or set()
-        unit_names: set[str] = set()
-        for path, entry in manifest.entries.items():
-            if entry.kind is not m.EntryKind.UNIT:
-                continue
-            if name := store.unit_entry_name(path):
-                unit_names.add(name)
-        units_to_check: list[str] = []
-        app_prefix = f"{self.config.app_name}-"
-        for name in sorted(unit_names):
-            if not name.endswith(".service"):
-                continue
-            if name in oneshots:
-                continue
-            if _is_notify(name, notify):
-                continue
-            base = name.removesuffix(".service").removesuffix("@")
-            if f"{base}.socket" in unit_names or f"{base}.timer" in unit_names:
-                continue
-            if name.endswith("@.service"):
-                service = name.removesuffix("@.service")
-                if not service.startswith(app_prefix):
-                    continue
-                replicas = self.config.replicas.get(service[len(app_prefix) :], 1)
-                units_to_check.extend(
-                    sorted(
-                        f"{i}.service"
-                        for i in store.desired_instances(service, replicas)
-                    )
-                )
-            else:
-                units_to_check.append(name)
-        return units_to_check
-
     def _wait_for_units(
         self,
         conn,
@@ -1616,64 +1473,27 @@ class Deploy(BaseCommand):
     ) -> list[str]:
         """Wait until the restarted units are actually ready (tier 1 + 2).
 
-        A runtime service unit is ready only once ``systemctl is-failed``
-        reports ``active`` for it; ``activating``, ``inactive`` and empty
-        output all mean "not ready yet" and are retried. A ``failed`` unit
-        fails immediately.
-
-        For socket-activated services (``ListenStream=<abs path>``), readiness
-        requires BOTH the socket file to exist (``test -S``) and the owning
-        socket unit to report ``active``: the service itself only starts on
-        the first connection, so a unit-state poll of the service says nothing
-        about readiness there.
-
-        The window is :data:`READINESS_TIMEOUT` seconds; when it expires the
-        units that never became ready are failed through
-        :meth:`_handle_failed_units`. This poll runs whether or not a
-        ``[health_check]`` probe is configured: it is the explicit fallback.
-        Returns the unit list checked (used for the health-check journal dump).
+        The poll itself is :func:`serverops.wait_for_units` (shared with
+        ``fujin rollback``); this method only owns the deploy failure policy:
+        units that fail or never become ready are routed through
+        :meth:`_handle_failed_units`, which dumps their journals and triggers
+        the auto-rollback. Returns the unit list checked (used for the
+        health-check journal dump).
         """
-        notify = notify or set()
+        units_to_check = serverops.readiness_units(
+            manifest,
+            app_name=self.config.app_name,
+            replicas=self.config.replicas,
+            oneshots=oneshots,
+            notify=notify or (),
+        )
         sockets = dict(sockets or {})
-        units_to_check = self._readiness_units(manifest, oneshots, notify)
         if not units_to_check and not sockets:
             return []
-        sorted_units = sorted(units_to_check)
-        # Every fact a tick needs (unit statuses, per socket: file bound and
-        # owning unit active) comes back from ONE read-only command.
-        probe_command = serverops.readiness_probe_command(sorted_units, sockets)
-        deadline = time.monotonic() + READINESS_TIMEOUT
-        while True:
-            out, _ok = _probe(conn, probe_command)
-            statuses, socket_states = serverops.parse_readiness_probe(out)
-            failed = [
-                unit
-                for unit, status in zip(sorted_units, statuses, strict=False)
-                if status == "failed"
-            ]
-            if failed:
-                self._handle_failed_units(conn, failed)
-                return units_to_check
-            not_ready = [
-                unit
-                for unit, status in zip(sorted_units, statuses, strict=False)
-                if status != "active"
-            ]
-            # A socket file legitimately appears only once the socket unit is
-            # active; the probe also reports socket units that are activating
-            # but not yet bound.
-            unready_sockets: list[str] = []
-            for unit in sockets.values():
-                if not socket_states.get(unit, False) and unit not in unready_sockets:
-                    unready_sockets.append(unit)
-            if not not_ready and not unready_sockets:
-                return units_to_check
-            if time.monotonic() >= deadline:
-                # Report every unit that never reached active, services and
-                # socket units alike.
-                self._handle_failed_units(conn, [*not_ready, *unready_sockets])
-                return units_to_check
-            time.sleep(READINESS_INTERVAL)
+        offenders = serverops.wait_for_units(conn, units_to_check, sockets, clock=time)
+        if offenders:
+            self._handle_failed_units(conn, offenders)
+        return units_to_check
 
     def _run_health_check(
         self,
@@ -1684,27 +1504,23 @@ class Deploy(BaseCommand):
         """Run the optional ``[health_check]`` probe (tier 3, #88).
 
         The probe is already rendered (before any server I/O) and runs after
-        the readiness poll, before ``post_start`` hooks. It is retried once
-        per :data:`HEALTH_CHECK_INTERVAL` for ``timeout`` seconds; a probe that
-        never succeeds is a failed deploy: the readiness units' journal is
-        surfaced (via :meth:`_handle_failed_units`) and the existing
-        auto-rollback contract applies.
+        the readiness poll, before ``post_start`` hooks. Polling is
+        :func:`serverops.wait_for_health_check` (shared with rollback); a
+        probe that never succeeds is a failed deploy: the readiness units'
+        journal is surfaced (via :meth:`_handle_failed_units`) and the
+        existing auto-rollback contract applies.
         """
         if probe is None:
             return
         self.output.info(
             f"Running health check (up to {probe.timeout}s): {probe.display}"
         )
-        deadline = time.monotonic() + probe.timeout
-        last_output = ""
-        while True:
-            ok, last_output = serverops.run_health_probe(conn, probe.command)
-            if ok:
-                self.output.info("Health check passed.")
-                return
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(HEALTH_CHECK_INTERVAL)
+        ok, last_output = serverops.wait_for_health_check(
+            conn, probe, interval=HEALTH_CHECK_INTERVAL, clock=time
+        )
+        if ok:
+            self.output.info("Health check passed.")
+            return
 
         self.output.error("Health check failed.")
         if last_output:
@@ -1939,10 +1755,19 @@ class Deploy(BaseCommand):
     ) -> None:
         """Run a hook phase through the connection.
 
-        ``release_path=None``: the old release is live — env comes from the
-        live release's .env (or the legacy ``.install/.env``). Otherwise the
-        env is the NEW release's .env, the hook runs in the release dir and
-        ``{app_dir}`` inside hook commands resolves to the release dir.
+        Every phase runs inside the release it concerns, with that release's
+        ``.env`` sourced and ``{app_dir}`` in the hook command resolving to
+        that directory:
+
+        - ``pre_install``: the live release (``{app_dir}/current``); on a
+          first deploy (no ``current`` symlink yet) the cwd falls back to the
+          app directory, whose ``.env`` does not exist outside a release.
+        - ``post_install`` / ``post_start``: the new release directory.
+        - a no-op deploy's ``post_start``: the live release
+          (``{app_dir}/current``).
+
+        ``{shared_dir}`` stays the absolute shared directory. Fail-closed
+        interpolation and PTY execution are unchanged.
         """
         hooks_config = self.config.hooks_config
         if not hooks_config:
@@ -1960,21 +1785,22 @@ class Deploy(BaseCommand):
         self.output.info(f"Running {label} hooks...")
 
         if release_path is None:
-            app_dir = self.config.app_dir
+            release_dir = f"{self.config.app_dir}/current"
+            # Upgraded hosts may still only have the legacy .install/.env.
             select_env = (
-                f"if [ -f {serverops.q(f'{app_dir}/current/.env')} ]; then "
-                f"source {serverops.q(f'{app_dir}/current/.env')}; else "
-                f"source {serverops.q(f'{self.config.install_dir}/.env')} 2>/dev/null; fi"
+                f"if [ -f {serverops.q(f'{release_dir}/.env')} ]; then "
+                f"source {serverops.q(f'{release_dir}/.env')}; else "
+                f"source {serverops.q(f'{self.config.install_dir}/.env')}"
+                " 2>/dev/null; fi"
             )
-            cwd: str | None = None
         else:
-            select_env = f"source {serverops.q(f'{release_path}/.env')}"
-            cwd = release_path
-            context = {
-                **context,
-                "app_dir": release_path,
-                "install_dir": release_path,
-            }
+            release_dir = release_path
+            select_env = f"source {serverops.q(f'{release_dir}/.env')}"
+        context = {
+            **context,
+            "app_dir": release_dir,
+            "install_dir": release_dir,
+        }
 
         for raw in commands:
             cmd, unresolved_vars = safe_format(raw, **context)
@@ -1992,8 +1818,15 @@ class Deploy(BaseCommand):
                 )
             self.output.info(f"  [{label}] {cmd}")
             full_cmd = f"set -a; {select_env}; set +a; "
-            if cwd:
-                full_cmd += f"cd {serverops.q(cwd)} && "
+            if release_path is None:
+                # First deploy: the live-release directory does not exist
+                # yet, so run in the app directory (which always exists).
+                full_cmd += (
+                    f"cd {serverops.q(release_dir)} 2>/dev/null"
+                    f" || cd {serverops.q(self.config.app_dir)}; "
+                )
+            else:
+                full_cmd += f"cd {serverops.q(release_dir)} && "
             full_cmd += cmd
             try:
                 _out, ok = conn.run(full_cmd, pty=True)

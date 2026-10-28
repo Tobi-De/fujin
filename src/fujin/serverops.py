@@ -11,24 +11,32 @@ from __future__ import annotations
 import base64
 import configparser
 import json
+import re
 import secrets
 import logging
 import shlex
+import time
 import msgspec
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import cappa
 
 from fujin import manifest as m
 from fujin.audit import write_command as audit_write_command
+from fujin.errors import ConnectionError, ImproperlyConfiguredError
+from fujin.formatting import safe_format
+from fujin.redaction import redact
 from fujin.store import (
     State,
     convergence,
+    desired_instances,
     gc_plan,
     instance_sort_key,
     parse_state,
     serialize_state,
+    unit_entry_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +79,14 @@ PLAN_LINKS_END = "FUJIN-LINKS-END"
 READINESS_STATUS_END = "FUJIN-STATUS-END"
 READINESS_SOCKET_BEGIN = "FUJIN-SOCKET"
 READINESS_SOCKET_END = "FUJIN-SOCKET-END"
+
+#: Fallback readiness window: a unit must reach ``active`` within this many
+#: seconds of the restart, regardless of any probe configuration.
+READINESS_TIMEOUT = 30.0
+READINESS_INTERVAL = 0.5
+
+#: Retry interval of the optional health-check probe, in seconds.
+HEALTH_CHECK_INTERVAL = 1.0
 
 
 class ServerOpsError(RuntimeError):
@@ -851,7 +867,13 @@ def prepare_staging(
                 warn=True,
             )
             if not ok:
-                raise ServerOpsError(f"uv venv creation failed in {staging_dir}")
+                raise ServerOpsError(
+                    f"uv venv creation failed in {staging_dir}.\n"
+                    "  - `uv venv --relocatable` is required (venv clone path);"
+                    " an older uv may not support it\n"
+                    "  - Upgrade uv on the server with: fujin server upgrade\n"
+                    "  - Check the remote uv version with: fujin doctor"
+                )
             pip_cmd = (
                 f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} UV_COMPILE_BYTECODE=1 "
                 f"uv pip install --python {venv_q}/bin/python "
@@ -869,7 +891,10 @@ def prepare_staging(
                     f" tree'; exit 1; }}; "
                     f"{pip_cmd} -r {req_q}"
                 )
-            _pip_out, ok = conn.run(pip_cmd, warn=True)
+            # A silent dependency install is not wedged just because it emits
+            # nothing for minutes: give it a much later idle deadline than the
+            # 300 s default (non-PTY, so no interactive prompts are expected).
+            _pip_out, ok = conn.run(pip_cmd, warn=True, idle_timeout=900)
             if not ok:
                 if "missing from the staging tree" in _pip_out:
                     raise ServerOpsError(
@@ -1663,6 +1688,193 @@ def stop_and_disable(conn: Any, units: Sequence[str]) -> bool:
 # Post-restart readiness probe
 # =============================================================================
 
+_TYPE_NOTIFY_RE = re.compile(r"^\s*Type\s*=\s*notify\s*$", re.IGNORECASE | re.MULTILINE)
+_LISTEN_STREAM_RE = re.compile(
+    r"^\s*ListenStream\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def notify_units(unit_files: Mapping[str, str]) -> set[str]:
+    """Service units in a release tree that declare ``Type=notify``.
+
+    ``systemctl restart`` on a notify unit blocks until the unit sends
+    ``READY=1``; the command fails when that does not happen within its
+    timeout. A notify unit therefore never reaches the ``is-failed`` poll as
+    a "maybe still starting" unit: a hung notify unit has already failed the
+    restart, which routes through the same failure/rollback path. Polling it
+    again would only duplicate that verdict.
+    """
+    return {
+        name
+        for name, content in unit_files.items()
+        if name.endswith(".service") and _TYPE_NOTIFY_RE.search(content)
+    }
+
+
+def socket_paths(
+    unit_files: Mapping[str, str],
+    dropins: Mapping[str, Mapping[str, str]] | None = None,
+) -> dict[str, str]:
+    """Absolute ``ListenStream=`` paths declared by socket units.
+
+    Scans the socket unit files *and* their ``*.socket.d/*.conf`` dropins
+    (``dropins`` is keyed by unit name, the :func:`expand_dropins` contract).
+    Returns ``{path: socket_unit_name}``. Abstract (``@...``) and relative
+    addresses are ignored: only an absolute filesystem path can be probed
+    with ``test -S``.
+    """
+    paths: dict[str, str] = {}
+
+    def scan(name: str, contents: Iterable[str]) -> None:
+        for content in contents:
+            for match in _LISTEN_STREAM_RE.finditer(content):
+                path = match.group(1)
+                if path.startswith("/"):
+                    paths[path] = name
+
+    for name, content in unit_files.items():
+        if name.endswith(".socket"):
+            scan(name, [content])
+    for unit, files in (dropins or {}).items():
+        if unit.endswith(".socket"):
+            scan(unit, files.values())
+    return paths
+
+
+def _is_notify(unit: str, notify: set[str]) -> bool:
+    """True when *unit* (a concrete instance) is backed by a ``Type=notify``
+    unit file, i.e. ``worker@1.service`` for ``worker@.service``."""
+    if unit in notify:
+        return True
+    if "@" in unit:
+        template = f"{unit.rsplit('@', 1)[0]}@.service"
+        if template in notify:
+            return True
+    return False
+
+
+def readiness_units(
+    manifest: m.Manifest,
+    *,
+    app_name: str,
+    replicas: Mapping[str, int],
+    oneshots: Iterable[str],
+    notify: Iterable[str] = (),
+) -> list[str]:
+    """Runtime service units to health-check, derived from a release manifest.
+
+    Same semantics the old installer used: oneshots and services that have a
+    socket or timer in the tree are exempt (the socket/timer governs their
+    lifecycle); template services poll their ``svc@1..N`` instances.
+    ``Type=notify`` units are excluded: ``systemctl restart`` already blocked
+    on their ``READY=1``, so a failed/timed-out activation was caught there.
+    """
+    oneshots = set(oneshots)
+    notify = set(notify)
+    unit_names: set[str] = set()
+    for path, entry in manifest.entries.items():
+        if entry.kind is not m.EntryKind.UNIT:
+            continue
+        if name := unit_entry_name(path):
+            unit_names.add(name)
+    units_to_check: list[str] = []
+    app_prefix = f"{app_name}-"
+    for name in sorted(unit_names):
+        if not name.endswith(".service"):
+            continue
+        if name in oneshots:
+            continue
+        if _is_notify(name, notify):
+            continue
+        base = name.removesuffix(".service").removesuffix("@")
+        if f"{base}.socket" in unit_names or f"{base}.timer" in unit_names:
+            continue
+        if name.endswith("@.service"):
+            service = name.removesuffix("@.service")
+            if not service.startswith(app_prefix):
+                continue
+            count = replicas.get(service[len(app_prefix) :], 1)
+            units_to_check.extend(
+                sorted(f"{i}.service" for i in desired_instances(service, count))
+            )
+        else:
+            units_to_check.append(name)
+    return units_to_check
+
+
+def wait_for_units(
+    conn: Any,
+    units: Sequence[str],
+    sockets: Mapping[str, str],
+    *,
+    timeout: float | None = None,
+    interval: float | None = None,
+    clock: Any = None,
+) -> list[str]:
+    """Poll until every unit/socket is ready; return the offenders.
+
+    A runtime service unit is ready only once ``systemctl is-failed`` reports
+    ``active`` for it; ``activating``, ``inactive`` and empty output all mean
+    "not ready yet" and are retried. A ``failed`` unit fails immediately.
+    For a socket-activated service readiness requires BOTH the socket file to
+    exist (``test -S``) and the owning socket unit to report ``active``.
+
+    The window defaults to :data:`READINESS_TIMEOUT` seconds and the poll
+    interval to :data:`READINESS_INTERVAL`; ``clock`` is a module-like object
+    providing ``monotonic`` and ``sleep`` (tests inject a fake one). Returns
+    an empty list when everything became ready, otherwise the units that
+    failed / never reached ``active``. The caller owns the failure policy
+    (deploy rolls back, rollback exits 6).
+    """
+    units = list(units)
+    sockets = dict(sockets)
+    if not units and not sockets:
+        return []
+    timeout = READINESS_TIMEOUT if timeout is None else timeout
+    interval = READINESS_INTERVAL if interval is None else interval
+    clock = time if clock is None else clock
+    probe_command = readiness_probe_command(units, sockets)
+    deadline = clock.monotonic() + timeout
+    while True:
+        # A status probe is cheap and idempotent: retry a stalled exec
+        # channel once instead of stalling the whole activation.
+        for attempt in range(2):
+            try:
+                out, _ok = conn.run(
+                    probe_command, warn=True, hide=True, idle_timeout=15
+                )
+                break
+            except ConnectionError:
+                if attempt == 1:
+                    raise
+        statuses, socket_states = parse_readiness_probe(out)
+        failed = [
+            unit
+            for unit, status in zip(units, statuses, strict=False)
+            if status == "failed"
+        ]
+        if failed:
+            return failed
+        not_ready = [
+            unit
+            for unit, status in zip(units, statuses, strict=False)
+            if status != "active"
+        ]
+        # A socket file legitimately appears only once the socket unit is
+        # active; the probe also reports socket units that are activating
+        # but not yet bound.
+        unready_sockets: list[str] = []
+        for unit in sockets.values():
+            if not socket_states.get(unit, False) and unit not in unready_sockets:
+                unready_sockets.append(unit)
+        if not not_ready and not unready_sockets:
+            return []
+        if clock.monotonic() >= deadline:
+            # Report every unit that never reached active, services and
+            # socket units alike.
+            return [*not_ready, *unready_sockets]
+        clock.sleep(interval)
+
 
 def readiness_probe_command(units: Sequence[str], sockets: Mapping[str, str]) -> str:
     """One read-only command answering every readiness question of a tick.
@@ -1732,6 +1944,78 @@ def parse_readiness_probe(output: str) -> tuple[list[str], dict[str, bool]]:
 # =============================================================================
 # Post-start health probe
 # =============================================================================
+
+
+@dataclass(frozen=True)
+class HealthProbe:
+    """A ``[health_check]`` probe rendered once, before any server I/O.
+
+    ``command`` is the exact remote command (bounded by ``min(5, timeout)``),
+    ``timeout`` the overall retry window, ``display`` the redacted source
+    text for user-facing output.
+    """
+
+    command: str
+    timeout: int
+    display: str
+
+
+def build_health_probe(
+    health: Any, context: Mapping[str, object]
+) -> HealthProbe | None:
+    """Render a ``[health_check]`` config with *context*, or ``None``.
+
+    Unresolved placeholders raise :class:`ImproperlyConfiguredError` naming
+    them (fail-closed before any server I/O). Both deploy and rollback render
+    the probe through this one function so a configuration that passes one
+    command passes the other.
+    """
+    if health is None:
+        return None
+    raw = health.http if health.http is not None else health.command
+    assert raw is not None  # guaranteed by HealthCheckConfig
+    rendered, unresolved = safe_format(raw, **context)
+    if unresolved:
+        raise ImproperlyConfiguredError(
+            "[health_check] references unknown variables:"
+            f" {', '.join(sorted(unresolved))}."
+        )
+    # Per-attempt bound: a hung probe must not eat the whole retry window.
+    budget = min(5, health.timeout)
+    if health.http is not None:
+        command = f"curl -sf -o /dev/null --max-time {budget} {q(rendered)}"
+    else:
+        command = f"timeout {budget} bash -lc {q(rendered)}"
+    return HealthProbe(
+        command=command, timeout=health.timeout, display=redact(rendered)
+    )
+
+
+def wait_for_health_check(
+    conn: Any,
+    probe: HealthProbe,
+    *,
+    interval: float | None = None,
+    clock: Any = None,
+) -> tuple[bool, str]:
+    """Poll *probe* until it succeeds or its window expires.
+
+    Returns ``(ok, last_output)``; the caller owns the failure policy (deploy
+    rolls back, rollback exits 6) and the diagnostic output. ``clock`` is a
+    module-like object providing ``monotonic`` and ``sleep`` (tests inject a
+    fake one).
+    """
+    interval = HEALTH_CHECK_INTERVAL if interval is None else interval
+    clock = time if clock is None else clock
+    deadline = clock.monotonic() + probe.timeout
+    last_output = ""
+    while True:
+        ok, last_output = run_health_probe(conn, probe.command)
+        if ok:
+            return True, last_output
+        if clock.monotonic() >= deadline:
+            return False, last_output
+        clock.sleep(interval)
 
 
 def run_health_probe(conn: Any, probe: str) -> tuple[bool, str]:

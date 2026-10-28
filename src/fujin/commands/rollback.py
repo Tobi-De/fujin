@@ -7,7 +7,7 @@ from typing import Annotated
 import cappa
 from rich.prompt import IntPrompt
 
-from fujin import connection
+from fujin import build, connection
 from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
@@ -341,6 +341,12 @@ class Rollback(BaseCommand):
 
         target_manifest = self._read_target_manifest(conn, target, target_path)
         self._verify_target(conn, target, target_path, target_manifest)
+        # Rendered before the swap: an invalid [health_check] template is a
+        # configuration error, never a half-applied rollback.
+        probe = serverops.build_health_probe(
+            self.config.health_check,
+            build._interpolation_context(self.config, self.selected_host),
+        )
 
         self.output.info(f"Rolling back to release {target}...")
         log_operation(
@@ -390,6 +396,20 @@ class Rollback(BaseCommand):
             oneshots,
         )
         self._install_caddyfile(conn, target_path, target_manifest)
+        # Same readiness contract as deploy: services must actually reach
+        # active (sockets: bound + active) and the optional [health_check]
+        # must pass. A failure here is a failed rollback (6); no nested
+        # rollback is attempted.
+        self._activation_step(
+            "waiting for the target release's services",
+            self._await_ready,
+            conn,
+            target_manifest,
+            unit_files,
+            dropins,
+            oneshots,
+            probe,
+        )
 
         at = datetime.now(UTC).isoformat()
         new_state = record_rollback(
@@ -408,6 +428,73 @@ class Rollback(BaseCommand):
         self._gc(conn, new_state, releases)
 
         self.output.success(f"Rollback to release {target} completed successfully!")
+
+    def _dump_journals(self, conn, units: list[str]) -> None:
+        """Surface the failed units' recent journal before failing the rollback."""
+        for unit in units:
+            out, _ = conn.run(
+                f"journalctl -u {serverops.q(unit)} -n 50 --no-pager || true",
+                warn=True,
+                hide=True,
+            )
+            if out:
+                self.output.output(out)
+
+    def _await_ready(
+        self,
+        conn,
+        manifest: Manifest,
+        unit_files: dict[str, str],
+        dropins: dict[str, dict[str, str]],
+        oneshots: set[str],
+        probe: serverops.HealthProbe | None,
+    ) -> None:
+        """Post-restart readiness + ``[health_check]`` for a rollback.
+
+        Uses the exact deploy code path (:func:`serverops.wait_for_units` /
+        :func:`serverops.wait_for_health_check`). Any offender raises
+        :class:`serverops.ServerOpsError`, which :meth:`_activation_step`
+        turns into ``EXIT_ROLLBACK_FAILED`` without attempting a nested
+        rollback.
+        """
+        units = serverops.readiness_units(
+            manifest,
+            app_name=self.config.app_name,
+            replicas=self.config.replicas,
+            oneshots=oneshots,
+            notify=serverops.notify_units(unit_files),
+        )
+        offenders = serverops.wait_for_units(
+            conn, units, serverops.socket_paths(unit_files, dropins)
+        )
+        if offenders:
+            self._dump_journals(conn, offenders)
+            raise serverops.ServerOpsError(
+                "unit(s) did not become ready after the rollback restart:"
+                f" {', '.join(offenders)}"
+            )
+        if probe is None:
+            return
+        self.output.info(
+            f"Running health check (up to {probe.timeout}s): {probe.display}"
+        )
+        ok, output = serverops.wait_for_health_check(conn, probe)
+        if ok:
+            self.output.info("Health check passed.")
+            return
+        self._dump_journals(conn, units)
+        if not units:
+            # Socket-activated or notify-only app: no unit to attribute the
+            # probe failure to, surface the server's recent journal instead.
+            log_out, _ = conn.run(
+                "journalctl -n 50 --no-pager || true", warn=True, hide=True
+            )
+            if log_out:
+                self.output.output(log_out)
+        detail = f": {output}" if output else ""
+        raise serverops.ServerOpsError(
+            f"health check failed after the rollback ({probe.display}){detail}"
+        )
 
     def _read_target_manifest(self, conn, target: str, target_path: str) -> Manifest:
         raw = serverops.read_remote_file(
