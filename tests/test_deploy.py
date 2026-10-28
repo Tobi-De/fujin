@@ -1356,12 +1356,27 @@ def test_ref_without_secret_adapter_aborts_with_adapter_less_message(
 # ===========================================================================
 
 
-def _reuse_setup(monkeypatch, minimal_config, tmp_path, *, hooks=None, force=True):
+def _reuse_setup(
+    monkeypatch,
+    minimal_config,
+    tmp_path,
+    *,
+    hooks=None,
+    force=True,
+    state=None,
+    prev_manifest=None,
+):
     """Deploy whose release dir already exists on the server."""
     monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
-    state = State(current="digest-x", client_digest=None)
+    if state is None:
+        state = State(current="digest-x", client_digest=None)
     cmd, spies = setup_deploy(
-        monkeypatch, minimal_config, tmp_path, state=state, hooks=hooks
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        hooks=hooks,
+        prev_manifest=prev_manifest,
     )
     cmd.force = force
     # The already-committed release dir exists.
@@ -1463,6 +1478,126 @@ def test_record_rollback_does_not_poison_noop_detection():
     state = State(current="digest-x", previous=[])
     rolled = store_mod.record_rollback(state, "digest-x", at="t")
     assert rolled.client_digest is None
+
+
+def _committed_manifest(host="prod", fingerprint="fp-prod"):
+    specs = {
+        p: InputFile(content=c if isinstance(c, bytes) else c.encode())
+        for p, c in STAGING_FILES.items()
+    }
+    return build_manifest(
+        app_name="testapp",
+        version="0.9.0",
+        config_fingerprint=fingerprint,
+        dist_sha256="dist-000",
+        files=specs,
+        host=host,
+    )
+
+
+def _target_fingerprint(config):
+    return deploy_mod.m.config_fingerprint(config, config.select_host(None))
+
+
+def test_cross_host_guard_refuses_foreign_live_release(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Both signals differ: the live release tree belongs to another target."""
+    cmd, spies = _reuse_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        force=False,
+        state=State(current="digest-x", client_digest="stale-client"),
+        prev_manifest=_committed_manifest(host="prod", fingerprint="fp-foreign"),
+    )
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
+    # Refused before any upload or activation.
+    spies["rsync"].assert_not_called()
+    spies["verify"].assert_not_called()
+    spies["swap"].assert_not_called()
+    spies["commit"].assert_not_called()
+
+
+def test_cross_host_guard_force_overrides(monkeypatch, minimal_config, tmp_path):
+    """--force overrides the guard: the deploy proceeds with a warning."""
+    cmd, spies = _reuse_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        force=True,
+        prev_manifest=_committed_manifest(host="prod", fingerprint="fp-foreign"),
+    )
+    assert invoke(cmd) == 0
+    spies["swap"].assert_called_once()
+
+
+def test_host_rename_with_equal_fingerprint_is_not_blocked(
+    monkeypatch, minimal_config, tmp_path
+):
+    """Renaming the host keeps the fingerprint: a rename is a normal deploy."""
+    cmd, spies = _reuse_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        force=False,
+        state=State(current="digest-x", client_digest="stale-client"),
+        prev_manifest=_committed_manifest(
+            host="old-name", fingerprint=_target_fingerprint(minimal_config)
+        ),
+    )
+    assert invoke(cmd) == 0
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_called_once()
+
+
+def test_config_change_with_same_host_is_not_blocked(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A normal config change keeps the host and flips the fingerprint."""
+    cmd, spies = _reuse_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        force=False,
+        state=State(current="old-digest"),
+        prev_manifest=_committed_manifest(host="example.com", fingerprint="fp-stale"),
+    )
+    assert invoke(cmd) == 0
+    spies["swap"].assert_called_once()
+
+
+def test_cross_host_guard_ignores_release_without_host(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A live release predating the host metadata is never a guard hit."""
+    cmd, spies = _reuse_setup(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        force=False,
+        state=State(current="digest-x", client_digest="stale-client"),
+        prev_manifest=_committed_manifest(host="", fingerprint="fp-foreign"),
+    )
+    assert invoke(cmd) == 0
+    spies["swap"].assert_called_once()
+
+
+def test_legitimate_config_change_not_blocked_by_state_fingerprint(
+    monkeypatch, minimal_config, tmp_path
+):
+    """The guard compares the live release's manifest, never state.json: a
+    normal config change (new fingerprint vs state) deploys fine."""
+    state = State(current="old-digest", client_digest=None, config_fingerprint="old")
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=state)
+    assert invoke(cmd) == 0
+
+    written = spies["write_states"][0]
+    expected = deploy_mod.m.config_fingerprint(
+        minimal_config, minimal_config.select_host(None)
+    )
+    assert written.config_fingerprint == expected != "old"
 
 
 # ===========================================================================

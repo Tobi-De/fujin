@@ -373,10 +373,12 @@ def run_build(
 ) -> BuildResult:
     """Build the app (or reuse the local build cache) and return the staging tree.
 
-    ``host`` defaults to the first configured host (used only for template
-    interpolation of the deploy user); ``assets`` is None for now -- the config
-    has no ``[assets]`` section yet (#81 note: supported gracefully). Raises
-    BuildError / DeploymentError (cappa.Exit subclasses) on failure.
+    ``host`` defaults to the first configured host and scopes the bundle key
+    (the config fingerprint is per host, so each target has its own cache
+    entry); it is also used for template interpolation of the deploy user.
+    ``assets`` is None for now -- the config has no ``[assets]`` section yet
+    (#81 note: supported gracefully). Raises BuildError / DeploymentError
+    (cappa.Exit subclasses) on failure.
     """
     if not config.deployed_units:
         raise DeploymentError("No systemd units found, nothing to build")
@@ -403,6 +405,7 @@ def run_build(
     pyproject_text = pyproject_path.read_text() if pyproject_path.exists() else None
     key = bundle_key(
         config,
+        host,
         unit_sources=sources,
         assets=assets,
         caddyfile=None if caddyfile is None else config.caddyfile_path.read_text(),
@@ -456,6 +459,7 @@ def run_build(
     if requirements != pre_build_requirements and pyproject_path.exists():
         repaired_key = bundle_key(
             config,
+            host,
             unit_sources=sources,
             assets=assets,
             caddyfile=None if caddyfile is None else config.caddyfile_path.read_text(),

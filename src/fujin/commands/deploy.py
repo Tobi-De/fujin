@@ -225,7 +225,9 @@ class Deploy(BaseCommand):
         cappa.Arg(
             long="--force",
             help="Perform a full deploy even when nothing changed "
-            "(e.g. to re-run post-install hooks and migrations)",
+            "(e.g. to re-run post-install hooks and migrations), and override "
+            "the cross-host identity check (the live release belongs to a "
+            "different host and config fingerprint)",
         ),
     ] = False
     no_cache: Annotated[
@@ -396,9 +398,10 @@ class Deploy(BaseCommand):
         client_manifest = m.build_manifest(
             app_name=config.app_name,
             version=config.local_version,
-            config_fingerprint=m.config_fingerprint(config),
+            config_fingerprint=m.config_fingerprint(config, self.selected_host),
             dist_sha256=result.dist_sha256,
             files=client_files,
+            host=self.selected_host.name or self.selected_host.address,
         )
         client_digest = m.release_digest(client_manifest)
 
@@ -511,12 +514,13 @@ class Deploy(BaseCommand):
             if staged.exists():
                 staged.chmod(entry.mode)
         (staging_dir / m.MANIFEST_FILENAME).write_bytes(
-            m.canonical_manifest_bytes(client_manifest)
+            m.stored_manifest_bytes(client_manifest)
         )
 
         # The live release's manifest is read BEFORE any swap: it is the diff
         # base for the restart set and the rollback target on failure.
         prev_manifest = serverops.read_current_manifest(conn, app_dir)
+        self._check_live_release_identity(prev_manifest, client_manifest)
         live_digest = _resolve_live_digest(conn, app_dir, state)
         first_deploy = live_digest is None and prev_manifest is None
 
@@ -676,6 +680,7 @@ class Deploy(BaseCommand):
                 final_digest,
                 at,
                 client_digest=client_digest,
+                config_fingerprint=client_manifest.config_fingerprint,
             )
             serverops.write_state(conn, app_dir, new_state)
             self._gc(conn, new_state, self._list_releases(conn))
@@ -724,7 +729,7 @@ class Deploy(BaseCommand):
         travel inside a shell command string (a manifest sent that way hung
         the SSH channel forever).
         """
-        manifest_bytes = m.canonical_manifest_bytes(final_manifest)
+        manifest_bytes = m.stored_manifest_bytes(final_manifest)
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp.write(manifest_bytes)
             tmp_path = tmp.name
@@ -789,6 +794,45 @@ class Deploy(BaseCommand):
             )
         conn.run(f"rm -rf {serverops.q(release_path)}", warn=True, hide=True)
         return "replaced-staging"
+
+    def _check_live_release_identity(
+        self, prev_manifest: m.Manifest | None, target_manifest: m.Manifest
+    ) -> None:
+        """Refuse to deploy over a live release tree from another target.
+
+        Two independent signals identify the target: the host the live
+        release was built for (``Manifest.host``) and its per-host config
+        fingerprint. Only when BOTH differ does the live tree belong to a
+        different target (a release tree copied between servers, a restored
+        backup). A host RENAME leaves the fingerprint unchanged and an
+        ordinary config change leaves the host unchanged, so both are normal
+        deploys and pass untouched.
+
+        Without ``--force`` a hit is fatal; with it, the deploy warns and
+        proceeds. A live release that records no host (deployed before this
+        metadata existed) is never a guard hit.
+        """
+        if prev_manifest is None or not prev_manifest.host:
+            return
+        target_host = target_manifest.host or "<unknown>"
+        live_fingerprint = prev_manifest.config_fingerprint
+        target_fingerprint = target_manifest.config_fingerprint
+        if prev_manifest.host == target_host or live_fingerprint == target_fingerprint:
+            return
+        message = (
+            f"The live release was deployed for host '{prev_manifest.host}' "
+            f"(config fingerprint {live_fingerprint}), but this deploy targets "
+            f"host '{target_host}' (config fingerprint {target_fingerprint})."
+        )
+        if self.force:
+            self.output.warning(f"{message} Continuing because --force was given.")
+            return
+        raise DeploymentError(
+            f"{message} Host identity and config fingerprint both differ, so "
+            "this server's release tree belongs to another target (a release "
+            "tree copied between hosts or a restored backup). Run "
+            "`fujin deploy --force` to deploy here anyway."
+        )
 
     # =======================================================================================
     # Restart set / convergence / readiness
@@ -1237,7 +1281,10 @@ class Deploy(BaseCommand):
         state = serverops.read_state(conn, app_dir)
         if state is not None:
             new_state = store.record_rollback(
-                state, prev_digest, datetime.now(UTC).isoformat()
+                state,
+                prev_digest,
+                datetime.now(UTC).isoformat(),
+                config_fingerprint=prev_manifest.config_fingerprint,
             )
             serverops.write_state(conn, app_dir, new_state)
             self._gc(conn, new_state, self._list_releases(conn))
@@ -1478,6 +1525,11 @@ class Deploy(BaseCommand):
         table.add_row("Version", config.local_version)
         host_display = self.selected_host.name if self.selected_host.name else "default"
         table.add_row("Host", f"{host_display} ({self.selected_host.address})")
+        fingerprint = m.config_fingerprint(config, self.selected_host)
+        table.add_row(
+            "Fingerprint",
+            f"{fingerprint} (host {self.selected_host.name or self.selected_host.address})",
+        )
 
         services_summary = []
         for du in config.deployed_units:

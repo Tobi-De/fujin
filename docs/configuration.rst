@@ -580,6 +580,56 @@ Environment variable containing the SSH key passphrase if your key is encrypted.
    key_filename = "~/.ssh/deploy_key"
    key_passphrase_env = "SSH_KEY_PASSPHRASE"
 
+.. _config-fingerprint:
+
+Config fingerprint and cross-host safety
+----------------------------------------
+
+Every deploy computes a **config fingerprint**: a SHA-256 over the resolved
+configuration of the **selected host**. It covers:
+
+* app-level build inputs: ``app``, ``app_user``, ``installation_mode``,
+  ``python_version``, ``build_command``, ``build_timeout``, ``distfile``,
+  ``requirements``, ``apps_dir`` and ``caddy_config_dir``;
+* the selected host: ``address``, ``user``, ``port``, ``native_ssh_auth``,
+  ``key_filename`` (the SSH key path), ``key_passphrase_env`` and its **env
+  identity** - every effective variable name (project template plus host
+  overlay) together with the **name** of the secret it references
+  (``KEY=$REF`` yields ``KEY: REF``) or ``null`` for a literal.
+
+It deliberately excludes:
+
+* every other host in the configuration (only the selected target matters);
+* the host ``name`` (a rename is not a build input; the manifest carries the
+  name and the cross-host guard compares it separately);
+* secret **values**, literals and resolved ``$REF`` values alike: rotating a
+  secret's value never changes the fingerprint (the rendered ``.env`` does
+  change, which already flips the release digest), while repointing a variable
+  at a different secret does change it;
+* secret-adapter settings, global or per host: which tool resolves a ref is
+  not a build input, and the ref names already capture the identity that
+  matters;
+* ``replicas``, ``version``, ``aliases``, ``hooks`` and local paths.
+
+Because the fingerprint is per host, the local build cache (``.fujin/cache/``)
+is host-scoped: a dist built while targeting ``staging`` is never reused as the
+cache entry for ``production``. The fingerprint is printed in the deploy
+summary (``Fingerprint: <hash> (host <name>)``); ``fujin`` has no standalone
+``build`` command, so that deploy output is where to read it.
+
+**Cross-host guard.** The release digest already folds in the fingerprint, so
+two different targets normally never share a release directory. A hand-copied
+release tree (or a restored backup) can still be live on a server that was
+never its target. At the start of every deploy fujin reads the live release's
+``manifest.json``, which records the ``host`` and ``config_fingerprint`` it was
+built for, and refuses when **both** differ from the current target, naming
+the live and the target host/fingerprint. Requiring both signals keeps
+ordinary work flowing: renaming a host leaves the fingerprint unchanged, and
+changing configuration leaves the host unchanged, so neither blocks a deploy.
+Only a tree that disagrees about the host *and* about the configuration is
+treated as foreign. Pass ``fujin deploy --force`` to override the refusal
+(fujin warns and proceeds, still verifying the tree byte-for-byte).
+
 aliases
 -------
 

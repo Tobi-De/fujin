@@ -10,6 +10,9 @@ Rules (see #77, #78 and the tier-1 contract):
   ``sha256(canonical manifest bytes)``.
 - Canonical JSON: sorted keys, compact separators, UTF-8, no timestamps.
 - ``created_at`` is stored metadata and never enters the digest.
+- The target ``host`` identity is stored metadata (cross-host guard)
+  and never enters the digest; the per-host config fingerprint already
+  identifies the build inputs.
 - Symlink entries record a ``link`` target instead of a ``sha256``.
 - Server-built entries (``venv/**`` / ``bin/**``) are hashed server-side
   post-install and merged into ``manifest.json`` before commit; overall
@@ -23,13 +26,12 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from io import StringIO
 from typing import Any
 
 import msgspec
-from dotenv import dotenv_values
 
 from fujin.config import Config, HostConfig
+from fujin.secrets import parse_env_template
 
 # =============================================================================================
 # Constants
@@ -174,15 +176,22 @@ def build_manifest(
     config_fingerprint: str,
     dist_sha256: str,
     files: dict[str, InputFile | str | bytes],
+    host: str = "",
     created_at: datetime | None = None,
 ) -> Manifest:
-    """Assemble a Manifest from client-known files (kinds derived from tree paths)."""
+    """Assemble a Manifest from client-known files (kinds derived from tree paths).
+
+    ``host`` is the target host identity (name, falling back to address). It
+    is metadata for the cross-host guard: it is stored in
+    ``manifest.json`` but excluded from :func:`release_digest`.
+    """
     return Manifest(
         app_name=app_name,
         version=version,
         config_fingerprint=config_fingerprint,
         dist_sha256=dist_sha256,
         entries={path: build_entry(path, spec) for path, spec in files.items()},
+        host=host,
         created_at=created_at,
     )
 
@@ -198,6 +207,10 @@ class Manifest(msgspec.Struct, kw_only=True, frozen=True):
     config_fingerprint: str
     dist_sha256: str
     entries: dict[str, Entry]
+    #: Target host identity (name, falling back to address). Stored in
+    #: ``manifest.json`` for the cross-host guard; never part of the
+    #: release digest (the fingerprint already covers host build inputs).
+    host: str = ""
     created_at: datetime | None = None
 
 
@@ -223,6 +236,7 @@ def manifest_to_dict(
         "version": manifest.version,
         "config_fingerprint": manifest.config_fingerprint,
         "dist_sha256": manifest.dist_sha256,
+        "host": manifest.host,
         "entries": {
             path: _entry_to_dict(entry)
             for path, entry in sorted(manifest.entries.items())
@@ -234,8 +248,24 @@ def manifest_to_dict(
 
 
 def canonical_manifest_bytes(manifest: Manifest) -> bytes:
-    """Canonical manifest bytes: the digest input. ``created_at`` is never included."""
-    return canonical_json(manifest_to_dict(manifest, include_created_at=False))
+    """Canonical manifest bytes: the digest input. ``created_at`` is never
+    included. ``host`` is excluded as well: the per-host config fingerprint
+    already identifies the target build inputs, and adding the display name
+    would fragment releases for a purely cosmetic host rename.
+    """
+    data = manifest_to_dict(manifest, include_created_at=False)
+    data.pop("host", None)
+    return canonical_json(data)
+
+
+def stored_manifest_bytes(manifest: Manifest) -> bytes:
+    """Canonical bytes written to ``manifest.json`` on the server.
+
+    Identical to :func:`canonical_manifest_bytes` plus the ``host`` identity
+    the cross-host guard compares. ``created_at`` stays informational
+    and is only written when set.
+    """
+    return canonical_json(manifest_to_dict(manifest, include_created_at=True))
 
 
 def release_digest(manifest: Manifest) -> str:
@@ -274,6 +304,9 @@ def manifest_from_dict(data: dict[str, Any]) -> Manifest:
             path: _entry_from_dict(entry_data, path=path)
             for path, entry_data in data["entries"].items()
         },
+        # Backward-compatible: manifests written before the host identity
+        # existed decode to an empty host.
+        host=data.get("host", ""),
         created_at=created_at,
     )
 
@@ -360,30 +393,48 @@ def diff_manifests(prev: Manifest, new: Manifest) -> Diff:
 # =============================================================================================
 
 
-def _env_keys(env_content: str) -> list[str]:
-    """Variable names declared in an env file; VALUES are secret-carriers and are dropped."""
+def _env_identity(env_content: str) -> dict[str, str | None]:
+    """Env identity: ``{KEY: REF}`` for ``$REF`` entries, ``{KEY: None}`` else.
+
+    A variable's identity is its NAME plus, for secret references, the NAME of
+    the referenced secret — never its value: literals and resolved secret
+    VALUES are secret carriers and must not enter a hash. Rotating a secret
+    value therefore leaves the fingerprint alone while pointing a variable at
+    a different secret flips it.
+    """
     if not env_content:
-        return []
-    return sorted(dotenv_values(stream=StringIO(env_content)) or {})
+        return {}
+    return {
+        entry.key: entry.ref if entry.ref is not None else None
+        for entry in parse_env_template(env_content)
+    }
 
 
 def _fingerprint_host(config: Config, host: HostConfig) -> dict[str, Any]:
+    key_filename = host.key_filename
     return {
         "address": host.address,
         "user": host.user,
         "port": host.port,
         "native_ssh_auth": host.native_ssh_auth,
+        # The key PATH identifies how the target is reached; the passphrase
+        # itself never enters (only the name of the env var carrying it).
+        "key_filename": str(key_filename) if key_filename is not None else None,
         "key_passphrase_env": host.key_passphrase_env,
-        # Key NAMES of the host's effective env (project template + host
-        # overlay); values stay out (secret carriers).
-        "env_keys": _env_keys(config.effective_env(host)),
+        # Identity of the host's effective env (project template + host
+        # overlay): variable names and secret-ref names, never values.
+        "env": _env_identity(config.effective_env(host)),
     }
 
 
-def _fingerprint_data(config: Config) -> dict[str, Any]:
-    """Resolved-config identity dict. Explicit include-list: excludes version,
-    replicas, aliases, hooks, local paths, and all secret configuration
-    (values and adapter settings alike)."""
+def _fingerprint_data(config: Config, host: HostConfig) -> dict[str, Any]:
+    """Resolved-config identity dict for ONE selected host.
+
+    Explicit include-list: excludes version, replicas, aliases, hooks, local
+    paths, the host's display name, secret values and all secret adapter
+    configuration. Only the selected host is hashed, so a library-built dist
+    for one target is never reused as the cache entry for another.
+    """
     return {
         "app_name": config.app_name,
         "app_user": config.app_user,
@@ -395,28 +446,39 @@ def _fingerprint_data(config: Config) -> dict[str, Any]:
         "requirements": config.requirements,
         "apps_dir": config.apps_dir,
         "caddy_config_dir": config.caddy_config_dir,
-        "hosts": [_fingerprint_host(config, host) for host in config.hosts],
+        "host": _fingerprint_host(config, host),
     }
 
 
-def config_fingerprint(config: Config) -> str:
-    """Stable hash of the resolved configuration.
+def config_fingerprint(config: Config, host: HostConfig) -> str:
+    """Stable hash of the resolved configuration for the selected ``host``.
 
-    Canonical resolved-config JSON (sorted keys), excluding:
+    Canonical resolved-config JSON (sorted keys), including for the selected
+    host: address, user, port, native SSH auth, SSH key path, the NAME of the
+    env var carrying the key passphrase, and the host's env identity —
+    ``{KEY: REF}`` for ``$REF`` entries and ``{KEY: null}`` for literals,
+    i.e. every variable name plus every secret-ref name.
 
-    - secret VALUES and adapter settings: the host's effective env template
-      (``Config.effective_env``, i.e. ``env``/``envfile`` read during
-      ``__post_init__``, project template merged with the host overlay) is
-      reduced to its variable NAMES only, and the global/per-host
-      ``[secrets]`` adapter configuration is omitted entirely: adapter
-      identity is not a build input (the venv installs from requirements;
-      resolved VALUES land in the rendered ``.env``, whose change already
-      flips the release digest).
+    Excluded:
+
+    - every host but the selected one: the fingerprint identifies the build
+      inputs of ONE deployment target (the build cache / bundle key is
+      therefore host-scoped);
+    - the host's display name (a rename must not bust the build cache; the
+      manifest carries the name and the cross-host guard compares it
+      separately);
+    - secret VALUES, literals included: only ref NAMES are hashed, so
+      rotating a secret value never changes the fingerprint (the rendered
+      ``.env`` content already flips the release digest);
+    - ``[secrets]`` adapter settings (global and per host): which tool
+      resolves a ref is not a build input — the ref names already capture
+      the identity that matters, and adapter identity/options must not bust
+      build caches;
     - ``replicas`` (per #79 convergence handles scaling separately);
     - ``version``, ``aliases``, ``hooks_config``, ``local_config_dir``
       (release-identity / local-only knobs that must not bust build caches).
     """
-    return sha256_hex(canonical_json(_fingerprint_data(config)))
+    return sha256_hex(canonical_json(_fingerprint_data(config, host)))
 
 
 # =============================================================================================
@@ -426,6 +488,7 @@ def config_fingerprint(config: Config) -> str:
 
 def bundle_key(
     config: Config,
+    host: HostConfig,
     *,
     unit_sources: dict[str, str | bytes],
     assets: dict[str, str | bytes] | None = None,
@@ -434,15 +497,17 @@ def bundle_key(
     requirements: str | bytes | None = None,
     pyproject: str | bytes | None = None,
 ) -> str:
-    """Content-addressed key over build inputs.
+    """Content-addressed key over build inputs for one target ``host``.
 
-    sha256 over canonical JSON of: the config fingerprint, ``build_command``,
-    the build environment, the requirements file content, and the hashes of
-    every bundled unit/dropin/Caddyfile/asset source. The version IS a cache
-    input (the built dist embeds it: wheel names/metadata, binary build
-    metadata) even though ``config_fingerprint`` excludes it. Rendered ``.env``
-    content is deliberately NOT an input: env is applied after the cache
-    lookup and secret values never reach build artifacts (#81 hard boundary).
+    sha256 over canonical JSON of: the per-host config fingerprint,
+    ``build_command``, the build environment, the requirements file content,
+    and the hashes of every bundled unit/dropin/Caddyfile/asset source. The
+    version IS a cache input (the built dist embeds it: wheel names/metadata,
+    binary build metadata) even though ``config_fingerprint`` excludes it.
+    Rendered ``.env`` content is deliberately NOT an input: env is applied
+    after the cache lookup and secret values never reach build artifacts
+    (#81 hard boundary). Because the fingerprint is per host, a bundle built
+    for one target is never reused for another.
     """
     sources: dict[str, str] = {
         f"unit/{path}": hash_bytes(content) for path, content in unit_sources.items()
@@ -461,7 +526,7 @@ def bundle_key(
         sources["pyproject"] = hash_bytes(pyproject)
     payload = {
         "bundle": MANIFEST_SCHEMA,
-        "config_fingerprint": config_fingerprint(config),
+        "config_fingerprint": config_fingerprint(config, host),
         "build_command": config.build_command,
         "build_env": build_env or {},
         "installation_mode": str(config.installation_mode),

@@ -31,6 +31,7 @@ from fujin.manifest import (
     Manifest,
     release_digest,
     sha256_hex,
+    stored_manifest_bytes,
 )
 from fujin.config import Config, HostConfig, InstallationMode, SecretConfig
 from fujin.secrets import resolve_secrets
@@ -47,6 +48,7 @@ def make_manifest(
     version: str = "1.0.0",
     config_fingerprint_: str = "fp0",
     dist_sha256: str = "d" * 64,
+    host: str = "",
     created_at=None,
 ) -> Manifest:
     return build_manifest(
@@ -55,6 +57,7 @@ def make_manifest(
         config_fingerprint=config_fingerprint_,
         dist_sha256=dist_sha256,
         files=files or {},
+        host=host,
         created_at=created_at,
     )
 
@@ -455,77 +458,147 @@ class TestDiffManifests:
 
 class TestConfigFingerprint:
     def test_deterministic(self):
-        assert config_fingerprint(make_config()) == config_fingerprint(make_config())
+        a, b = make_config(), make_config()
+        assert config_fingerprint(a, a.hosts[0]) == config_fingerprint(b, b.hosts[0])
 
     def test_excludes_secret_values(self):
         config = make_config(
             env_content="SECRET_TOKEN=super-secret-value\nPLAIN=public"
         )
-        fingerprint = config_fingerprint(config)
+        fingerprint = config_fingerprint(config, config.hosts[0])
         assert "super-secret-value" not in fingerprint
         assert "public" not in fingerprint  # values are not fingerprinted either
 
     def test_env_key_set_changes_fingerprint(self):
-        fp1 = config_fingerprint(make_config(env_content="A=1\n"))
-        fp2 = config_fingerprint(make_config(env_content="A=1\nB=2\n"))
-        assert fp1 != fp2
+        c1 = make_config(env_content="A=1\n")
+        c2 = make_config(env_content="A=1\nB=2\n")
+        assert config_fingerprint(c1, c1.hosts[0]) != config_fingerprint(
+            c2, c2.hosts[0]
+        )
 
     def test_replicas_excluded(self):
         config = make_config()
-        fp1 = config_fingerprint(config)
+        fp1 = config_fingerprint(config, config.hosts[0])
         config.replicas["web"] = 99
-        assert config_fingerprint(config) == fp1
+        assert config_fingerprint(config, config.hosts[0]) == fp1
 
     def test_version_excluded(self):
         config = make_config()
-        fp1 = config_fingerprint(config)
+        fp1 = config_fingerprint(config, config.hosts[0])
         config.version = "9.9.9"
-        assert config_fingerprint(config) == fp1
+        assert config_fingerprint(config, config.hosts[0]) == fp1
 
     def test_secret_adapter_config_excluded(self):
         """Adapter identity/options are not build inputs (#84)."""
         config = make_config()
-        fp1 = config_fingerprint(config)
+        fp1 = config_fingerprint(config, config.hosts[0])
         config.secret_config = SecretConfig(
             adapter="bitwarden", options={"password_env": "BW_PASSWORD"}
         )
         config.secret_config.options["password_env"] = "BW_SESSION"
-        assert config_fingerprint(config) == fp1
+        assert config_fingerprint(config, config.hosts[0]) == fp1
 
-    def test_host_secret_options_do_not_flip_other_hosts(self):
-        """Editing one host's secrets must not bust another host's cache."""
+    def test_other_hosts_are_not_fingerprinted(self):
+        """Only the selected host is hashed: editing another host cannot bust
+        this host's cache."""
         config = make_config()
-        fp_b = config_fingerprint(config)
+        fp_b = config_fingerprint(config, config.hosts[0])
         config.hosts[1].secrets = SecretConfig(
             adapter="1password", options={"vault": "other"}
         )
-        config.hosts[1].secrets.options["vault"] = "changed"
-        assert config_fingerprint(config) == fp_b
+        config.hosts[1].address = "elsewhere.example.com"
+        config.hosts[1].env_content = "NEW_KEY=1"
+        assert config_fingerprint(config, config.hosts[0]) == fp_b
+
+    def test_per_host_fingerprints_differ(self):
+        """Two hosts differing only in host config fingerprint differently."""
+        config = make_config()
+        assert config_fingerprint(config, config.hosts[0]) != config_fingerprint(
+            config, config.hosts[1]
+        )
+
+        # ...and an otherwise identical config reproduces them exactly.
+        same = make_config()
+        assert config_fingerprint(config, config.hosts[0]) == config_fingerprint(
+            same, same.hosts[0]
+        )
+
+    def test_host_address_and_user_change_flip_fingerprint(self):
+        config = make_config()
+        fp1 = config_fingerprint(config, config.hosts[0])
+        config.hosts[0].address = "new.example.com"
+        assert config_fingerprint(config, config.hosts[0]) != fp1
+
+        config = make_config()
+        fp1 = config_fingerprint(config, config.hosts[0])
+        config.hosts[0].user = "otheruser"
+        assert config_fingerprint(config, config.hosts[0]) != fp1
+
+    def test_host_display_name_excluded(self):
+        """A rename is not a build input; the manifest carries the name."""
+        config = make_config()
+        fp1 = config_fingerprint(config, config.hosts[0])
+        config.hosts[0].name = "renamed"
+        assert config_fingerprint(config, config.hosts[0]) == fp1
 
     def test_hosts_env_content_value_change_no_fingerprint_change(self):
         config = make_config(env_content="A=1")
-        fp1 = config_fingerprint(config)
+        fp1 = config_fingerprint(config, config.hosts[0])
         config.hosts[0].env_content = "A=different-value"
-        assert config_fingerprint(config) == fp1
+        assert config_fingerprint(config, config.hosts[0]) == fp1
 
     def test_config_change_flips_fingerprint(self):
         config = make_config()
-        fp1 = config_fingerprint(config)
+        fp1 = config_fingerprint(config, config.hosts[0])
         config.build_command = "echo different"
-        assert config_fingerprint(config) != fp1
+        assert config_fingerprint(config, config.hosts[0]) != fp1
 
     def test_host_env_key_change_flips_fingerprint(self):
         config = make_config(env_content="A=1")
-        fp1 = config_fingerprint(config)
+        fp1 = config_fingerprint(config, config.hosts[0])
         config.hosts[0].env_content = "A=1\nNEW_KEY=2"
-        assert config_fingerprint(config) != fp1
+        assert config_fingerprint(config, config.hosts[0]) != fp1
+
+    def test_host_key_filename_flips_fingerprint(self):
+        """The SSH key path identifies the target's transport."""
+        config = make_config()
+        fp1 = config_fingerprint(config, config.hosts[0])
+        config.hosts[0]._key_filename = "~/.ssh/other_deploy_key"
+        assert config_fingerprint(config, config.hosts[0]) != fp1
+        assert _fingerprint_data(config, config.hosts[0])["host"]["key_filename"] == (
+            "~/.ssh/other_deploy_key"
+        )
+
+    def test_env_ref_name_flips_fingerprint(self):
+        """Ref NAMES are identity: pointing a var at another secret changes it."""
+        c1 = make_config(env_content="TOKEN=$API_TOKEN")
+        c2 = make_config(env_content="TOKEN=$OTHER_TOKEN")
+        assert config_fingerprint(c1, c1.hosts[0]) != config_fingerprint(
+            c2, c2.hosts[0]
+        )
+        # ...and a literal is not the same identity as a reference.
+        c3 = make_config(env_content="TOKEN=literal")
+        assert config_fingerprint(c3, c3.hosts[0]) != config_fingerprint(
+            c1, c1.hosts[0]
+        )
+
+    def test_env_ref_value_rotation_keeps_fingerprint(self, monkeypatch):
+        """Only the ref name is hashed: rotating the resolved value is invisible."""
+        monkeypatch.setenv("TOKEN_REF", "first-secret")
+        config = make_config(env_content="TOKEN=$TOKEN_REF")
+        fp1 = config_fingerprint(config, config.hosts[0])
+        monkeypatch.setenv("TOKEN_REF", "rotated-secret")
+        assert config_fingerprint(config, config.hosts[0]) == fp1
+        assert _fingerprint_data(config, config.hosts[0])["host"]["env"] == {
+            "TOKEN": "TOKEN_REF"
+        }
 
     def test_host_overlay_value_rotation_keeps_fingerprint(self):
         """Values (secret carriers) never enter the config fingerprint."""
         config = make_config(project_env="A=1", env_content="A=2")
-        fp1 = config_fingerprint(config)
+        fp1 = config_fingerprint(config, config.hosts[0])
         config.hosts[0].env_content = "A=rotated"
-        assert config_fingerprint(config) == fp1
+        assert config_fingerprint(config, config.hosts[0]) == fp1
 
     def test_secret_rotation_changes_release_digest_only(self, monkeypatch):
         """Real pipeline: rotating the secret moves the .env digest, never the
@@ -538,8 +611,8 @@ class TestConfigFingerprint:
         config.hosts[0].secrets = SecretConfig(adapter="system")
         host = config.hosts[0]
 
-        fp1 = config_fingerprint(config)
-        bundle1 = bundle_key(config, unit_sources={"web.service": "[Unit]"})
+        fp1 = config_fingerprint(config, host)
+        bundle1 = bundle_key(config, host, unit_sources={"web.service": "[Unit]"})
         env_before = resolve_secrets(
             config.effective_env(host), config.effective_secrets(host)
         )
@@ -551,31 +624,69 @@ class TestConfigFingerprint:
         )
         after = make_manifest(
             files={".env": env_after},
-            config_fingerprint_=config_fingerprint(config),
+            config_fingerprint_=config_fingerprint(config, host),
         )
 
         assert "first-secret" in env_before
         assert "first-secret" not in env_after
         assert release_digest(before) != release_digest(after)
-        assert config_fingerprint(config) == fp1
-        assert bundle_key(config, unit_sources={"web.service": "[Unit]"}) == bundle1
+        assert config_fingerprint(config, host) == fp1
+        assert (
+            bundle_key(config, host, unit_sources={"web.service": "[Unit]"}) == bundle1
+        )
 
     def test_host_only_overlay_key_flips_fingerprint(self):
         config = make_config(project_env="A=1")
-        fp1 = config_fingerprint(config)
+        fp1 = config_fingerprint(config, config.hosts[0])
         config.hosts[0].env_content = "B=2"
-        assert config_fingerprint(config) != fp1
+        assert config_fingerprint(config, config.hosts[0]) != fp1
 
     def test_deterministic_with_project_env(self):
         def build():
             return make_config(project_env="A=1\nB=2", env_content="B=3")
 
-        assert config_fingerprint(build()) == config_fingerprint(build())
+        a, b = build(), build()
+        assert config_fingerprint(a, a.hosts[0]) == config_fingerprint(b, b.hosts[0])
 
     def test_fingerprint_is_sha256_of_canonical_json(self):
         config = make_config()
-        fp = config_fingerprint(config)
-        assert fp == sha256_hex(canonical_json(_fingerprint_data(config)))
+        host = config.hosts[0]
+        fp = config_fingerprint(config, host)
+        assert fp == sha256_hex(canonical_json(_fingerprint_data(config, host)))
+
+
+# =============================================================================================
+# Host identity in the manifest (cross-host guard metadata)
+# =============================================================================================
+
+
+class TestManifestHostIdentity:
+    def test_round_trip_carries_host_and_fingerprint(self):
+        manifest = make_manifest(
+            files={"bin/app": b"x"}, config_fingerprint_="fp-prod", host="prod"
+        )
+        as_dict = json.loads(canonical_json(manifest_to_dict(manifest)))
+        rebuilt = manifest_from_dict(as_dict)
+        assert rebuilt.host == "prod"
+        assert rebuilt.config_fingerprint == "fp-prod"
+        assert rebuilt == manifest
+
+    def test_old_manifest_without_host_decodes_to_empty(self):
+        manifest = make_manifest(files={"bin/app": b"x"})
+        data = json.loads(canonical_json(manifest_to_dict(manifest)))
+        data.pop("host")
+        assert manifest_from_dict(data).host == ""
+
+    def test_host_excluded_from_release_digest(self):
+        staging = make_manifest(files={"bin/app": b"x"}, host="staging")
+        prod = make_manifest(files={"bin/app": b"x"}, host="prod")
+        assert release_digest(staging) == release_digest(prod)
+        assert manifest_to_dict(staging)["host"] == "staging"
+
+    def test_stored_bytes_carry_host_digest_bytes_do_not(self):
+        manifest = make_manifest(files={"bin/app": b"x"}, host="prod")
+        assert json.loads(stored_manifest_bytes(manifest))["host"] == "prod"
+        assert "host" not in json.loads(canonical_manifest_bytes(manifest))
 
 
 # =============================================================================================
@@ -592,9 +703,12 @@ class TestBundleKey:
         caddyfile=None,
         build_env=None,
         requirements=None,
+        host_index=0,
     ):
+        config = config or make_config()
         return bundle_key(
-            config or make_config(),
+            config,
+            config.hosts[host_index],
             unit_sources=units or {"web.service": "[Unit]"},
             assets=assets,
             caddyfile=caddyfile,
@@ -668,6 +782,11 @@ class TestBundleKey:
     def test_key_is_hex_sha256(self):
         assert len(self.make()) == 64
         int(self.make(), 16)
+
+    def test_host_scoped(self):
+        """A bundle built for one target is never the cache entry for another."""
+        config = make_config()
+        assert self.make(config, host_index=0) != self.make(config, host_index=1)
 
 
 def test_sha256_hex_and_hash_bytes():

@@ -391,7 +391,12 @@ class Rollback(BaseCommand):
         self._install_caddyfile(conn, target_path, target_manifest)
 
         at = datetime.now(UTC).isoformat()
-        new_state = record_rollback(state, target, at)
+        new_state = record_rollback(
+            state,
+            target,
+            at,
+            config_fingerprint=target_manifest.config_fingerprint,
+        )
         self._activation_step(
             "recording the rollback state",
             serverops.write_state,

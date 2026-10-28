@@ -97,6 +97,11 @@ class State(msgspec.Struct, kw_only=True):
     #: ``current`` stays the final post-merge digest (symlink/releases
     #: naming truth).
     client_digest: str | None = None
+    #: per-host config fingerprint of the target release (see
+    #: :func:`fujin.manifest.config_fingerprint`). Informational for the
+    #: cross-host guard; absent in state files written before it
+    #: existed.
+    config_fingerprint: str | None = None
 
 
 def parse_state(data: bytes | str) -> State:
@@ -148,14 +153,17 @@ def record_deploy(
     at: str,
     client_digest: str | None = None,
     result: str = "ok",
+    config_fingerprint: str | None = None,
 ) -> State:
     """Pure state transition after a successful (or rolled-back) deploy.
 
     ``digest`` is the final post-merge digest (symlink/releases naming
     truth); ``client_digest`` is the client-side pre-merge digest the next
-    deploy's no-op check (#78) compares against. A deploy makes
-    ``previous`` hold exactly the pre-deploy current (single-level rollback
-    history, v1). Pure: returns a new ``State``.
+    deploy's no-op check (#78) compares against. ``config_fingerprint`` is
+    the client manifest's per-host fingerprint, recorded for the cross-host
+    guard. A deploy makes ``previous`` hold exactly the pre-deploy
+    current (single-level rollback history, v1). Pure: returns a new
+    ``State``.
     """
     digest = normalize_digest(digest)
     client = normalize_digest(client_digest) if client_digest else digest
@@ -164,6 +172,7 @@ def record_deploy(
     return State(
         current=digest,
         client_digest=client,
+        config_fingerprint=config_fingerprint,
         previous=previous,
         units_installed_from=digest,
         deploys=[
@@ -173,7 +182,12 @@ def record_deploy(
     )
 
 
-def record_rollback(state: State, target: str, at: str) -> State:
+def record_rollback(
+    state: State,
+    target: str,
+    at: str,
+    config_fingerprint: str | None = None,
+) -> State:
     """Pure state transition after a rollback to ``target``.
 
     Rollback is treated as a deploy of the old release in reverse: current
@@ -186,12 +200,18 @@ def record_rollback(state: State, target: str, at: str) -> State:
     digest would permanently break #78 no-op detection. ``None`` forces the
     next deploy to transfer; identical content is then gracefully reused
     (deploy checks for an already-committed release dir).
+
+    ``config_fingerprint`` becomes the TARGET release's fingerprint (the
+    caller reads it from the target's manifest): after a rollback the live
+    tree is the target's, so that is the identity a later cross-host check
+    must compare against.
     """
     target = normalize_digest(target)
     old_current = normalize_digest(state.current) if state.current else None
     return State(
         current=target,
         client_digest=None,
+        config_fingerprint=config_fingerprint,
         previous=[old_current] if old_current and old_current != target else [],
         units_installed_from=target,
         deploys=[

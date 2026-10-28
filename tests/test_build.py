@@ -255,3 +255,25 @@ def test_generated_requirements_cache_lands_on_post_build_key(project, monkeypat
     )
     staged_req = (second.staging_dir / "requirements.txt").read_text()
     assert staged_req == "django==5.1\n"
+
+
+def test_host_scoped_build_cache(project):
+    """Each selected host gets its own bundle: a dist built for staging is
+    never the cache entry reused when deploying prod."""
+    config = make_config(
+        project,
+        hosts=[
+            {"name": "staging", "address": "staging.example.com", "user": "deploy"},
+            {"name": "prod", "address": "prod.example.com", "user": "deploy"},
+        ],
+    )
+    staging = run_build(config, host=config.select_host("staging"))
+    prod = run_build(config, host=config.select_host("prod"))
+
+    assert staging.bundle_key != prod.bundle_key
+    assert build_cached_bundles(project) == 2
+    # A repeat build for the same host stays a cache hit.
+    assert (
+        run_build(config, host=config.select_host("staging")).bundle_key
+        == staging.bundle_key
+    )

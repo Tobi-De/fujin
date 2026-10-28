@@ -112,6 +112,7 @@ class TestStateRoundTrip:
             "units_installed_from": None,
             "deploys": [],
             "client_digest": None,
+            "config_fingerprint": None,
         }
         assert not (tmp_path / "state.json.tmp").exists()
 
@@ -400,6 +401,7 @@ class TestStateJsonSchema:
             "units_installed_from": "abc",
             "deploys": [{"manifest": "abc", "at": "RFC", "result": "ok"}],
             "client_digest": "xyz",
+            "config_fingerprint": None,
         }
 
     def test_older_state_without_client_digest(self):
@@ -415,6 +417,40 @@ class TestStateJsonSchema:
         assert state.client_digest == "client"
         assert store.is_noop("client", state) is True
         assert store.is_noop("final", state) is False
+
+    def test_record_deploy_records_fingerprint(self):
+        state = store.record_deploy(
+            store.parse_state(b"{}"),
+            "final",
+            "t",
+            config_fingerprint="fp-prod",
+        )
+        assert state.config_fingerprint == "fp-prod"
+        assert store.parse_state(store.serialize_state(state)).config_fingerprint == (
+            "fp-prod"
+        )
+
+    def test_older_state_without_fingerprint(self):
+        raw = json.dumps({"current": "abc", "previous": [], "deploys": []}).encode()
+        assert store.parse_state(raw).config_fingerprint is None
+
+    def test_record_rollback_records_target_fingerprint(self):
+        """After a rollback the live tree is the target's, so its fingerprint
+        is recorded - not the pre-rollback one."""
+        state = store.record_deploy(
+            store.parse_state(b"{}"),
+            "r1",
+            "t1",
+            config_fingerprint="fp-target",
+        )
+        state = store.record_deploy(state, "r2", "t2", config_fingerprint="fp-live")
+        rolled = store.record_rollback(
+            state, "r1", at="t3", config_fingerprint="fp-target"
+        )
+        assert rolled.config_fingerprint == "fp-target"
+        assert store.parse_state(store.serialize_state(rolled)).config_fingerprint == (
+            "fp-target"
+        )
 
     def test_client_digest_defaults_to_final_digest(self):
         state = store.record_deploy(store.parse_state(b"{}"), "r1", "t")
