@@ -25,7 +25,7 @@ import fujin.transfer
 from fujin.build import BuildResult
 from fujin.commands.deploy import Deploy
 from fujin.config import HealthCheckConfig
-from fujin.errors import DeploymentError, ImproperlyConfiguredError
+from fujin.errors import ConnectionError, DeploymentError, ImproperlyConfiguredError
 from fujin.exit_codes import (
     EXIT_DEPLOY_FAILED,
     EXIT_DEPLOY_ROLLED_BACK,
@@ -2721,3 +2721,28 @@ def test_dry_run_validates_health_check_probe_before_output(
     assert "missing" in str(exc.value.message)
     assert printer.lines == []
     assert conn.calls == []
+
+
+# ===========================================================================
+# Short read-only probes (#transport robustness)
+# ===========================================================================
+
+
+def test_probe_retries_once_on_transport_stall():
+    """A wedged exec channel on an idempotent probe is retried, not fatal."""
+    conn = MagicMock()
+    conn.run.side_effect = [ConnectionError("channel wedged"), ("digest", True)]
+
+    assert deploy_mod._probe(conn, "readlink /x") == ("digest", True)
+    assert conn.run.call_count == 2
+    assert conn.run.call_args.kwargs["idle_timeout"] == 15
+
+
+def test_probe_reraises_after_last_attempt():
+    conn = MagicMock()
+    conn.run.side_effect = ConnectionError("channel wedged")
+
+    with pytest.raises(ConnectionError):
+        deploy_mod._probe(conn, "readlink /x")
+
+    assert conn.run.call_count == 2

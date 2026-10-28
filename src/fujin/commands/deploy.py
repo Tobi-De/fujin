@@ -25,7 +25,12 @@ from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin.config import get_git_short_hash
-from fujin.errors import CommandError, DeploymentError, ImproperlyConfiguredError
+from fujin.errors import (
+    CommandError,
+    ConnectionError,
+    DeploymentError,
+    ImproperlyConfiguredError,
+)
 from fujin.exit_codes import (
     EXIT_DEPLOY_FAILED,
     EXIT_DEPLOY_ROLLED_BACK,
@@ -95,15 +100,31 @@ class HealthProbe:
     display: str
 
 
+def _probe(conn, command: str, *, attempts: int = 2, idle_timeout: float = 15):
+    """Run a short, idempotent read-only command with a tight idle deadline.
+
+    ``conn.run`` waits 300s by default before declaring a wedged channel.
+    Status probes (``readlink``, ``systemctl is-*``, ``test``) are cheap and
+    idempotent, so a stall should be retried once and fail fast rather than
+    stalling the whole deploy (observed on CI: an exec-channel read trickled
+    and the deploy sat for minutes).
+    """
+    for attempt in range(attempts):
+        try:
+            return conn.run(command, warn=True, hide=True, idle_timeout=idle_timeout)
+        except ConnectionError:
+            if attempt == attempts - 1:
+                raise
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _resolve_live_digest(conn, app_dir: str, state: store.State | None) -> str | None:
     """Digest of the release the ``current`` symlink actually points at.
 
     The symlink is the source of truth (state.json is a cache that can be
     stale); falls back to ``state.current`` when the symlink is missing.
     """
-    out, ok = conn.run(
-        f"readlink {shlex.quote(app_dir + '/current')}", warn=True, hide=True
-    )
+    out, ok = _probe(conn, f"readlink {shlex.quote(app_dir + '/current')}")
     target = out.strip() if ok and out.strip() else ""
     if target:
         digest = target.rstrip("/").rsplit("/", 1)[-1]
@@ -1373,11 +1394,10 @@ class Deploy(BaseCommand):
         while True:
             statuses: list[str] = []
             if sorted_units:
-                out, _ok = conn.run(
+                out, _ok = _probe(
+                    conn,
                     "systemctl is-failed "
                     f"{' '.join(serverops.q(u) for u in sorted_units)}",
-                    warn=True,
-                    hide=True,
                 )
                 statuses = [line.strip() for line in out.splitlines() if line.strip()]
             failed = [
@@ -1398,15 +1418,9 @@ class Deploy(BaseCommand):
             # activating but not yet bound.
             unready_sockets: list[str] = []
             for path, unit in sockets.items():
-                _, exists = conn.run(
-                    f"test -S {serverops.q(path)}", warn=True, hide=True
-                )
+                _, exists = _probe(conn, f"test -S {serverops.q(path)}")
                 socket_active = exists and (
-                    conn.run(
-                        f"systemctl is-active {serverops.q(unit)}",
-                        warn=True,
-                        hide=True,
-                    )[0].strip()
+                    _probe(conn, f"systemctl is-active {serverops.q(unit)}")[0].strip()
                     == "active"
                 )
                 if not socket_active and unit not in unready_sockets:

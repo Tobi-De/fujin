@@ -194,14 +194,23 @@ The one skipped unit test is the `visudo -c` syntax check (skips when
 
 ## 9. Open work
 
-- **Integration suite restructure (in progress).** 27 Docker tests; CI hangs
-  in the first `test_installation.py` test after `test_full_deploy` completes
-  (locally the same file passes in ~60 s). `df67ace` adds a 180 s per-test
-  timeout so the next CI run produces a traceback instead of a 40-minute
-  hang. Chosen direction: trim to ~12 high-value tests, module-scoped
-  container with a unique app name per test (function-scoped only for tests
-  that mutate global state: `harden`, `down` user removal), skip the image
-  build when the tag exists, and parallelise with `pytest-xdist`.
+- **Integration suite restructure (in progress).** 27 Docker tests; CI hung
+  on the first `test_installation.py` test after `test_full_deploy` finished.
+  Root cause found via the new 180 s per-test timeout:
+  `test_stale_unit_cleanup` → `deploy._resolve_live_digest` → `conn.run`
+  (libssh2 exec channel read) stalled until the 300 s default idle deadline.
+  Mitigation landed: read-only probes (`readlink`, `systemctl is-*`, `test`)
+  now use `_probe()` — 15 s idle deadline plus one retry — so a trickling
+  channel costs seconds instead of minutes and does not fail the deploy.
+  Chosen restructure: trim to ~12 high-value tests, module-scoped container
+  with a unique app name per test (function-scoped only for global-state
+  tests: bootstrap/create-user/harden), poll for SSH readiness instead of
+  fixed sleeps, skip the image build when the tag exists, `pytest-xdist -n 4`.
+  The unit suite has no such stall because it never touches libssh2.
+- Deeper transport hardening is still worth doing: every `conn.run` call
+  that is short and idempotent should go through a bounded probe (or the
+  system-`ssh` transport used by `get()`), and long-running commands should
+  carry an explicit idle deadline. This is the main CI-flakiness source.
 - The older open issues (pre-dating this rework) were not touched; some may
   be redundant now (`#67`, `#72`, …) and need a pass.
 - `#95` follow-ups deliberately out of scope: attachments/SSH keys,
