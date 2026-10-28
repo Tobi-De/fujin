@@ -340,6 +340,42 @@ def test_prebuild_and_run_build_reject_empty_systemd_dir(tmp_path, monkeypatch):
     assert build_err.value.code == pre_err.value.code
 
 
+def test_run_build_locks_by_default(project, monkeypatch):
+    """Direct callers get the lock; the deploy flow opts out because it holds
+    the same lock around build + transfer."""
+    import contextlib
+
+    acquisitions = []
+
+    @contextlib.contextmanager
+    def fake_lock(_config):
+        acquisitions.append("acquire")
+        try:
+            yield
+        finally:
+            acquisitions.append("release")
+
+    monkeypatch.setattr("fujin.build.build_lock", fake_lock)
+
+    run_build(make_config(project), no_cache=True)
+
+    assert acquisitions == ["acquire", "release"]
+
+
+def test_run_build_lock_false_does_not_acquire(project, monkeypatch):
+    """``lock=False`` must not take the lock a second time (nested flock on a
+    second descriptor would deadlock)."""
+
+    def exploding_lock(_config):  # pragma: no cover - assertion below
+        raise AssertionError("run_build(lock=False) must not take the lock")
+
+    monkeypatch.setattr("fujin.build.build_lock", exploding_lock)
+
+    result = run_build(make_config(project), no_cache=True, lock=False)
+
+    assert result.staging_dir.is_dir()
+
+
 def test_concurrent_builds_serialize_on_the_local_lock(project, monkeypatch):
     """The cache is written in place, so parallel builds of the same project
     must serialize on ``.fujin/cache/.build.lock`` (no interleaved runs)."""

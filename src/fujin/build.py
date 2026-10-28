@@ -511,12 +511,20 @@ def run_build(
     no_cache: bool = False,
     host: HostConfig | None = None,
     assets: dict[str, str | bytes] | None = None,
+    lock: bool = True,
 ) -> BuildResult:
     """Build the app (or reuse the local build cache) and return the staging tree.
 
     Concurrent builds of the same project (e.g. two deploys) serialize on
     :func:`build_lock`; ``--no-cache`` still rebuilds from scratch.
+
+    ``lock=False`` is for a caller that already holds :func:`build_lock`
+    (the deploy flow keeps it across build + transfer): ``flock`` is per open
+    file description, so acquiring it again on a second descriptor would
+    deadlock. Direct callers keep ``lock=True``.
     """
+    if not lock:
+        return _run_build_locked(config, no_cache=no_cache, host=host, assets=assets)
     with build_lock(config):
         return _run_build_locked(config, no_cache=no_cache, host=host, assets=assets)
 

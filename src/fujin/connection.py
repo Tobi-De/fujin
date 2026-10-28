@@ -45,7 +45,7 @@ SPOOL_THRESHOLD_BYTES = 4096
 #: user/host/port; the literal path keeps the socket well under the ~104 byte
 #: Unix socket limit. ``ControlMaster=auto`` transparently falls back to a
 #: direct connection when a stale master is in the way.
-SSH_CONTROL_PATH = "/tmp/fujin-ssh-%C"
+SSH_CONTROL_PATH = "/tmp/fujin-ssh-%i-%C"
 
 
 def ssh_control_opts() -> list[str]:
@@ -175,7 +175,6 @@ class SSH2Connection:
         self,
         script: str,
         *,
-        sudo: bool = False,
         interpreter: str = "bash",
         warn: bool = False,
         hide: bool = False,
@@ -184,11 +183,16 @@ class SSH2Connection:
         """Run a (possibly large) shell script without a PTY.
 
         The script is spooled to a private remote temp file and executed as
-        ``[sudo] <interpreter> <file>``. Use this for admin transactions that
+        ``<interpreter> <file>``. Use this for **unprivileged** scripts that
         must not travel through the exec channel as one big string (they can
-        wedge libssh2) and do not need a terminal. ``sudo`` here is the
-        operator's full sudo (``server harden`` / ``create-user`` are admin
-        actions, not the scoped deploy rule).
+        wedge libssh2).
+
+        .. warning::
+            Never use this for a ``sudo``/admin transaction. Spooling stages
+            the script in ``/tmp`` and runs without a terminal, which breaks
+            operators whose sudo needs a password or enforces
+            ``requiretty``. Privileged scripts must go inline through
+            ``run(f"sudo bash -c {shlex.quote(script)}", pty=True)``.
         """
         return self._run_spooled(
             script,
@@ -197,7 +201,6 @@ class SSH2Connection:
             hide,
             idle_timeout,
             interpreter=interpreter,
-            sudo=sudo,
         )
 
     def _run_spooled(
@@ -209,7 +212,6 @@ class SSH2Connection:
         idle_timeout: float | None,
         *,
         interpreter: str = "sh",
-        sudo: bool = False,
     ) -> tuple[str, bool]:
         """Upload *full_command* to a private remote temp file and run it."""
         remote = f"/tmp/fujin-cmd-{os.getpid()}-{secrets.token_hex(8)}.sh"
@@ -229,9 +231,8 @@ class SSH2Connection:
                     "SSH transport failed while uploading the spooled command"
                     f" script: {command[:120]!r}: {exc}"
                 ) from exc
-            prefix = "sudo " if sudo else ""
             return self._execute(
-                f"{prefix}{interpreter} {shlex.quote(remote)}",
+                f"{interpreter} {shlex.quote(remote)}",
                 command,
                 warn,
                 False,
@@ -252,11 +253,16 @@ class SSH2Connection:
         error: the rm is short and its own failures are swallowed.
         """
         try:
-            self.run(
+            # No cwd prefix: the command whose script we are cleaning up may
+            # itself have removed ``self.cwd``, and a ``cd`` would then fail
+            # before the rm ever runs.
+            self._execute(
                 f"rm -f {shlex.quote(remote)}",
-                warn=True,
-                hide=True,
-                idle_timeout=30,
+                f"rm -f {shlex.quote(remote)}",
+                True,
+                False,
+                True,
+                30,
             )
         except BaseException:
             logger.debug("Failed to remove remote spool file", exc_info=True)

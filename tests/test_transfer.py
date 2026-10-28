@@ -160,7 +160,7 @@ class TestRsyncToStaging:
             "-e",
             "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
             " -o ConnectTimeout=10 -o ControlMaster=auto"
-            " -o ControlPath=/tmp/fujin-ssh-%C -o ControlPersist=60s -p 22",
+            " -o ControlPath=/tmp/fujin-ssh-%i-%C -o ControlPersist=60s -p 22",
             f"{local}/",
             "deploy@203.0.113.7:/opt/fujin/myapp/releases/.staging-42",
         ]
@@ -233,7 +233,7 @@ class TestRsyncToStaging:
             "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
             " -o ConnectTimeout=10"
             " -o ControlMaster=auto"
-            " -o ControlPath=/tmp/fujin-ssh-%C"
+            " -o ControlPath=/tmp/fujin-ssh-%i-%C"
             " -o ControlPersist=60s -p 22 -i "
         )
 

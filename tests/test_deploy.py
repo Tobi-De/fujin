@@ -1562,16 +1562,74 @@ def test_staging_verify_skips_venv_hashed_in_this_deploy(
     assert spies["verify"].call_args.kwargs == {"skip_prefixes": ("venv/",)}
 
 
-def test_staging_verify_skips_bin_for_binary_mode(
-    monkeypatch, minimal_config, tmp_path
-):
+def test_staging_verify_fully_hashes_binary_mode(monkeypatch, minimal_config, tmp_path):
+    """Binary mode has no server-built tree: the client-provided dist must be
+    re-hashed, so verification skips nothing."""
     from fujin.config import InstallationMode
 
     minimal_config.installation_mode = InstallationMode.BINARY
     cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
     assert invoke(cmd) == 0
 
-    assert spies["verify"].call_args.kwargs == {"skip_prefixes": ("bin/",)}
+    spies["verify"].assert_called_once()
+    assert spies["verify"].call_args.kwargs == {"skip_prefixes": ()}
+
+
+DIST_PATH = "bin/testapp-1.0.0-py3-none-any.whl"
+
+
+def test_corrupt_binary_aborts_before_commit(monkeypatch, minimal_config, tmp_path):
+    """A binary whose uploaded bytes differ from the client manifest is never
+    blessed into the manifest: the deploy exits 4 and nothing is committed."""
+    minimal_config.installation_mode = InstallationMode.BINARY
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    spies["hash_server_built"].return_value = {
+        DIST_PATH: {"sha256": "0" * 64, "mode": 0o755}
+    }
+
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
+
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_not_called()
+    spies["verify"].assert_not_called()
+
+
+def test_merge_server_built_adds_server_built_venv_entries():
+    """Server-only (venv) paths are added; the client tree is unchanged."""
+    client = manifest_for()
+    venv_path = "venv/lib/python3.11/site-packages/x.py"
+
+    merged = deploy_mod.merge_server_built(
+        client, {venv_path: {"sha256": "a" * 64, "mode": 0o644}}
+    )
+
+    assert merged.entries[venv_path].sha256 == "a" * 64
+    assert set(merged.entries) == {*client.entries, venv_path}
+
+
+def test_merge_server_built_accepts_matching_client_hash():
+    """A client-provided path hashing identically is a no-op, not an error."""
+    client = manifest_for()
+    entry = client.entries[DIST_PATH]
+
+    merged = deploy_mod.merge_server_built(
+        client, {DIST_PATH: {"sha256": entry.sha256, "mode": 0o755}}
+    )
+
+    assert merged.entries[DIST_PATH] == entry
+
+
+def test_merge_server_built_rejects_mismatched_client_hash():
+    """A mismatch on a client-provided path is fatal and names the path."""
+    client = manifest_for()
+
+    with pytest.raises(DeploymentError) as excinfo:
+        deploy_mod.merge_server_built(
+            client, {DIST_PATH: {"sha256": "0" * 64, "mode": 0o755}}
+        )
+
+    assert excinfo.value.code == EXIT_DEPLOY_FAILED
+    assert DIST_PATH in str(excinfo.value.message)
 
 
 def test_first_deploy_after_rollback_no_commit_collision(
@@ -1916,6 +1974,46 @@ def test_build_runs_before_server_layout_and_lock(
     assert "build" in names
     assert names.index("build") < names.index("ensure_layout")
     assert names.index("build") < names.index("acquire_lock")
+
+
+def test_deploy_holds_build_lock_across_build_and_transfer(
+    monkeypatch, minimal_config, tmp_path
+):
+    """The local build lock is held from before the build through commit: a
+    concurrent deploy can never see or replace the cached staging tree while
+    it is being written/rsynced."""
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    events = spies["events"]
+
+    class _Lock:
+        def __enter__(self):
+            events.append(("lock", "acquire"))
+
+        def __exit__(self, *_exc):
+            events.append(("lock", "release"))
+
+    monkeypatch.setattr(deploy_mod.build, "build_lock", lambda _config: _Lock())
+    run_build = deploy_mod.build.run_build
+    seen_lock_flags = []
+
+    def _run_build(*a, **k):
+        seen_lock_flags.append(k.get("lock"))
+        events.append(("build", None))
+        return run_build(*a, **k)
+
+    monkeypatch.setattr(deploy_mod.build, "run_build", _run_build)
+    spies["rsync"].side_effect = lambda *a, **k: (events.append(("rsync", None)), [])[1]
+
+    assert invoke(cmd) == 0
+
+    # The deploy already holds the lock; run_build must not acquire it again
+    # (flock on a second descriptor would deadlock).
+    assert seen_lock_flags == [False]
+    assert events[0] == ("lock", "acquire")
+    assert events[-1] == ("lock", "release")
+    order = [event[0] for event in events]
+    assert order.index("build") < order.index("rsync") < order.index("commit")
+    assert order.index("commit") < len(order) - 1  # release is last
 
 
 def test_noop_still_builds_then_short_circuits(monkeypatch, minimal_config, tmp_path):

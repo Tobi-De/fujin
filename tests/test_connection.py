@@ -315,6 +315,18 @@ def test_large_non_pty_command_is_spooled_then_cleaned_up(spool_connection):
     assert cleanup_call.args[2] is True  # cleanup is warn=True: never raises
 
 
+def test_remote_script_cleanup_ignores_stale_cwd(spool_connection):
+    conn, execute = spool_connection
+    # The command whose spool file we clean up may have removed the cwd;
+    # a ``cd <gone> && rm`` would fail and leak the temp file.
+    conn.cwd = "/opt/fujin/app/removed-by-the-command"
+
+    conn._remove_remote_script("/tmp/fujin-cmd-1-deadbeef.sh")
+
+    assert execute.call_args.args[0] == "rm -f /tmp/fujin-cmd-1-deadbeef.sh"
+    assert "cd " not in execute.call_args.args[0]
+
+
 def test_spool_path_is_unique_per_call(spool_connection):
     conn, _ = spool_connection
     big = "echo " + "x" * SPOOL_THRESHOLD_BYTES
@@ -433,7 +445,7 @@ EXPECTED_CONTROL_OPTS = [
     "-o",
     "ControlMaster=auto",
     "-o",
-    "ControlPath=/tmp/fujin-ssh-%C",
+    "ControlPath=/tmp/fujin-ssh-%i-%C",
     "-o",
     "ControlPersist=60s",
 ]
@@ -484,7 +496,7 @@ def test_get_and_rsync_share_one_control_socket(connection, tmp_path, monkeypatc
     rsync_opts = shlex.split(_ssh_transport_opts(connection.host))
     assert rsync_opts[0] == "ssh"
     assert rsync_opts[1:] == get_opts
-    control_path = get_opts.index("ControlPath=/tmp/fujin-ssh-%C")
+    control_path = get_opts.index("ControlPath=/tmp/fujin-ssh-%i-%C")
     assert get_opts[control_path - 1] == "-o"
 
 

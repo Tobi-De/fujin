@@ -253,16 +253,40 @@ def venv_clone_eligible(
 def merge_server_built(
     client_manifest: m.Manifest, server_built: Mapping[str, dict]
 ) -> m.Manifest:
-    """Merge server-hashed ``venv/**`` / ``bin/**`` entries into the manifest.
+    """Merge server-hashed entries into the manifest.
 
     The server reports ``{"sha256": hex, "mode": octalStr|int}`` for regular
     files and ``{"link": target, "mode": ...}`` for symlinks, keyed by
     staging-relative path. Rebuilt deterministically; the final
     :func:`fujin.manifest.release_digest` covers the complete tree.
+
+    Only entries the client did not provide (server-built ``venv/**``) are
+    added. A path that IS in the client manifest (notably ``bin/<dist>`` in
+    binary mode) must match the client's sha256/link: the server hashing the
+    uploaded bytes is the last check before commit, so a transfer that
+    corrupted a client-provided file aborts the deploy instead of being
+    blessed into the manifest. Entries are never silently overwritten.
     """
     payload = m.manifest_to_dict(client_manifest, include_created_at=False)
     entries: dict[str, dict] = dict(payload["entries"])
     for path, info in dict(server_built).items():
+        known = client_manifest.entries.get(path)
+        if known is not None:
+            if "link" in info:
+                if info["link"] != known.link:
+                    raise DeploymentError(
+                        f"Server-side symlink mismatch for client-provided"
+                        f" path {path!r}: the uploaded entry points elsewhere."
+                    )
+                continue
+            if info.get("sha256") != known.sha256:
+                raise DeploymentError(
+                    f"Server-side hash mismatch for client-provided path"
+                    f" {path!r}: the uploaded bytes differ from the local"
+                    " manifest. Aborting before commit."
+                )
+            # Same content: keep the client's entry (mode/kind intent).
+            continue
         mode = info.get("mode", 0)
         if isinstance(mode, int):
             mode = f"{mode:04o}"
@@ -395,30 +419,37 @@ class Deploy(BaseCommand):
         # excludes secret values), so it runs before any SSH I/O: a slow build
         # no longer holds an idle connection and the remote deploy lock, and a
         # build failure aborts before the server is touched.
-        result, client_manifest, client_digest = self._build(resolved_env)
+        #
+        # The local build lock spans the build AND the whole transfer:
+        # ``_deploy`` writes the rendered ``.env``/``manifest.json`` into the
+        # cached staging tree and rsyncs it, so releasing after the build
+        # would let a concurrent deploy observe those files or rmtree the
+        # tree mid-transfer. ``run_build`` therefore runs unlocked here.
+        with build.build_lock(config):
+            result, client_manifest, client_digest = self._build(resolved_env)
 
-        with connection.connection(host=host, compress=False) as conn:
-            self._notice_old_layout(conn)
-            serverops.ensure_app_user(conn, config.app_user or config.app_name)
-            serverops.ensure_layout(
-                conn, app_dir, config.app_user or config.app_name, host.user
-            )
-            lock = serverops.acquire_lock(conn, app_dir)
-            try:
-                # Inside the lock: a concurrent deploy's staging dir is not
-                # ours to delete.
-                transfer.sweep_stale_staging(conn, app_dir)
-                self._deploy(
-                    conn,
-                    result,
-                    client_manifest,
-                    client_digest,
-                    resolved_env,
-                    context,
-                    probe,
+            with connection.connection(host=host, compress=False) as conn:
+                self._notice_old_layout(conn)
+                serverops.ensure_app_user(conn, config.app_user or config.app_name)
+                serverops.ensure_layout(
+                    conn, app_dir, config.app_user or config.app_name, host.user
                 )
-            finally:
-                serverops.release_lock(conn, app_dir, lock)
+                lock = serverops.acquire_lock(conn, app_dir)
+                try:
+                    # Inside the lock: a concurrent deploy's staging dir is not
+                    # ours to delete.
+                    transfer.sweep_stale_staging(conn, app_dir)
+                    self._deploy(
+                        conn,
+                        result,
+                        client_manifest,
+                        client_digest,
+                        resolved_env,
+                        context,
+                        probe,
+                    )
+                finally:
+                    serverops.release_lock(conn, app_dir, lock)
 
     # =======================================================================================
     # Dry run (#90)
@@ -770,7 +801,11 @@ class Deploy(BaseCommand):
         self.output.info("Building application ...")
         try:
             result = build.run_build(
-                config, no_cache=self.no_cache, host=self.selected_host
+                config,
+                no_cache=self.no_cache,
+                host=self.selected_host,
+                # The deploy already holds build_lock for the whole transfer.
+                lock=False,
             )
         except DeploymentError as exc:
             raw = str(exc.message)
@@ -1073,14 +1108,17 @@ class Deploy(BaseCommand):
                 self.output.info("Verifying staged release tree...")
                 # ``hash_server_built`` hashed the server-built tree in this
                 # same staging dir moments ago, so verification must not hash
-                # those bytes a second time. Existence, file type and mode of
-                # every entry are still checked; everything the client knows
-                # (units, dropins, Caddyfile, assets, requirements, dist,
-                # ``.env``) is re-hashed in full.
+                # those bytes a second time. Only ``venv/**`` is server-built;
+                # the client-provided dist (``bin/...``) is ALWAYS re-hashed,
+                # since that is the only check its bytes survived the upload.
+                # Existence, file type and mode of every entry are still
+                # checked; everything the client knows (units, dropins,
+                # Caddyfile, assets, requirements, dist, ``.env``) is
+                # re-hashed in full.
                 server_built_prefix = (
                     ("venv/",)
                     if config.installation_mode.value == "python-package"
-                    else ("bin/",)
+                    else ()
                 )
                 verify = transfer.verify_staging(
                     conn,

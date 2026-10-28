@@ -7,6 +7,7 @@ setup-ssh, upgrade handling and the scoped-sudoers transactions.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -411,39 +412,26 @@ def test_upgrade_command_components_not_installed(minimal_config, mock_connectio
 
 
 class FakeConn:
-    """Records commands; exact-match responses first, then substring match."""
+    """Records commands; exact-match responses first, then substring match.
+
+    Deliberately has no ``run_script``: admin scripts must go through the
+    inline PTY ``run`` path, so a regression to the non-PTY spool path fails
+    here with ``AttributeError`` instead of silently passing.
+    """
 
     def __init__(self, exact=None, contains=None):
         self.commands: list[str] = []
+        self.calls: list[tuple[str, dict]] = []
         self.exact = exact or {}
         self.contains = contains or {}
 
     def run(self, command, **kwargs):
         self.commands.append(command)
+        self.calls.append((command, kwargs))
         if command in self.exact:
             return self.exact[command]
         for needle, result in self.contains.items():
             if needle in command:
-                return result
-        return ("", True)
-
-    def run_script(
-        self,
-        script,
-        *,
-        sudo=False,
-        interpreter="bash",
-        warn=False,
-        hide=False,
-        idle_timeout=300,
-    ):
-        # Admin scripts are spooled, so the script body is the recorded unit
-        # of work (the wrapper command is a tiny ``[sudo] bash <tmp>``).
-        self.commands.append(script)
-        if script in self.exact:
-            return self.exact[script]
-        for needle, result in self.contains.items():
-            if needle in script:
                 return result
         return ("", True)
 
@@ -479,14 +467,19 @@ SUDOERS_WITH_LEGACY = (
 CAT = "sudo cat /etc/sudoers"
 
 
+def _admin_cmd(script: str) -> str:
+    """The inline PTY wrapper admin scripts are sent through."""
+    return f"sudo bash -c {shlex.quote(script)}"
+
+
 def _install_cmd(name: str = "newdeploy") -> str:
     rule = sudoers.render_rule(name, "testapp", "testapp")
-    return sudoers.install_dropin_script(name, rule)
+    return _admin_cmd(sudoers.install_dropin_script(name, rule))
 
 
 def _harden_cmd() -> str:
     rule = sudoers.render_rule("deploy", "testapp", "testapp")
-    return sudoers.harden_script("deploy", "testapp", "testapp", rule)
+    return _admin_cmd(sudoers.harden_script("deploy", "testapp", "testapp", rule))
 
 
 def test_create_user_installs_scoped_dropin_and_never_appends_nopasswd(
@@ -504,6 +497,9 @@ def test_create_user_installs_scoped_dropin_and_never_appends_nopasswd(
     assert "NOPASSWD" not in creation
     assert "/etc/sudoers" not in creation
     assert cmd in conn.commands
+    # The root script goes inline over a PTY: sudo may prompt for a password
+    # or require a tty, and it must never be staged in /tmp.
+    assert conn.calls[-1] == (cmd, {"warn": True, "pty": True})
 
     joined = "\n".join(conn.commands)
     assert "NOPASSWD:ALL" not in joined
@@ -580,6 +576,7 @@ def test_harden_runs_one_root_transaction_and_removes_exact_legacy_line(
     # Exactly one root shell (one round trip); no client-side read, backup
     # or replace step that could leave a half-migrated box behind.
     assert conn.commands == [cmd]
+    assert conn.calls == [(cmd, {"warn": True, "pty": True})]
     assert "trap cleanup EXIT" in cmd
     assert 'cp -a "$BACKUP" "$SUDOERS"' in cmd
     assert "sed -E" in cmd

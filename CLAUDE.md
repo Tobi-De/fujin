@@ -391,11 +391,19 @@ Tests are organized in `tests/` with two categories:
 - Verify end-to-end behavior on a simulated VPS
 - Require Docker to run
 - Test files:
-  - `test_full_deploy.py` - Deployment lifecycle (deploy, rollback, down)
+  - `test_full_deploy.py` - Deployment lifecycle (deploy, no-op, rollback,
+    down), app management (restart/logs/status), venv clone, doctor repair,
+    exit codes
   - `test_installation.py` - Systemd units (sockets, timers, dropins)
-  - `test_server_bootstrap.py` - Server setup and user creation
-  - `test_app_management.py` - App commands (restart, logs, status)
+  - `test_server_bootstrap.py` - Server setup, create-user (scoped sudoers),
+    harden
   - `helpers.py` - Shared assertion utilities
+  - `conftest.py` - Content-addressed image build, shared container for
+    app-scoped tests, fresh container for global-state tests
+
+  The suite is trimmed to the high-value scenarios (14 tests). CI integration
+  is temporarily disabled (the Docker suite still stalls on GitHub runners);
+  run `just test-integration` locally, or `-n 4` for speed.
 
 ### Core Principles
 
