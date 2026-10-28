@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.28.0-beta.1] - 2026-10-28
 
 ### 🚀 Features
 
@@ -64,6 +64,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### 🧪 Testing
 
 - *(ci)* Fail fast on hung integration tests
+
+### 📦 Build
+
+- Allow pre-release versions in bumpversion config
 
 ### ⚙️ Miscellaneous Tasks
 
