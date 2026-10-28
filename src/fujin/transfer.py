@@ -32,7 +32,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 from fujin.errors import DeploymentError
 from fujin.exit_codes import EXIT_HOST_UNREACHABLE
@@ -128,6 +128,12 @@ class VerifyResult:
     mismatch: dict[str, VerifyMismatch] = field(default_factory=dict)
     link_mismatch: dict[str, str] = field(default_factory=dict)
     mode_mismatch: dict[str, VerifyMismatch] = field(default_factory=dict)
+    #: Regular files whose bytes were re-hashed by this verification.
+    hashed: int = 0
+    #: Server-built files (under a ``skip_prefixes`` prefix) whose bytes were
+    #: NOT re-hashed because this deploy already hashed them server-side;
+    #: existence and mode were still checked.
+    skipped: int = 0
 
     def __bool__(self) -> bool:
         return self.ok
@@ -149,6 +155,12 @@ def verify_report(staging: str, result: VerifyResult) -> str:
         parts.append(
             f"  mode mismatch: {path}"
             f" (expected {mismatch.expected}, got {mismatch.actual})"
+        )
+    if result.skipped:
+        parts.append(
+            f"  skipped {result.skipped} server-built entr"
+            f"{'y' if result.skipped == 1 else 'ies'} from re-hashing"
+            " (hashed on the server during this deploy)"
         )
     return "\n".join(parts)
 
@@ -296,13 +308,15 @@ def _quote(path: str) -> str:
 _VERIFY_SCRIPT = r"""
 import sys, json, hashlib, os, stat
 root = sys.argv[1]
+skip_prefixes = tuple(p for p in sys.argv[2:] if p)
 try:
     with open(os.path.join(root, "manifest.json"), "rb") as fh:
         manifest = json.load(fh)
 except (OSError, ValueError) as exc:
     print("__FUJIN_JSON__" + json.dumps({"error": str(exc)}))
     sys.exit(0)
-res = {"missing": [], "mismatch": {}, "link_mismatch": {}, "mode_mismatch": {}}
+res = {"missing": [], "mismatch": {}, "link_mismatch": {}, "mode_mismatch": {},
+       "hashed": 0, "skipped": 0}
 def digest(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -332,6 +346,14 @@ for path, entry in manifest["entries"].items():
     got_mode = stat.S_IMODE(st.st_mode)
     if got_mode != want_mode:
         res["mode_mismatch"][path] = [entry["mode"], format(got_mode, "04o")]
+    # Server-built files were hashed by this same deploy right before the
+    # upload (hash_server_built), so their bytes are already known: skip only
+    # the digest, never existence/type/mode. Client-known entries and the
+    # reuse path (no skip_prefixes) are always hashed in full.
+    if any(path.startswith(prefix) for prefix in skip_prefixes):
+        res["skipped"] += 1
+        continue
+    res["hashed"] += 1
     try:
         got = digest(full)
     except OSError as exc:
@@ -345,7 +367,11 @@ print("__FUJIN_JSON__" + json.dumps(res))
 
 
 def verify_staging(
-    conn: SSH2Connection, staging_dir: str, manifest_dict: dict[str, Any]
+    conn: SSH2Connection,
+    staging_dir: str,
+    manifest_dict: dict[str, Any],
+    *,
+    skip_prefixes: Iterable[str] = (),
 ) -> VerifyResult:
     """Verify the staging tree byte-for-byte against a manifest.
 
@@ -354,9 +380,17 @@ def verify_staging(
     script reads ``manifest.json`` from the staging dir (written there
     before verify), so no oversized argv is involved. Runs a single
     python3 one-shot remotely and parses the JSON it prints.
+
+    ``skip_prefixes`` lists staging-relative prefixes whose entries were
+    already hashed by this deploy (``serverops.hash_server_built``) and are
+    therefore not re-hashed here; their existence, file type and mode are
+    still verified. Pass an empty value whenever the tree was not hashed by
+    this deploy (e.g. verifying an already-committed release).
     """
+    prefixes = tuple(skip_prefixes)
+    extra = "".join(f" {_quote(prefix)}" for prefix in prefixes)
     command = (
-        f"python3 - {shlex.quote(staging_dir)} "
+        f"python3 - {shlex.quote(staging_dir)}{extra} "
         f"<<'_FUJIN_PY'\n{_VERIFY_SCRIPT}\n_FUJIN_PY"
     )
 
@@ -397,9 +431,11 @@ def verify_staging(
         },
         link_mismatch=result["link_mismatch"],
         mode_mismatch={
-            path: VerifyMismatch(expected=want, actual=got)
-            for path, (want, got) in result["mode_mismatch"].items()
+            path: VerifyMismatch(expected=expected, actual=actual)
+            for path, (expected, actual) in result["mode_mismatch"].items()
         },
+        hashed=result.get("hashed", 0),
+        skipped=result.get("skipped", 0),
     )
 
 

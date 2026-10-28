@@ -986,12 +986,33 @@ class Deploy(BaseCommand):
                 transfer.commit_release(conn, remote_staging, final_digest)
             else:
                 self.output.info("Verifying staged release tree...")
+                # ``hash_server_built`` hashed the server-built tree in this
+                # same staging dir moments ago, so verification must not hash
+                # those bytes a second time. Existence, file type and mode of
+                # every entry are still checked; everything the client knows
+                # (units, dropins, Caddyfile, assets, requirements, dist,
+                # ``.env``) is re-hashed in full.
+                server_built_prefix = (
+                    ("venv/",)
+                    if config.installation_mode.value == "python-package"
+                    else ("bin/",)
+                )
                 verify = transfer.verify_staging(
-                    conn, remote_staging, m.manifest_to_dict(final_manifest)
+                    conn,
+                    remote_staging,
+                    m.manifest_to_dict(final_manifest),
+                    skip_prefixes=server_built_prefix,
                 )
                 if not verify.ok:
                     raise DeploymentError(
                         redact(transfer.verify_report(remote_staging, verify))
+                    )
+                if verify.skipped:
+                    self.output.info(
+                        f"Verified {verify.hashed} file(s); skipped re-hashing"
+                        f" {verify.skipped} server-built entr"
+                        f"{'y' if verify.skipped == 1 else 'ies'}"
+                        " (hashed on the server during this deploy)."
                     )
                 self.output.info("Committing release...")
                 transfer.commit_release(conn, remote_staging, final_digest)

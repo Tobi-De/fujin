@@ -1510,6 +1510,10 @@ def test_reuse_verifies_existing_tree_against_final_manifest(
     invoke(cmd)
     verify_paths = [args[0][1] for args in spies["verify"].call_args_list]
     assert verify_paths == ["/opt/fujin/testapp/releases/digest-x"], verify_paths
+    # The committed release was not hashed by this deploy, so the reuse path
+    # must hash everything (no skip prefixes).
+    for call in spies["verify"].call_args_list:
+        assert call.kwargs == {}
 
 
 def test_corrupt_existing_release_replaced_by_fresh_staging(
@@ -1526,12 +1530,39 @@ def test_corrupt_existing_release_replaced_by_fresh_staging(
     invoke(cmd)
 
     spies["commit"].assert_called_once()
+    # Both verifications inside the reuse helper hash everything.
+    for call in spies["verify"].call_args_list:
+        assert call.kwargs == {}
     rms = [
         c
         for c, kw in spies["conn"].calls
         if "rm -rf" in c and "test -d" not in c and kw.get("warn")
     ]
     assert any("releases/digest-x" in c for c in rms), rms
+
+
+def test_staging_verify_skips_venv_hashed_in_this_deploy(
+    monkeypatch, minimal_config, tmp_path
+):
+    """The normal deploy hashed venv/** server-side moments earlier; the
+    staging verify must not hash those bytes again."""
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    assert invoke(cmd) == 0
+
+    spies["verify"].assert_called_once()
+    assert spies["verify"].call_args.kwargs == {"skip_prefixes": ("venv/",)}
+
+
+def test_staging_verify_skips_bin_for_binary_mode(
+    monkeypatch, minimal_config, tmp_path
+):
+    from fujin.config import InstallationMode
+
+    minimal_config.installation_mode = InstallationMode.BINARY
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    assert invoke(cmd) == 0
+
+    assert spies["verify"].call_args.kwargs == {"skip_prefixes": ("bin/",)}
 
 
 def test_first_deploy_after_rollback_no_commit_collision(

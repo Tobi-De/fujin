@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import shlex
+import subprocess
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +23,7 @@ from fujin.transfer import (
     rsync_to_staging,
     sweep_stale_staging,
     swap_current,
+    verify_report,
     verify_staging,
 )
 
@@ -66,6 +73,32 @@ def fake_rsync_run(monkeypatch, *, returncode=0, stdout="", stderr=""):
     # avoid probing the real rsync binary for installed-ness
     monkeypatch.setattr(transfer, "_rsync_installed_locally", lambda: True)
     return calls
+
+
+def local_script_conn(monkeypatch):
+    """RecordingConn whose ``run`` executes the heredoc python script locally.
+
+    The remote verification script is just python reading ``manifest.json``
+    from the given root, so running it against a local tree exercises the
+    real hashing/skip behaviour without SSH.
+    """
+    conn = RecordingConn(host=make_host())
+
+    def run(command, **kw):
+        conn.runs.append(command)
+        head, _, rest = command.partition("\n")
+        argv = shlex.split(head.split("<<", 1)[0])
+        script = rest.split("\n_FUJIN_PY", 1)[0]
+        proc = subprocess.run(
+            [sys.executable, *argv[1:]],
+            input=script,
+            text=True,
+            capture_output=True,
+        )
+        return proc.stdout, proc.returncode == 0
+
+    monkeypatch.setattr(conn, "run", run)
+    return conn
 
 
 ITEMIZE_SAMPLE = """sending incremental file list
@@ -365,6 +398,99 @@ class TestVerifyStaging:
         with pytest.raises(TransferError) as exc_info:
             verify_staging(conn, "/x/.staging-1", self.make_manifest_dict())
         assert "Could not parse" in exc_info.value.message
+
+    def make_tree(self, root: Path, files: dict[str, bytes], modes=None):
+        """Write *files* under *root* plus the ``manifest.json`` verify reads."""
+        modes = modes or {}
+        entries = {}
+        for path, content in files.items():
+            full = root / path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_bytes(content)
+            mode = modes.get(path, 0o644)
+            full.chmod(mode)
+            entries[path] = {
+                "path": path,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "mode": format(mode, "04o"),
+                "kind": "code",
+            }
+        (root / "manifest.json").write_text(json.dumps({"entries": entries}))
+        return {"entries": entries}
+
+    def test_server_built_corruption_fails_without_skip(self, tmp_path, monkeypatch):
+        """The reuse path (no skips) still hashes venv content in full."""
+        root = tmp_path / "staging"
+        md = self.make_tree(root, {"venv/lib/pkg/mod.py": b"original"})
+        (root / "venv/lib/pkg/mod.py").write_bytes(b"tampered")
+
+        result = verify_staging(local_script_conn(monkeypatch), str(root), md)
+
+        assert not result
+        assert "venv/lib/pkg/mod.py" in result.mismatch
+        assert result.hashed == 1
+        assert result.skipped == 0
+
+    def test_skip_prefix_does_not_rehash_server_built(self, tmp_path, monkeypatch):
+        root = tmp_path / "staging"
+        md = self.make_tree(
+            root,
+            {"venv/lib/pkg/mod.py": b"original", "app/main.py": b"code"},
+        )
+        # Corrupt only the server-built file: skipping its digest is the
+        # whole point, the client-known entry is still hashed.
+        (root / "venv/lib/pkg/mod.py").write_bytes(b"tampered")
+        conn = local_script_conn(monkeypatch)
+
+        result = verify_staging(conn, str(root), md, skip_prefixes=("venv/",))
+
+        assert result.ok
+        assert result.hashed == 1
+        assert result.skipped == 1
+        argv = shlex.split(conn.runs[0].split("\n", 1)[0].split("<<", 1)[0])
+        assert argv[1:] == ["-", str(root), "venv/"]
+        assert "skipped 1 server-built entry" in verify_report(str(root), result)
+
+    def test_skipped_entry_must_still_exist(self, tmp_path, monkeypatch):
+        root = tmp_path / "staging"
+        md = self.make_tree(
+            root,
+            {"venv/lib/pkg/mod.py": b"content", "app/main.py": b"code"},
+        )
+        (root / "venv/lib/pkg/mod.py").unlink()
+
+        result = verify_staging(
+            local_script_conn(monkeypatch), str(root), md, skip_prefixes=("venv/",)
+        )
+
+        assert not result
+        assert result.missing == ["venv/lib/pkg/mod.py"]
+        assert result.hashed == 1
+
+    def test_skipped_entry_mode_still_checked(self, tmp_path, monkeypatch):
+        root = tmp_path / "staging"
+        md = self.make_tree(
+            root,
+            {"venv/lib/pkg/mod.py": b"content", "app/main.py": b"code"},
+            modes={"venv/lib/pkg/mod.py": 0o600},
+        )
+        (root / "venv/lib/pkg/mod.py").chmod(0o644)
+
+        result = verify_staging(
+            local_script_conn(monkeypatch), str(root), md, skip_prefixes=("venv/",)
+        )
+
+        assert not result
+        assert result.mode_mismatch["venv/lib/pkg/mod.py"].expected == "0600"
+        assert result.mode_mismatch["venv/lib/pkg/mod.py"].actual == "0644"
+        assert result.skipped == 1
+        assert result.hashed == 1
+
+    def test_report_makes_skips_visible(self):
+        result = transfer.VerifyResult(skipped=3, missing=[".env"])
+        report = verify_report("/opt/fujin/a/releases/.staging-1", result)
+        assert "skipped 3 server-built entries" in report
+        assert "(hashed on the server during this deploy)" in report
 
 
 class TestCommitRelease:
