@@ -18,6 +18,12 @@ from fujin.commands.deploy import Deploy
 from fujin.commands.down import Down
 from fujin.commands.rollback import Rollback
 from fujin.config import Config
+from fujin.exit_codes import (
+    EXIT_DEPLOY_FAILED,
+    EXIT_DEPLOY_ROLLED_BACK,
+    EXIT_HOST_UNREACHABLE,
+    EXIT_USER_ABORTED,
+)
 
 from .helpers import (
     assert_noop_redeploy_kept_pid,
@@ -958,7 +964,7 @@ WantedBy=multi-user.target
         deploy = Deploy(no_input=True)
         with pytest.raises(cappa.Exit) as excinfo:
             deploy()
-        assert excinfo.value.code == 3
+        assert excinfo.value.code == EXIT_DEPLOY_ROLLED_BACK
 
     # After auto-rollback, v1.0.0 should be running again
     time.sleep(2)  # Give services time to settle
@@ -971,7 +977,7 @@ WantedBy=multi-user.target
 def test_deploy_with_failing_service_user_declines_rollback(
     vps_container, ssh_key, tmp_path, monkeypatch
 ):
-    """When user declines rollback after service failure, the deploy exits 3."""
+    """When user declines rollback after service failure, the deploy exits 1."""
     monkeypatch.chdir(tmp_path)
 
     dist_dir = tmp_path / "dist"
@@ -1033,16 +1039,135 @@ WantedBy=multi-user.target
     config_v2 = create_config("2.0.0", "#!/bin/bash\nexit 1\n")
     with (
         patch("fujin.config.Config.read", return_value=config_v2),
-        # First call: deployment confirmation (accept), second call: rollback (decline)
-        patch("fujin.commands.deploy.Confirm.ask", side_effect=[True, False]),
+        # The only prompt is the rollback offer; decline it.
+        patch("fujin.commands.deploy.Confirm.ask", return_value=False),
     ):
         deploy = Deploy(no_input=False)  # Allow prompts so rollback can be offered
 
-        # User declines rollback, so the deploy fails with exit code 3
+        # User declines rollback, so the deploy aborts as a user decision (1)
         with pytest.raises(cappa.Exit) as excinfo:
             deploy()
-        assert excinfo.value.code == 3
+        assert excinfo.value.code == EXIT_USER_ABORTED
 
     # Version should still show 2.0.0 (failed deploy, no rollback)
     stdout = get_deployed_version(vps_container["name"], "rollbackapp")
     assert stdout == "2.0.0", f"Expected v2.0.0 (no rollback), got: {stdout}"
+
+
+def test_failing_post_install_hook_exits_4_and_previous_release_stays_live(
+    vps_container, ssh_key, tmp_path, monkeypatch
+):
+    """A post_install hook failure aborts before activation: exit 4, and the
+    previous release remains the live ``current`` release (nothing to roll
+    back because nothing new was activated)."""
+    monkeypatch.chdir(tmp_path)
+
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+
+    install_dir = tmp_path / ".fujin"
+    systemd_dir = install_dir / "systemd"
+    systemd_dir.mkdir(parents=True)
+
+    service_file = systemd_dir / "web.service"
+    service_file.write_text("""[Unit]
+Description=Hook failure app
+
+[Service]
+Type=simple
+ExecStart={app_dir}/current/bin/hookapp
+WorkingDirectory={app_dir}
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+    def create_config(version: str, hooks=None):
+        distfile = dist_dir / f"hookapp-{version}"
+        distfile.write_text("#!/bin/bash\necho 'running' && sleep infinity\n")
+        distfile.chmod(0o755)
+        data = {
+            "app": "hookapp",
+            "version": version,
+            "build_command": "echo 'building'",
+            "distfile": str(distfile),
+            "installation_mode": "binary",
+            "hosts": [
+                {
+                    "address": vps_container["ip"],
+                    "user": vps_container["user"],
+                    "port": vps_container["port"],
+                    "key_filename": ssh_key,
+                }
+            ],
+        }
+        if hooks is not None:
+            data["hooks"] = hooks
+        return msgspec.convert(data, type=Config)
+
+    # Deploy v1.0.0 - working version, no hooks.
+    config_v1 = create_config("1.0.0")
+    with patch("fujin.config.Config.read", return_value=config_v1):
+        Deploy(no_input=True)()
+
+    wait_for_service(vps_container["name"], "hookapp-web.service")
+    live_before = get_current_release(vps_container["name"], "hookapp")
+
+    # Deploy v2.0.0 - valid code, but its post_install hook fails.
+    config_v2 = create_config("2.0.0", hooks={"post_install": ["exit 1"]})
+    with patch("fujin.config.Config.read", return_value=config_v2):
+        deploy = Deploy(no_input=True)
+        with pytest.raises(cappa.Exit) as excinfo:
+            deploy()
+        assert excinfo.value.code == EXIT_DEPLOY_FAILED
+
+    # The failed release was never activated: v1 is still current and live.
+    assert get_current_release(vps_container["name"], "hookapp") == live_before
+    assert get_deployed_version(vps_container["name"], "hookapp") == "1.0.0"
+    wait_for_service(vps_container["name"], "hookapp-web.service")
+
+
+def test_unreachable_host_exits_5(tmp_path, monkeypatch):
+    """A deploy against a closed local port is host-unreachable (5) before
+    any build/transfer work happens (no container needed: the connection
+    attempt itself fails fast)."""
+    import socket
+
+    monkeypatch.chdir(tmp_path)
+
+    # Reserve a port, then close it: connecting yields ECONNREFUSED.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    closed_port = probe.getsockname()[1]
+    probe.close()
+
+    distfile = tmp_path / "unreachable-1.0.0"
+    distfile.write_text("#!/bin/bash\nexit 0\n")
+    distfile.chmod(0o755)
+
+    config = msgspec.convert(
+        {
+            "app": "unreachable",
+            "version": "1.0.0",
+            "build_command": "echo building",
+            "distfile": str(distfile),
+            "installation_mode": "binary",
+            "hosts": [
+                {
+                    "address": "127.0.0.1",
+                    "user": "fujin",
+                    "port": closed_port,
+                    "key_filename": str(tmp_path / "no-such-key"),
+                }
+            ],
+        },
+        type=Config,
+    )
+
+    with patch("fujin.config.Config.read", return_value=config):
+        deploy = Deploy(no_input=True)
+        with pytest.raises(cappa.Exit) as excinfo:
+            deploy()
+
+    assert excinfo.value.code == EXIT_HOST_UNREACHABLE

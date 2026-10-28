@@ -7,6 +7,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+import cappa
 
 from fujin import serverops
 from fujin.store import State
@@ -712,3 +713,33 @@ def test_run_health_probe_strips_output(conn):
     conn.run.return_value = ("  trailing newline\n", True)
 
     assert serverops.run_health_probe(conn, "probe") == (True, "trailing newline")
+
+
+# =============================================================================
+# read_remote_file
+# =============================================================================
+
+
+def test_read_remote_file_missing_file_returns_none(conn, tmp_path):
+    """A missing remote file (e.g. a first deploy's live manifest) is absent,
+    not fatal: the download raises ``UploadError`` (a ``cappa.Exit``, i.e. a
+    ``SystemExit``), which must not escape as an exception."""
+    from fujin.errors import UploadError
+
+    conn.get.side_effect = UploadError("Download failed for manifest.json")
+
+    assert (
+        serverops.read_remote_file(conn, "/opt/fujin/app/current/manifest.json") is None
+    )
+
+
+def test_read_remote_file_fatal_message(conn):
+    from fujin.errors import UploadError
+
+    conn.get.side_effect = UploadError("nope")
+
+    with pytest.raises(cappa.Exit) as excinfo:
+        serverops.read_remote_file(conn, "/missing", fatal="Cannot read unit")
+
+    assert excinfo.value.code == 1
+    assert excinfo.value.message == "Cannot read unit"

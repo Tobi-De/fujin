@@ -25,7 +25,13 @@ from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
 from fujin.config import get_git_short_hash
-from fujin.errors import DeploymentError, ImproperlyConfiguredError
+from fujin.errors import CommandError, DeploymentError, ImproperlyConfiguredError
+from fujin.exit_codes import (
+    EXIT_DEPLOY_FAILED,
+    EXIT_DEPLOY_ROLLED_BACK,
+    EXIT_ROLLBACK_FAILED,
+    EXIT_USER_ABORTED,
+)
 from fujin.formatting import safe_format
 from fujin.redaction import clear_secrets, redact, register_secrets
 from fujin.secrets import (
@@ -37,8 +43,6 @@ from fujin.secrets import (
 from rich.prompt import Confirm
 
 logger = logging.getLogger(__name__)
-
-EXIT_SERVICE_START_FAILED = 3
 
 #: Fallback readiness window (tier 1): a unit must reach ``active`` within
 #: this many seconds of the restart, regardless of any probe configuration.
@@ -364,9 +368,10 @@ class Deploy(BaseCommand):
         except DeploymentError as exc:
             raw = str(exc.message)
             wrapped = redact(raw)
-            # If the value only lived in the original exception's message,
-            # the cause chain must not carry it into tracebacks either.
-            raise DeploymentError(wrapped) from (exc if wrapped == raw else None)
+            # Preserve the taxonomy code (e.g. 4 for build failures).
+            raise DeploymentError(wrapped, code=exc.code) from (
+                exc if wrapped == raw else None
+            )
         except cappa.Exit as exc:
             # Build failures surface as cappa.Exit too (BuildError derives
             # from it): preserve the exit code, but never echo a secret
@@ -460,6 +465,28 @@ class Deploy(BaseCommand):
                     (staging_dir / name).unlink()
                 except OSError:  # pragma: no cover - best effort
                     pass
+
+    def _cleanup_staging(self, conn, remote_staging: str) -> None:
+        """Remove the remote staging tree, never masking the real failure.
+
+        Called from the ``_transfer_and_activate`` exception handlers: a
+        cleanup error (e.g. the transport died) must not replace the
+        ``DeploymentError``/``cappa.Exit`` that carries the exit-code
+        taxonomy.
+        """
+        try:
+            transfer.cleanup_staging(conn, remote_staging)
+        except (
+            cappa.Exit,
+            Exception,
+        ) as exc:  # best effort: cleanup is not the failure
+            # cappa.Exit (and thus every FujinError, e.g. ConnectionError from
+            # a dead transport) derives from SystemExit, not Exception, so it
+            # must be caught explicitly: it must not replace the original
+            # failure's taxonomy code.
+            logger.warning(
+                "Failed to clean up staging directory %s: %s", remote_staging, exc
+            )
 
     def _transfer_and_activate(
         self,
@@ -661,18 +688,21 @@ class Deploy(BaseCommand):
                 git_commit=get_git_short_hash(),
             )
         except DeploymentError as exc:
-            transfer.cleanup_staging(conn, remote_staging)
+            # Cleanup is best effort: the taxonomy code (3/4/5/6) of the
+            # original failure must be the one that propagates.
+            self._cleanup_staging(conn, remote_staging)
             wrapped_msg = str(exc.message)
-            raise DeploymentError(redact(wrapped_msg)) from (
+            # Preserve the taxonomy code (e.g. 5 for an unreachable host).
+            raise DeploymentError(redact(wrapped_msg), code=exc.code) from (
                 exc if redact(wrapped_msg) == wrapped_msg else None
             )
         except cappa.Exit:
             # A plain cappa.Exit (e.g. a service-start failure offering
             # rollback) carries its own exit code and is never re-wrapped.
-            transfer.cleanup_staging(conn, remote_staging)
+            self._cleanup_staging(conn, remote_staging)
             raise
         except Exception as exc:
-            transfer.cleanup_staging(conn, remote_staging)
+            self._cleanup_staging(conn, remote_staging)
             wrapped_msg = f"Deployment failed: {exc}"
             raise DeploymentError(redact(wrapped_msg)) from (
                 exc if redact(wrapped_msg) == wrapped_msg else None
@@ -1077,7 +1107,7 @@ class Deploy(BaseCommand):
         if self.no_rollback:
             raise cappa.Exit(
                 "Services failed to start. Rollback disabled via --no-rollback.",
-                code=EXIT_SERVICE_START_FAILED,
+                code=EXIT_DEPLOY_FAILED,
             )
         state = serverops.read_state(conn, self.config.app_dir)
         # state.json is only written AFTER a successful deploy, so on a
@@ -1089,12 +1119,12 @@ class Deploy(BaseCommand):
             raise cappa.Exit(
                 "Services failed to start and there is no previous release to"
                 " roll back to.",
-                code=EXIT_SERVICE_START_FAILED,
+                code=EXIT_DEPLOY_FAILED,
             )
         if not (self.no_input or self._confirm_rollback()):
             raise cappa.Exit(
                 "Services failed to start; rollback cancelled.",
-                code=EXIT_SERVICE_START_FAILED,
+                code=EXIT_USER_ABORTED,
             )
         self._auto_rollback(conn, prev_digest)
 
@@ -1112,9 +1142,29 @@ class Deploy(BaseCommand):
             return False
 
     def _auto_rollback(self, conn, prev_digest: str) -> None:
-        """Swap back to the previous release, reinstall its units, restart it,
-        record the failure in state, and exit 3."""
+        """Swap back to the previous release, reinstall its units and restart it.
+
+        Exits 3 when the rollback completed, 6 when any rollback step failed
+        (a failed rollback never falls back further).
+        """
         self._rolling_back = True
+        try:
+            self._auto_rollback_steps(conn, prev_digest)
+        except cappa.Exit as exc:
+            message = str(exc.message) if exc.message else "Auto-rollback failed."
+            raise cappa.Exit(redact(message), code=EXIT_ROLLBACK_FAILED) from None
+        except Exception as exc:
+            raise cappa.Exit(
+                redact(f"Auto-rollback failed: {exc}"),
+                code=EXIT_ROLLBACK_FAILED,
+            ) from exc
+        raise cappa.Exit(
+            f"Deployment failed; rolled back to release {prev_digest}.",
+            code=EXIT_DEPLOY_ROLLED_BACK,
+        )
+
+    def _auto_rollback_steps(self, conn, prev_digest: str) -> None:
+        """Perform the rollback to *prev_digest*; raises on any failure."""
         self.output.warning("Rolling back to the previous release...")
         app_dir = self.config.app_dir
         prev_path = f"{app_dir}/releases/{prev_digest}"
@@ -1124,7 +1174,7 @@ class Deploy(BaseCommand):
             raise cappa.Exit(
                 f"Auto-rollback failed: previous release {prev_digest} is"
                 " incomplete (no manifest.json); inspect the server manually.",
-                code=EXIT_SERVICE_START_FAILED,
+                code=EXIT_ROLLBACK_FAILED,
             )
         prev_manifest = m.decode_manifest(prev_raw)
 
@@ -1172,10 +1222,16 @@ class Deploy(BaseCommand):
             and (name := serverops.unit_rel_name(path)).endswith(".service")
         )
         if specs:
-            conn.run(
+            _out, restarted = conn.run(
                 f"sudo systemctl restart --quiet {' '.join(serverops.q(s) for s in specs)}",
                 warn=True,
             )
+            if not restarted:
+                raise cappa.Exit(
+                    "Auto-rollback failed while restarting the previous"
+                    " release's services; inspect the server manually.",
+                    code=EXIT_ROLLBACK_FAILED,
+                )
             self._converge(conn, prev_manifest)
 
         state = serverops.read_state(conn, app_dir)
@@ -1190,10 +1246,6 @@ class Deploy(BaseCommand):
             self.config.app_name,
             "rollback",
             host=self.selected_host.name or self.selected_host.address,
-        )
-        raise cappa.Exit(
-            f"Deployment failed; rolled back to release {prev_digest}.",
-            code=EXIT_SERVICE_START_FAILED,
         )
 
     # =======================================================================================
@@ -1264,6 +1316,12 @@ class Deploy(BaseCommand):
         if not commands:
             return
         label = phase.replace("_", "-")
+        # ``post_start`` runs after ``swap_current`` and after the services
+        # were probed healthy: the deployment IS live, so a failing hook
+        # warns and the deploy still succeeds. Everything before that point
+        # is fatal (nothing is live yet for ``pre_install``; a committed but
+        # not-yet-activated release for ``post_install``).
+        fatal = phase != "post_start"
         self.output.info(f"Running {label} hooks...")
 
         if release_path is None:
@@ -1302,7 +1360,30 @@ class Deploy(BaseCommand):
             if cwd:
                 full_cmd += f"cd {serverops.q(cwd)} && "
             full_cmd += cmd
-            conn.run(full_cmd, pty=True)
+            try:
+                _out, ok = conn.run(full_cmd, pty=True)
+            except CommandError as exc:
+                if not fatal:
+                    self.output.warning(
+                        f"{label} hook '{raw}' failed: {exc.message} -"
+                        " the release is already live; continuing."
+                    )
+                    return
+                raise DeploymentError(
+                    f"{label} hook '{raw}' failed: {exc.message}",
+                    code=EXIT_DEPLOY_FAILED,
+                ) from None
+            if not ok:
+                if not fatal:
+                    self.output.warning(
+                        f"{label} hook '{raw}' failed (non-zero exit status) -"
+                        " the release is already live; continuing."
+                    )
+                    return
+                raise DeploymentError(
+                    f"{label} hook '{raw}' failed (non-zero exit status).",
+                    code=EXIT_DEPLOY_FAILED,
+                )
 
     # =======================================================================================
     # Secrets

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fujin.errors import DeploymentError
+from fujin.exit_codes import EXIT_HOST_UNREACHABLE
 
 if TYPE_CHECKING:
     from fujin.connection import SSH2Connection
@@ -64,6 +65,9 @@ class TransferError(DeploymentError):
 
 class HostUnreachableError(TransferError):
     """Distinct marker: the remote host could not be reached at all."""
+
+    def __init__(self, message: str, code: int = EXIT_HOST_UNREACHABLE, **kwargs: Any):
+        super().__init__(message, code=code, **kwargs)
 
 
 class RsyncUnavailableError(TransferError):

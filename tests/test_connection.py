@@ -7,9 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import cappa
 import pytest
+from ssh2.exceptions import SSH2Error
 
 from fujin.config import HostConfig
 from fujin.connection import SSH2Connection
+from fujin.errors import CommandError, ConnectionError
+from fujin.exit_codes import EXIT_HOST_UNREACHABLE
 
 
 @pytest.fixture
@@ -169,6 +172,79 @@ def test_hide_parameter_accepts_out_and_err_values(connection, mock_ssh_componen
     stdout, success = connection.run("echo world", hide="err")
     assert stdout == "world"
     assert success is True
+
+
+# ============================================================================
+# Transport loss -> exit code 5 (never CommandError)
+# ============================================================================
+
+
+def test_wedged_channel_raises_connection_error(connection, mock_ssh_components):
+    """A channel that makes no progress is transport loss (5), not a
+    negative remote exit status."""
+    _, mock_channel, _ = mock_ssh_components
+    mock_channel.eof.return_value = False
+
+    with pytest.raises(ConnectionError) as excinfo:
+        connection.run("sleep forever", hide=True, idle_timeout=0)
+
+    assert excinfo.value.code == EXIT_HOST_UNREACHABLE
+    # Cleanup still closed the channel.
+    mock_channel.close.assert_called()
+
+
+def test_mid_command_eof_with_negative_exit_status_is_connection_error(
+    connection, mock_ssh_components
+):
+    """libssh2 reports a negative status when the channel died before the
+    remote exit status arrived: that is transport loss."""
+    _, mock_channel, _ = mock_ssh_components
+    mock_channel.get_exit_status.return_value = -1
+
+    with pytest.raises(ConnectionError) as excinfo:
+        connection.run("echo hi", hide=True)
+
+    assert excinfo.value.code == EXIT_HOST_UNREACHABLE
+
+
+def test_libssh2_failure_while_reading_is_connection_error(
+    connection, mock_ssh_components
+):
+    _, mock_channel, _ = mock_ssh_components
+    mock_channel.read.side_effect = SSH2Error("socket disconnected")
+
+    with pytest.raises(ConnectionError) as excinfo:
+        connection.run("echo hi", hide=True)
+
+    assert excinfo.value.code == EXIT_HOST_UNREACHABLE
+
+
+def test_cleanup_failure_does_not_mask_transport_error(connection, mock_ssh_components):
+    """The finally-block cleanup is best effort: a throwing close must not
+    replace the ConnectionError carrying code 5."""
+    _, mock_channel, _ = mock_ssh_components
+    mock_channel.read.side_effect = SSH2Error("socket disconnected")
+    mock_channel.wait_closed.side_effect = RuntimeError("cleanup exploded")
+
+    with pytest.raises(ConnectionError) as excinfo:
+        connection.run("echo hi", hide=True)
+
+    assert excinfo.value.code == EXIT_HOST_UNREACHABLE
+
+
+def test_cleanup_failure_does_not_mask_remote_exit_status(
+    connection, mock_ssh_components
+):
+    """A genuine remote non-zero exit keeps its status even when cleanup
+    raises."""
+    _, mock_channel, _ = mock_ssh_components
+    mock_channel.get_exit_status.return_value = 7
+    mock_channel.close.side_effect = RuntimeError("close exploded")
+
+    with pytest.raises(CommandError) as excinfo:
+        connection.run("false", hide=True)
+
+    assert excinfo.value.code == 7
 
 
 # ============================================================================

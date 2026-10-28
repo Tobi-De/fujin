@@ -11,6 +11,8 @@ from fujin import connection
 from fujin import serverops, store, transfer
 from fujin.audit import log_operation
 from fujin.commands import BaseCommand
+from fujin.errors import CommandError
+from fujin.exit_codes import EXIT_OK, EXIT_ROLLBACK_FAILED, EXIT_USER_ABORTED
 from fujin.manifest import Manifest, decode_manifest, manifest_to_dict
 from fujin.store import (
     desired_instances,
@@ -94,7 +96,7 @@ class Rollback(BaseCommand):
             "Deploy once with this version of fujin to migrate"
             " (the migration is non-destructive).\n"
             f"Then `fujin rollback` becomes available.{old_note}",
-            code=1,
+            code=EXIT_USER_ABORTED,
         )
 
     def _release_path(self, digest: str) -> str:
@@ -161,7 +163,7 @@ class Rollback(BaseCommand):
                 self.output.info(
                     "The requested release is already the current release."
                 )
-                raise cappa.Exit(code=0)
+                raise cappa.Exit(code=EXIT_OK)
             return target
 
         if self.previous:
@@ -169,7 +171,7 @@ class Rollback(BaseCommand):
                 raise cappa.Exit(
                     "No previous release found in the release store.\n"
                     "At least two deploys are required before a rollback.",
-                    code=1,
+                    code=EXIT_USER_ABORTED,
                 )
             return state.previous[0]
 
@@ -191,7 +193,7 @@ class Rollback(BaseCommand):
                 f"Release '{target}' is not available on the server - it was"
                 " pruned when old releases were garbage-collected.\nRedeploy"
                 " the old commit/tag instead.",
-                code=1,
+                code=EXIT_USER_ABORTED,
             )
         _, exists = conn.run(
             f"test -f {serverops.q(f'{self._release_path(target)}/manifest.json')}",
@@ -203,7 +205,7 @@ class Rollback(BaseCommand):
                 f"Release directory '{target}' exists but is incomplete (no"
                 " manifest.json) - it cannot be activated. Re-run"
                 " `fujin deploy --force` to rebuild it.",
-                code=1,
+                code=EXIT_USER_ABORTED,
             )
         return target
 
@@ -237,13 +239,13 @@ class Rollback(BaseCommand):
             raise cappa.Exit(
                 f"No kept release with version '{version}' on the server"
                 " (it may be garbage-collected).",
-                code=1,
+                code=EXIT_USER_ABORTED,
             )
         if len(candidates) > 1:
             raise cappa.Exit(
                 f"Version '{version}' is ambiguous; multiple releases carry it:"
                 f" {', '.join(candidates)} -- pass the digest instead.",
-                code=1,
+                code=EXIT_USER_ABORTED,
             )
         return self._check_digest_target(conn, candidates[0])
 
@@ -270,10 +272,10 @@ class Rollback(BaseCommand):
                 raise cappa.Exit(
                     "No rollback targets are available (no kept releases besides"
                     " the current one).",
-                    code=1,
+                    code=EXIT_USER_ABORTED,
                 )
             self.output.info("No previous versions available for rollback")
-            raise cappa.Exit(code=0)
+            raise cappa.Exit(code=EXIT_OK)
 
         self.output.output("Available rollback targets:")
         for i, digest in enumerate(candidates, 1):
@@ -288,12 +290,31 @@ class Rollback(BaseCommand):
             )
         except KeyboardInterrupt:
             self.output.info("Rollback cancelled.")
-            raise cappa.Exit(code=1) from None
+            raise cappa.Exit(code=EXIT_USER_ABORTED) from None
         return candidates[index - 1]
 
     # ------------------------------------------------------------------
     # Rollback execution
     # ------------------------------------------------------------------
+
+    def _activation_step(self, description: str, func, *args) -> None:
+        """Run an activation step, classifying any failure as exit code 6.
+
+        Every step after the target release is chosen is past the point of
+        no return: the ``current`` symlink may already point at the target.
+        A failure here is never a user error (1) or a plain deploy failure
+        (4) - the server state needs manual inspection.
+        """
+        try:
+            func(*args)
+        except (transfer.TransferError, serverops.ServerOpsError, CommandError) as exc:
+            message = getattr(exc, "message", None) or str(exc)
+            raise cappa.Exit(
+                f"Rollback failed while {description}: {message}\n"
+                "The server may be in a partially rolled back state and needs"
+                " manual inspection; fujin does not attempt a second rollback.",
+                code=EXIT_ROLLBACK_FAILED,
+            ) from None
 
     def _perform_rollback(self, conn) -> None:
         app_dir = self.config.app_dir
@@ -303,7 +324,7 @@ class Rollback(BaseCommand):
             raise cappa.Exit(
                 "No release store state found (store/state.json missing or"
                 " empty). Deploy at least once with this version of fujin.",
-                code=1,
+                code=EXIT_USER_ABORTED,
             )
 
         current_manifest = serverops.read_current_manifest(conn, app_dir)
@@ -311,7 +332,7 @@ class Rollback(BaseCommand):
             raise cappa.Exit(
                 "The live release's manifest could not be read - the release"
                 " tree is incomplete.",
-                code=1,
+                code=EXIT_USER_ABORTED,
             )
 
         releases = self._list_releases(conn)
@@ -331,21 +352,53 @@ class Rollback(BaseCommand):
             to_version=target_manifest.version,
         )
 
-        transfer.swap_current(conn, app_dir, target)
+        self._activation_step(
+            "swapping the current release symlink",
+            transfer.swap_current,
+            conn,
+            app_dir,
+            target,
+        )
 
         unit_files, dropins, oneshots = self._collect_units(
             conn, target_path, target_manifest
         )
         if unit_files or dropins:
-            serverops.install_units(conn, self.config.app_name, unit_files, dropins)
+            self._activation_step(
+                "installing the target release's systemd units",
+                serverops.install_units,
+                conn,
+                self.config.app_name,
+                unit_files,
+                dropins,
+            )
 
-        self._converge(conn, target_manifest)
-        self._restart(conn, current_manifest, target_manifest, unit_files, oneshots)
+        self._activation_step(
+            "converging replica instances",
+            self._converge,
+            conn,
+            target_manifest,
+        )
+        self._activation_step(
+            "restarting the target release's units",
+            self._restart,
+            conn,
+            current_manifest,
+            target_manifest,
+            unit_files,
+            oneshots,
+        )
         self._install_caddyfile(conn, target_path, target_manifest)
 
         at = datetime.now(UTC).isoformat()
         new_state = record_rollback(state, target, at)
-        serverops.write_state(conn, app_dir, new_state)
+        self._activation_step(
+            "recording the rollback state",
+            serverops.write_state,
+            conn,
+            app_dir,
+            new_state,
+        )
         self._gc(conn, new_state, releases)
 
         self.output.success(f"Rollback to release {target} completed successfully!")
@@ -363,7 +416,8 @@ class Rollback(BaseCommand):
             return decode_manifest(raw)
         except Exception as exc:
             raise cappa.Exit(
-                f"Release '{target}' manifest is corrupt: {exc}", code=1
+                f"Release '{target}' manifest is corrupt: {exc}",
+                code=EXIT_USER_ABORTED,
             ) from None
 
     def _verify_target(
@@ -373,7 +427,10 @@ class Rollback(BaseCommand):
             conn, target_path, manifest_to_dict(manifest, include_created_at=False)
         )
         if not result.ok:
-            raise cappa.Exit(transfer.verify_report(target_path, result), code=1)
+            raise cappa.Exit(
+                transfer.verify_report(target_path, result),
+                code=EXIT_USER_ABORTED,
+            )
 
     # ------------------------------------------------------------------
     # Units + services
@@ -394,7 +451,7 @@ class Rollback(BaseCommand):
             raise cappa.Exit(
                 "Cannot read unit file(s) "
                 f"'{', '.join(failed)}' from the target release tree.",
-                code=1,
+                code=EXIT_ROLLBACK_FAILED,
             )
         return unit_files, dropins, oneshots
 
@@ -434,13 +491,13 @@ class Rollback(BaseCommand):
             raise cappa.Exit(
                 "Rollback failed while stopping extra service instances"
                 " (no nested rollback is attempted); inspect the server state.",
-                code=1,
+                code=EXIT_ROLLBACK_FAILED,
             )
         if start and not serverops.enable_and_start(conn, start):
             raise cappa.Exit(
                 "Rollback failed while starting missing service instances"
                 " (no nested rollback is attempted); inspect the server state.",
-                code=1,
+                code=EXIT_ROLLBACK_FAILED,
             )
 
     def _restart(
@@ -474,7 +531,7 @@ class Rollback(BaseCommand):
             raise cappa.Exit(
                 "Rollback failed while restarting services (no nested rollback is"
                 " attempted); inspect the application for a failed state.",
-                code=1,
+                code=EXIT_ROLLBACK_FAILED,
             )
 
     def _install_caddyfile(self, conn, target_path: str, manifest: Manifest) -> None:

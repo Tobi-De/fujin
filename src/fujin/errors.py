@@ -4,23 +4,36 @@ from typing import Any
 
 import cappa
 
+from fujin.exit_codes import (
+    EXIT_DEPLOY_FAILED,
+    EXIT_HOST_UNREACHABLE,
+    EXIT_USER_ABORTED,
+)
+
 
 class FujinError(cappa.Exit):
     """Base class for all Fujin errors that exit the program."""
 
-    def __init__(self, message: str, code: int = 1, **kwargs: Any):
+    def __init__(self, message: str, code: int = EXIT_USER_ABORTED, **kwargs: Any):
         super().__init__(message, code=code, **kwargs)
 
 
 class DeploymentError(FujinError):
-    """Base class for deployment-related errors."""
+    """Base class for deployment-related errors (nothing was activated)."""
+
+    def __init__(self, message: str, code: int = EXIT_DEPLOY_FAILED, **kwargs: Any):
+        super().__init__(message, code=code, **kwargs)
 
 
 class BuildError(DeploymentError):
     """Build command failed."""
 
     def __init__(
-        self, message: str, command: str | None = None, code: int = 1, **kwargs: Any
+        self,
+        message: str,
+        command: str | None = None,
+        code: int = EXIT_DEPLOY_FAILED,
+        **kwargs: Any,
     ):
         super().__init__(message, code=code, **kwargs)
         self.command = command
@@ -33,7 +46,7 @@ class UploadError(DeploymentError):
         self,
         message: str,
         checksum_mismatch: bool = False,
-        code: int = 1,
+        code: int = EXIT_DEPLOY_FAILED,
         **kwargs: Any,
     ):
         super().__init__(message, code=code, **kwargs)
@@ -48,7 +61,7 @@ class SecretResolutionError(FujinError):
         message: str,
         adapter: str | None = None,
         key: str | None = None,
-        code: int = 1,
+        code: int = EXIT_DEPLOY_FAILED,
         **kwargs: Any,
     ):
         super().__init__(message, code=code, **kwargs)
@@ -57,15 +70,18 @@ class SecretResolutionError(FujinError):
 
 
 class SSHKeyError(FujinError):
-    """SSH key generation or copying failed."""
+    """SSH key generation or copying failed (user error)."""
 
 
 class SSHAuthenticationError(FujinError):
-    """SSH authentication failed."""
+    """SSH authentication failed (host/credential problem)."""
+
+    def __init__(self, message: str, code: int = EXIT_HOST_UNREACHABLE, **kwargs: Any):
+        super().__init__(message, code=code, **kwargs)
 
 
 class ImproperlyConfiguredError(FujinError):
-    """Fujin is improperly configured."""
+    """Fujin is improperly configured (user error)."""
 
 
 class ServiceDiscoveryError(FujinError):
@@ -73,7 +89,10 @@ class ServiceDiscoveryError(FujinError):
 
 
 class ConnectionError(FujinError):
-    """SSH connection and communication errors."""
+    """SSH connection and communication errors (host unreachable)."""
+
+    def __init__(self, message: str, code: int = EXIT_HOST_UNREACHABLE, **kwargs: Any):
+        super().__init__(message, code=code, **kwargs)
 
 
 class CommandError(FujinError):

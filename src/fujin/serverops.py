@@ -111,7 +111,11 @@ def read_remote_file(conn: Any, path: str, *, fatal: str | None = None) -> str |
     try:
         try:
             conn.get(path, tmp_path)
-        except Exception:
+        except (Exception, cappa.Exit):
+            # ``cappa.Exit`` derives from ``SystemExit``, not ``Exception``:
+            # the transport raises ``UploadError`` for a missing/unreadable
+            # file (a first deploy has no live manifest), which must mean
+            # "absent" here, not abort the deploy.
             if fatal:
                 raise cappa.Exit(fatal, code=1) from None
             return None

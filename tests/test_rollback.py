@@ -21,6 +21,7 @@ import fujin.connection
 import fujin.serverops
 import fujin.transfer
 from fujin.commands.rollback import Rollback
+from fujin.exit_codes import EXIT_OK, EXIT_ROLLBACK_FAILED, EXIT_USER_ABORTED
 from fujin.manifest import build_manifest, manifest_to_dict
 from fujin.store import DeployRecord, State
 
@@ -266,7 +267,7 @@ def test_previous_flag_missing_previous_errors(monkeypatch, minimal_config):
         current_manifest=current,
         previous=True,
     )
-    assert exit_code_of(lambda: cmd()) == 1
+    assert exit_code_of(lambda: cmd()) == EXIT_USER_ABORTED
 
 
 # ===========================================================================
@@ -327,7 +328,7 @@ def test_to_digest_gc_release_hard_error(monkeypatch, minimal_config):
         current_manifest=current,
         to="zz-pruned",
     )
-    assert exit_code_of(lambda: cmd()) == 1
+    assert exit_code_of(lambda: cmd()) == EXIT_USER_ABORTED
     swap_current.assert_not_called()
 
 
@@ -343,7 +344,7 @@ def test_to_current_digest_is_noop(monkeypatch, minimal_config):
         current_manifest=current,
         to="b-digest",
     )
-    assert exit_code_of(lambda: cmd()) == 0
+    assert exit_code_of(lambda: cmd()) == EXIT_OK
     swap_current.assert_not_called()
 
 
@@ -394,7 +395,7 @@ def test_no_targets_info_message_non_strict(monkeypatch, minimal_config):
         current_manifest=current,
         strict=False,
     )
-    assert exit_code_of(lambda: cmd()) == 0
+    assert exit_code_of(lambda: cmd()) == EXIT_OK
 
 
 def test_strict_no_targets_errors(monkeypatch, minimal_config):
@@ -415,7 +416,7 @@ def test_strict_no_targets_errors(monkeypatch, minimal_config):
         current_manifest=current,
         strict=True,
     )
-    assert exit_code_of(lambda: cmd()) == 1
+    assert exit_code_of(lambda: cmd()) == EXIT_USER_ABORTED
 
 
 # ===========================================================================
@@ -428,7 +429,7 @@ def test_old_layout_without_store_dir_errors(monkeypatch, minimal_config):
     cmd, *_ = setup_rollback(
         monkeypatch, minimal_config, conn, state=None, current_manifest=None
     )
-    assert exit_code_of(lambda: cmd()) == 1
+    assert exit_code_of(lambda: cmd()) == EXIT_USER_ABORTED
 
 
 def test_missing_state_errors(monkeypatch, minimal_config):
@@ -436,7 +437,7 @@ def test_missing_state_errors(monkeypatch, minimal_config):
     cmd, *_ = setup_rollback(
         monkeypatch, minimal_config, conn, state=None, current_manifest=None
     )
-    assert exit_code_of(lambda: cmd()) == 1
+    assert exit_code_of(lambda: cmd()) == EXIT_USER_ABORTED
 
 
 # ===========================================================================
@@ -456,7 +457,7 @@ def test_verify_failure_aborts_before_swap(monkeypatch, minimal_config):
         current_manifest=current,
         verify_ok=False,
     )
-    assert exit_code_of(lambda: cmd()) == 1
+    assert exit_code_of(lambda: cmd()) == EXIT_USER_ABORTED
     swap_current.assert_not_called()
     write_state.assert_not_called()
 
@@ -479,9 +480,52 @@ def test_restart_failure_is_loud_and_no_recursion(monkeypatch, minimal_config):
     cmd, write_state, swap_current, _v, _iu = setup_rollback(
         monkeypatch, minimal_config, conn, state=state, current_manifest=current
     )
-    assert exit_code_of(lambda: cmd()) == 1
+    assert exit_code_of(lambda: cmd()) == EXIT_ROLLBACK_FAILED
     swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "a-digest")
     write_state.assert_not_called()
+
+
+def test_swap_current_failure_exits_6(monkeypatch, minimal_config):
+    """A failure after the target is chosen is past the point of no return:
+    a TransferError from swap_current is a failed rollback (6), never 1/4."""
+    conn = FakeConn(DEFAULT_CONN_RESPONSES)
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, write_state, swap_current, _v, _iu = setup_rollback(
+        monkeypatch, minimal_config, conn, state=state, current_manifest=current
+    )
+    swap_current.side_effect = fujin.transfer.TransferError("cannot swap")
+
+    assert exit_code_of(lambda: cmd()) == EXIT_ROLLBACK_FAILED
+    write_state.assert_not_called()
+
+
+def test_install_units_failure_exits_6(monkeypatch, minimal_config):
+    """install_units raises ServerOpsError: the rollback failed (6)."""
+    conn = FakeConn(DEFAULT_CONN_RESPONSES)
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, write_state, swap_current, _v, install_units = setup_rollback(
+        monkeypatch, minimal_config, conn, state=state, current_manifest=current
+    )
+    install_units.side_effect = fujin.serverops.ServerOpsError("daemon-reload failed")
+
+    assert exit_code_of(lambda: cmd()) == EXIT_ROLLBACK_FAILED
+    swap_current.assert_called_once_with(conn, "/opt/fujin/testapp", "a-digest")
+    write_state.assert_not_called()
+
+
+def test_write_state_failure_exits_6(monkeypatch, minimal_config):
+    """The release is live but the state was not recorded: rollback failed."""
+    conn = FakeConn(DEFAULT_CONN_RESPONSES)
+    state = State(current="b-digest", previous=["a-digest"])
+    current = make_manifest("1.0.1", "dist-bbb")
+    cmd, write_state, _swap, _v, _iu = setup_rollback(
+        monkeypatch, minimal_config, conn, state=state, current_manifest=current
+    )
+    write_state.side_effect = fujin.serverops.ServerOpsError("Failed to write state")
+
+    assert exit_code_of(lambda: cmd()) == EXIT_ROLLBACK_FAILED
 
 
 def test_no_restart_needed_when_nothing_changed(monkeypatch, minimal_config):
@@ -730,7 +774,7 @@ def test_to_version_ignores_gc_releases(monkeypatch, minimal_config):
         to="1.0.2",
     )
     minimal_config.versions_to_keep = 2
-    assert exit_code_of(lambda: cmd()) == 1
+    assert exit_code_of(lambda: cmd()) == EXIT_USER_ABORTED
     swap_current.assert_not_called()
 
 

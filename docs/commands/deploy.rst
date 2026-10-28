@@ -94,7 +94,11 @@ Pass ``--full-restart`` to restart every unit instead.
 
 Hooks run in three phases: ``pre_install`` (old release still live),
 ``post_install`` (new release committed but not yet live; the hook's
-``{app_dir}`` resolves to the new release directory), and ``post_start``.
+``{app_dir}`` resolves to the new release directory), and ``post_start``
+(after the ``current`` symlink was swapped and services passed readiness).
+A failing ``pre_install`` or ``post_install`` hook fails the deploy (exit
+code ``4``). A failing ``post_start`` hook only warns: the release is
+already live, so the deploy still succeeds.
 
 Deployment Layout and Permissions
 ----------------------------------

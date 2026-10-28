@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from fujin import transfer
+from fujin.exit_codes import EXIT_HOST_UNREACHABLE
 from fujin.transfer import (
     HostUnreachableError,
     ItemizedChange,
@@ -265,10 +266,11 @@ class TestRsyncToStaging:
             stderr="ssh: connect to host 203.0.113.7 port 22: Connection refused",
         )
         conn = RecordingConn(host=make_host())
-        with pytest.raises(HostUnreachableError):
+        with pytest.raises(HostUnreachableError) as exc_info:
             rsync_to_staging(
                 conn, str(tmp_path), "/x/.staging-1", ignore_existing=False
             )
+        assert exc_info.value.code == EXIT_HOST_UNREACHABLE
 
     def test_rsync_generic_failure(self, tmp_path, monkeypatch):
         monkeypatch.setattr(transfer.Path, "is_dir", lambda self: True)

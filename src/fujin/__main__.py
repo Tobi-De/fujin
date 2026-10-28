@@ -27,7 +27,15 @@ else:
     import tomli as tomllib
 
 
-@cappa.command(help="Deployment of python web apps in a breeze :)")
+@cappa.command(
+    help="Deployment of python web apps in a breeze :)",
+    description=(
+        "Exit codes: 0 success; 1 user error or abort; 2 CLI usage error;"
+        " 3 deploy failed but the previous release was restored;"
+        " 4 deploy failed (nothing rolled back); 5 host unreachable or"
+        " authentication failed; 6 rollback failed."
+    ),
+)
 class Fujin:
     subcommands: cappa.Subcommands[
         Init

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Generator
 
 from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
-from ssh2.exceptions import SCPProtocolError
+from ssh2.exceptions import SCPProtocolError, SSH2Error
 from ssh2.session import (
     LIBSSH2_FLAG_COMPRESS,
     LIBSSH2_SESSION_BLOCK_INBOUND,
@@ -84,7 +84,14 @@ class SSH2Connection:
             A tuple of (stdout_output, success) where success is True if exit status was 0
 
         Raises:
-            cappa.Exit: If the command fails and warn=False
+            CommandError: The remote command exited non-zero (when
+                ``warn=False``); ``code`` carries the remote exit status.
+                ``app exec`` / ``server exec`` propagate that status
+                verbatim, so they are outside the deploy exit-code
+                taxonomy.
+            ConnectionError: The SSH transport failed mid-command (socket
+                or libssh2 error, a wedged channel, or EOF without an exit
+                status). Exit code 5.
         """
         # Interactive sessions have no output deadline: the user may think.
         if pty:
@@ -119,125 +126,192 @@ class SSH2Connection:
         # Save terminal settings if we are going to mess with them
         old_tty_attrs = None
         is_interactive = pty and sys.stdin.isatty()
+        # Set when the try block fails: cleanup then must not wait for a
+        # channel that may never reach EOF.
+        failure: BaseException | None = None
 
         try:
-            if pty:
-                channel.pty()
-            channel.execute(full_command)
-
-            # Switch to raw mode for interactive sessions to prevent local echo
-            # and handle password masking correctly.
-            if is_interactive:
-                # this redcuces latency on keystrokes
-                # self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                old_tty_attrs = termios.tcgetattr(sys.stdin)
-                tty.setraw(sys.stdin.fileno())
-
-            stdin_fd = -1
             try:
-                stdin_fd = sys.stdin.fileno()
-            except (OSError, AttributeError):
-                pass
+                if pty:
+                    channel.pty()
+                channel.execute(full_command)
 
-            sock_fd = self.sock.fileno()
+                # Switch to raw mode for interactive sessions to prevent local echo
+                # and handle password masking correctly.
+                if is_interactive:
+                    # this redcuces latency on keystrokes
+                    # self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    old_tty_attrs = termios.tcgetattr(sys.stdin)
+                    tty.setraw(sys.stdin.fileno())
 
-            poller = select.poll()
-            if stdin_fd >= 0:
-                poller.register(stdin_fd, select.POLLIN)
-            poller.register(sock_fd, select.POLLIN)
+                stdin_fd = -1
+                try:
+                    stdin_fd = sys.stdin.fileno()
+                except (OSError, AttributeError):
+                    pass
 
-            progress = [0]  # real payload bytes seen; drives the idle deadline
+                sock_fd = self.sock.fileno()
 
-            def drain_channel() -> None:
+                poller = select.poll()
+                if stdin_fd >= 0:
+                    poller.register(stdin_fd, select.POLLIN)
+                poller.register(sock_fd, select.POLLIN)
+
+                progress = [0]  # real payload bytes seen; drives the idle deadline
+
+                def drain_channel() -> None:
+                    while True:
+                        size, data = channel.read()
+                        if size == LIBSSH2_ERROR_EAGAIN:
+                            break
+                        if size < 0:
+                            # Any other negative size is a libssh2 failure
+                            # (e.g. socket disconnected), not a clean EOF.
+                            raise ConnectionError(
+                                "SSH transport failed while reading command"
+                                f" output (libssh2 error {size}):"
+                                f" {command[:120]!r}"
+                            )
+                        if size > 0:
+                            progress[0] += size
+                            text = stdout_decoder.decode(data)
+                            if not hide or hide == "err":
+                                sys.stdout.write(text)
+                                sys.stdout.flush()
+                            stdout_buffer.append(text)
+
+                        else:
+                            break
+
+                    while True:
+                        size, data = channel.read_stderr()
+                        if size == LIBSSH2_ERROR_EAGAIN:
+                            break
+                        if size < 0:
+                            raise ConnectionError(
+                                "SSH transport failed while reading command"
+                                " error output (libssh2 error"
+                                f" {size}): {command[:120]!r}"
+                            )
+                        if size > 0:
+                            progress[0] += size
+                            text = stderr_decoder.decode(data)
+                            if not hide or hide == "out":
+                                sys.stderr.write(text)
+                                sys.stderr.flush()
+                            stderr_buffer.append(text)
+                        else:
+                            break
+
                 while True:
-                    size, data = channel.read()
-                    if size == LIBSSH2_ERROR_EAGAIN:
-                        break
-                    if size > 0:
-                        progress[0] += size
-                        text = stdout_decoder.decode(data)
-                        if not hide or hide == "err":
-                            sys.stdout.write(text)
-                            sys.stdout.flush()
-                        stdout_buffer.append(text)
+                    directions = self.session.block_directions()
 
-                    else:
-                        break
+                    sock_events = select.POLLIN
+                    if directions & LIBSSH2_SESSION_BLOCK_OUTBOUND:
+                        sock_events |= select.POLLOUT
+                    poller.modify(sock_fd, sock_events)
 
-                while True:
-                    size, data = channel.read_stderr()
-                    if size == LIBSSH2_ERROR_EAGAIN:
-                        break
-                    if size > 0:
-                        progress[0] += size
-                        text = stderr_decoder.decode(data)
-                        if not hide or hide == "out":
-                            sys.stderr.write(text)
-                            sys.stderr.flush()
-                        stderr_buffer.append(text)
-                    else:
-                        break
+                    ready = poller.poll(250)
 
-            while True:
-                directions = self.session.block_directions()
-
-                sock_events = select.POLLIN
-                if directions & LIBSSH2_SESSION_BLOCK_OUTBOUND:
-                    sock_events |= select.POLLOUT
-                poller.modify(sock_fd, sock_events)
-
-                ready = poller.poll(250)
-
-                for fd, event in ready:
-                    if fd == stdin_fd and event & select.POLLIN:
-                        try:
-                            data = os.read(stdin_fd, 8192)
-                            if data:
-                                rc, _ = channel.write(data)
-                                while rc == LIBSSH2_ERROR_EAGAIN:
-                                    poller.modify(sock_fd, select.POLLOUT)
-                                    poller.poll(100)
+                    for fd, event in ready:
+                        if fd == stdin_fd and event & select.POLLIN:
+                            try:
+                                data = os.read(stdin_fd, 8192)
+                                if data:
                                     rc, _ = channel.write(data)
-                        except BlockingIOError:
-                            pass
+                                    while rc == LIBSSH2_ERROR_EAGAIN:
+                                        poller.modify(sock_fd, select.POLLOUT)
+                                        poller.poll(100)
+                                        rc, _ = channel.write(data)
+                                    if rc < 0:
+                                        raise ConnectionError(
+                                            "SSH transport failed while writing"
+                                            " to the command channel (libssh2"
+                                            f" error {rc}): {command[:120]!r}"
+                                        )
+                            except BlockingIOError:
+                                pass
 
-                    if fd == sock_fd and event & (
-                        select.POLLIN | select.POLLERR | select.POLLHUP
-                    ):
+                        if fd == sock_fd and event & (
+                            select.POLLIN | select.POLLERR | select.POLLHUP
+                        ):
+                            drain_channel()
+                            if idle_timeout is not None:
+                                idle_deadline = time.monotonic() + idle_timeout
+
+                    if directions & LIBSSH2_SESSION_BLOCK_INBOUND:
+                        seen = progress[0]
                         drain_channel()
-                        if idle_timeout is not None:
+                        if progress[0] != seen and idle_timeout is not None:
                             idle_deadline = time.monotonic() + idle_timeout
 
-                if directions & LIBSSH2_SESSION_BLOCK_INBOUND:
-                    seen = progress[0]
-                    drain_channel()
-                    if progress[0] != seen and idle_timeout is not None:
-                        idle_deadline = time.monotonic() + idle_timeout
+                    if channel.eof():
+                        break
 
-                if channel.eof():
-                    break
-
-                if (
-                    idle_deadline is not None
-                    and time.monotonic() > idle_deadline
-                    and not channel.eof()
-                ):
-                    raise CommandError(
-                        f"Remote command made no progress for {idle_timeout}s"
-                        " and never reached EOF; the SSH channel looks wedged:"
-                        f" {command[:120]!r}",
-                        code=-1,
-                    )
-
+                    if (
+                        idle_deadline is not None
+                        and time.monotonic() > idle_deadline
+                        and not channel.eof()
+                    ):
+                        # A channel that makes no progress is transport loss,
+                        # not a remote failure: the remote exit status is
+                        # unknown (5, not the deploy taxonomy's 4).
+                        raise ConnectionError(
+                            f"Remote command made no progress for {idle_timeout}s"
+                            " and never reached EOF; the SSH channel was lost"
+                            f" or is wedged: {command[:120]!r}"
+                        )
+            except (SSH2Error, OSError) as exc:
+                # libssh2 and socket failures while reading/writing the
+                # channel are transport loss: exit code 5.
+                raise ConnectionError(
+                    f"SSH transport failed while running {command[:120]!r}: {exc}"
+                ) from exc
+        except BaseException as exc:
+            failure = exc
+            raise
         finally:
+            # Cleanup is best-effort: it must never mask the original
+            # exception (which carries the exit-code taxonomy) and must not
+            # block forever on a channel whose transport is gone.
             if old_tty_attrs:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty_attrs)
-            self.session.set_blocking(True)
-            channel.wait_eof()
-            channel.close()
-            channel.wait_closed()
+                try:
+                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty_attrs)
+                except Exception:
+                    logger.debug("Failed to restore terminal attributes", exc_info=True)
+            try:
+                self.session.set_blocking(True)
+            except Exception:
+                logger.debug("set_blocking(True) failed", exc_info=True)
+            if failure is None:
+                try:
+                    channel.wait_eof()
+                except Exception:
+                    logger.debug("wait_eof failed during cleanup", exc_info=True)
+            try:
+                channel.close()
+            except Exception:
+                logger.debug("channel.close failed during cleanup", exc_info=True)
+            try:
+                channel.wait_closed()
+            except Exception:
+                logger.debug("channel.wait_closed failed during cleanup", exc_info=True)
 
-        exit_status = channel.get_exit_status()
+        try:
+            exit_status = channel.get_exit_status()
+        except (SSH2Error, OSError) as exc:
+            raise ConnectionError(
+                "SSH transport failed before the remote exit status was"
+                f" received: {command[:120]!r}: {exc}"
+            ) from exc
+        if exit_status < 0:
+            # libssh2 reports a negative status when the channel died before
+            # the remote side sent an exit status (mid-command transport
+            # loss). A genuine remote failure is a non-negative status.
+            raise ConnectionError(
+                "SSH transport failed mid-command (no exit status received,"
+                f" libssh2 status {exit_status}): {command[:120]!r}"
+            )
         if exit_status != 0 and not warn:
             raise CommandError(
                 f"Command failed with exit code {exit_status}", code=exit_status

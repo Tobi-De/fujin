@@ -7,6 +7,7 @@ import re
 import sys
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 import msgspec
 
@@ -35,13 +36,26 @@ class InstallationMode(StrEnum):
 
 class SecretConfig(msgspec.Struct, forbid_unknown_fields=True):
     adapter: str
-    options: dict[str, str] = msgspec.field(default_factory=dict)
+    # Adapter options are passed through verbatim: adapters define their own
+    # keys, and some accept lists (e.g. the bitwarden adapter's ``folders``).
+    # ``__post_init__`` keeps the value shapes meaningful (scalars and
+    # homogeneous string lists only).
+    options: dict[str, Any] = msgspec.field(default_factory=dict)
 
     def __post_init__(self):
         if not re.match(r"^[a-z0-9_-]+$", self.adapter):
             raise ImproperlyConfiguredError(
                 f"Invalid adapter name '{self.adapter}'. "
                 "Adapter names must be lowercase alphanumeric with hyphens or underscores."
+            )
+        for name, value in self.options.items():
+            if isinstance(value, str):
+                continue
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                continue
+            raise ImproperlyConfiguredError(
+                f"Invalid value for secret option '{name}': expected a string "
+                f"or a list of strings, got {type(value).__name__}."
             )
 
 

@@ -25,6 +25,13 @@ from fujin.build import BuildResult
 from fujin.commands.deploy import Deploy
 from fujin.config import HealthCheckConfig
 from fujin.errors import DeploymentError, ImproperlyConfiguredError
+from fujin.exit_codes import (
+    EXIT_DEPLOY_FAILED,
+    EXIT_DEPLOY_ROLLED_BACK,
+    EXIT_HOST_UNREACHABLE,
+    EXIT_ROLLBACK_FAILED,
+    EXIT_USER_ABORTED,
+)
 import fujin.redaction
 from fujin.manifest import InputFile, build_manifest, manifest_to_dict
 from fujin.store import State
@@ -745,7 +752,7 @@ def test_hook_commands_interpolate_app_dir_to_new_release(
 
 
 # ===========================================================================
-# Start failure / auto rollback (existing exit-3 contract)
+# Start failure / auto rollback (exit-code taxonomy: 3/4/6)
 # ===========================================================================
 
 
@@ -775,7 +782,7 @@ def test_service_start_failure_auto_rolls_back_and_exits_3(
     cmd, spies = _setup_failing_deploy(
         monkeypatch, minimal_config, tmp_path, no_rollback=False
     )
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_ROLLED_BACK
 
     swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
     assert "prev" in swap_digests
@@ -801,7 +808,7 @@ def test_restart_command_failure_rolls_back(monkeypatch, minimal_config, tmp_pat
         manifest_json(version="0.9.0"),
     )
     spies["conn"].append_response("systemctl reload-or-restart", "", False)
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_ROLLED_BACK
 
     swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
     assert "prev" in swap_digests
@@ -810,17 +817,196 @@ def test_restart_command_failure_rolls_back(monkeypatch, minimal_config, tmp_pat
     assert written.deploys[-1].result == "rollback"
 
 
-def test_no_rollback_exits_3_without_swapping(monkeypatch, minimal_config, tmp_path):
+def test_no_rollback_exits_4_without_swapping(monkeypatch, minimal_config, tmp_path):
     cmd, spies = _setup_failing_deploy(
         monkeypatch, minimal_config, tmp_path, no_rollback=True
     )
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
     # The new release was activated (swapped in); --no-rollback must NOT
     # swap back to the previous digest.
     rollback_swaps = [
         a for args, _k in spies["swap"].call_args_list for a in args if a == "prev"
     ]
     assert rollback_swaps == []
+
+
+def test_service_failure_without_previous_release_exits_4(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, _spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(),
+        prev_manifest=None,
+        is_failed="failed\nfailed\n",
+    )
+    cmd.no_rollback = False
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
+
+
+def test_service_failure_declined_rollback_exits_1(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, spies = _setup_failing_deploy(
+        monkeypatch, minimal_config, tmp_path, no_rollback=False
+    )
+    cmd.no_input = False
+    monkeypatch.setattr(deploy_mod.Confirm, "ask", lambda *a, **k: False)
+
+    assert invoke(cmd) == EXIT_USER_ABORTED
+    rollback_swaps = [
+        a for args, _k in spies["swap"].call_args_list for a in args if a == "prev"
+    ]
+    assert rollback_swaps == []
+
+
+def test_auto_rollback_step_failure_exits_6(monkeypatch, minimal_config, tmp_path):
+    """A rollback whose previous release cannot be read is a failed rollback
+    (6), not a plain deploy failure - a second rollback is never attempted."""
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", previous=[]),
+        prev_manifest=manifest_for(),
+        is_failed="failed\nfailed\n",
+    )
+    cmd.no_rollback = False
+    # No response for the previous release's manifest: the rollback step
+    # fails after the failure was surfaced.
+    assert invoke(cmd) == EXIT_ROLLBACK_FAILED
+    written = spies["write_states"]
+    assert written == []  # rollback never recorded success
+
+
+def test_failed_post_install_hook_exits_4_before_activation(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A failing post_install hook aborts with 4 while the old release is
+    still live: nothing was activated, so there is nothing to roll back."""
+    from fujin.config import HooksConfig
+
+    hooks = HooksConfig(post_install=["exit 1"])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(),
+        hooks=hooks,
+    )
+    spies["conn"].append_response("exit 1", "", False)
+
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
+    spies["swap"].assert_not_called()
+    assert spies["cleanup_staging"].called
+
+
+def test_unreachable_host_during_transfer_exits_5(
+    monkeypatch, minimal_config, tmp_path
+):
+    """The rsync host classification (5) survives the deploy error wrapper."""
+    from fujin.transfer import HostUnreachableError
+
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(),
+    )
+    spies["rsync"].side_effect = HostUnreachableError("ssh: connect: refused")
+
+    assert invoke(cmd) == EXIT_HOST_UNREACHABLE
+    spies["swap"].assert_not_called()
+    assert spies["cleanup_staging"].called
+
+
+def test_mid_deploy_transport_loss_exits_5(monkeypatch, minimal_config, tmp_path):
+    """A ConnectionError raised while executing a remote step propagates as
+    5 through the deploy handlers, even when staging cleanup also fails."""
+    from fujin.config import HooksConfig
+    from fujin.errors import ConnectionError
+
+    hooks = HooksConfig(pre_install=["TRANSPORT_LOSS"])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(),
+        hooks=hooks,
+    )
+    real_run = spies["conn"].run
+
+    def flaky_run(command, **kwargs):
+        if "TRANSPORT_LOSS" in command:
+            raise ConnectionError("SSH transport failed mid-command")
+        return real_run(command, **kwargs)
+
+    spies["conn"].run = flaky_run
+    # Cleanup itself fails: that must not change the propagated code.
+    spies["cleanup_staging"].side_effect = RuntimeError("cleanup exploded")
+
+    assert invoke(cmd) == EXIT_HOST_UNREACHABLE
+    spies["cleanup_staging"].assert_called()
+    spies["swap"].assert_not_called()
+
+
+def test_cleanup_failure_does_not_mask_deploy_failure(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A cleanup failure must not replace the original taxonomy code (4).
+
+    Cleanup runs through ``conn.run``, so on a dead transport it raises
+    ``ConnectionError`` (a ``cappa.Exit``/``SystemExit``, not ``Exception``):
+    that must be swallowed, not override the deploy failure."""
+    from fujin.config import HooksConfig
+    from fujin.errors import ConnectionError
+
+    hooks = HooksConfig(post_install=["exit 1"])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(),
+        hooks=hooks,
+    )
+    spies["conn"].append_response("exit 1", "", False)
+    spies["cleanup_staging"].side_effect = ConnectionError(
+        "SSH transport failed while cleaning up"
+    )
+
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
+    spies["cleanup_staging"].assert_called()
+
+
+def test_failed_post_start_hook_warns_and_deploy_succeeds(
+    monkeypatch, minimal_config, tmp_path
+):
+    """post_start runs after activation: its failure is a warning, the
+    deploy (and the recorded state) still succeeds."""
+    from fujin.config import HooksConfig
+
+    hooks = HooksConfig(post_start=["exit 1"])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(),
+        hooks=hooks,
+    )
+    spies["conn"].append_response("exit 1", "", False)
+    warnings: list[str] = []
+    cmd.output.warning = warnings.append
+
+    assert invoke(cmd) == 0
+    assert any("post-start" in w for w in warnings), warnings
+    assert len(spies["write_states"]) == 1
+    assert spies["write_states"][0].current
 
 
 # ===========================================================================
@@ -896,7 +1082,7 @@ def test_auto_rollback_targets_release_live_before_this_deploy(
         "/opt/fujin/testapp/releases/third/manifest.json",
         manifest_json(version="1.0.0"),
     )
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_ROLLED_BACK
 
     swap_digests = [args[0][2] for args in spies["swap"].call_args_list]
     assert "third" in swap_digests
@@ -1089,7 +1275,7 @@ def test_secrets_never_leak_during_auto_rollback(
         "/opt/fujin/testapp/releases/prev/manifest.json",
         manifest_json(version="0.9.0"),
     )
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_ROLLED_BACK
     _assert_no_sentinel(printer, capsys)
 
 
@@ -1489,7 +1675,7 @@ def test_notify_unit_restart_timeout_still_fails_and_rolls_back(
     # this test pass without ever exercising the blocking restart).
     spies["conn"].append_response("systemctl reload-or-restart", "", False)
 
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_ROLLED_BACK
 
     restarts = _probe_calls(spies["conn"], "sudo systemctl reload-or-restart")
     assert restarts and "testapp-web.service" in restarts[0]
@@ -1550,7 +1736,7 @@ def test_health_check_http_failure_rolls_back(monkeypatch, minimal_config, tmp_p
     clock = _FakeClock()
     monkeypatch.setattr(deploy_mod, "time", clock)
 
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_ROLLED_BACK
 
     # Retried across the configured window (behaviour, not an exact pin).
     assert len(_probe_calls(spies["conn"], "curl -sf")) >= 2
@@ -1615,7 +1801,7 @@ def test_health_check_failure_without_readiness_units_dumps_generic_journal(
     spies["conn"].append_response("curl -sf", "connection refused", False)
     monkeypatch.setattr(deploy_mod, "time", _FakeClock())
 
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
 
     assert any(
         c == "journalctl -n 50 --no-pager || true" for c, _ in spies["conn"].calls
@@ -1672,7 +1858,7 @@ def test_missing_socket_file_retries_then_fails_readiness(
     clock = _FakeClock()
     monkeypatch.setattr(deploy_mod, "time", clock)
 
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_ROLLED_BACK
 
     checks = _probe_calls(spies["conn"], "test -S ")
     assert len(checks) >= 2
@@ -1699,7 +1885,7 @@ def test_socket_file_alone_is_not_ready_without_active_socket_unit(
     clock = _FakeClock()
     monkeypatch.setattr(deploy_mod, "time", clock)
 
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
 
     active_calls = _probe_calls(spies["conn"], "systemctl is-active ")
     assert active_calls
@@ -1778,7 +1964,7 @@ def test_unit_stuck_activating_fails_after_fallback_window(
     clock = _FakeClock()
     monkeypatch.setattr(deploy_mod, "time", clock)
 
-    assert invoke(cmd) == 3
+    assert invoke(cmd) == EXIT_DEPLOY_FAILED
 
     assert attempts["n"] >= 2
     assert clock.now >= deploy_mod.READINESS_TIMEOUT

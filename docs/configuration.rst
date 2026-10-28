@@ -351,7 +351,7 @@ After activating a release, ``fujin deploy`` confirms that the new release is ac
 2. **Unit state and socket activation** use an explicit fallback window of **30 seconds**, polled every 0.5 seconds, whether or not a health-check probe is configured. A runtime service unit is ready only once ``systemctl is-failed`` reports ``active`` for it; ``activating``, ``inactive`` and missing status are retried, a ``failed`` unit fails the deploy immediately. For socket activation, every ``ListenStream=/absolute/path`` (declared in the ``.socket`` unit or in a ``*.socket.d/*.conf`` dropin) must both exist (``test -S``) and belong to a socket unit that reports ``active`` — bound *and* connectable. The service itself only starts on the first connection, so its own unit state says nothing about readiness. Units still not ``active`` when the window expires are failed.
 3. **Health check probe** (optional): the ``[health_check]`` probe described below.
 
-Any readiness failure dumps the affected units' journal and triggers the automatic rollback contract (or exits 3 with ``--no-rollback``).
+Any readiness failure dumps the affected units' journal and triggers the automatic rollback contract (or exits 4 with ``--no-rollback``; see :doc:`commands/exit-codes`).
 
 .. _health-check:
 
@@ -380,7 +380,7 @@ Exactly one probe kind is allowed:
 
 Both values support the standard template context used for unit files (``{app_name}``, ``{app_user}``, ``{app_dir}``, ``{version}``, ``{install_dir}``, ``{user}`` and the discovered unit-name variables). An unresolved placeholder is a configuration error: the deploy aborts before any server connection is opened.
 
-A probe that never succeeds fails the deploy: the last probe output is printed (secrets redacted), the readiness units' journal is dumped (or, for apps with no polled runtime unit, the recent journal), and the normal automatic rollback applies (``--no-rollback`` disables the rollback and exits with code 3). A no-op deploy (including ``--full-restart`` without changes) transfers nothing and therefore does not run the probe.
+A probe that never succeeds fails the deploy: the last probe output is printed (secrets redacted), the readiness units' journal is dumped (or, for apps with no polled runtime unit, the recent journal), and the normal automatic rollback applies (``--no-rollback`` disables the rollback and exits with code 4; see :doc:`commands/exit-codes`). A no-op deploy (including ``--full-restart`` without changes) transfers nothing and therefore does not run the probe.
 
 Host Configuration
 -------------------

@@ -41,6 +41,8 @@ Quick Reference
      - Migrate from older Fujin configuration formats
    * - :doc:`audit`
      - View audit logs for deployment operations stored on the server
+   * - :doc:`exit-codes`
+     - Documented process exit codes for scripts and CI
 
 .. toctree::
    :maxdepth: 2
@@ -58,3 +60,4 @@ Quick Reference
    cache
    migrate
    audit
+   exit-codes
