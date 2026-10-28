@@ -38,6 +38,42 @@ logger = logging.getLogger(__name__)
 #: libssh2 forever (see deploy._write_remote_manifest for the same lesson).
 SPOOL_THRESHOLD_BYTES = 4096
 
+#: OpenSSH control socket shared by every external ``ssh``/``rsync`` process
+#: (``get()`` here, the staging transfer in :mod:`fujin.transfer`), so they
+#: reuse one master connection instead of paying a full TCP+SSH handshake
+#: each. ``%C`` expands to OpenSSH's short hash of the local host, remote
+#: user/host/port; the literal path keeps the socket well under the ~104 byte
+#: Unix socket limit. ``ControlMaster=auto`` transparently falls back to a
+#: direct connection when a stale master is in the way.
+SSH_CONTROL_PATH = "/tmp/fujin-ssh-%C"
+
+
+def ssh_control_opts() -> list[str]:
+    """``ssh -o`` options shared by all external OpenSSH invocations."""
+    return [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPath={SSH_CONTROL_PATH}",
+        "-o",
+        "ControlPersist=60s",
+    ]
+
+
+def ssh_client_opts(host: HostConfig) -> list[str]:
+    """Full option list (control socket, port, identity) for an ``ssh`` argv."""
+    opts = ssh_control_opts()
+    opts.extend(["-p", str(host.port)])
+    if host.key_filename:
+        opts.extend(["-i", str(Path(host.key_filename).expanduser().resolve())])
+    return opts
+
 
 def should_spool(command: str) -> bool:
     """Whether *command* is too large to send through the exec channel."""
@@ -537,9 +573,9 @@ class SSH2Connection:
         if not remote.startswith("/") and self.cwd:
             remote_path = f"{self.cwd}/{remote}"
 
-        cmd = ["ssh", "-o", "BatchMode=yes", "-p", str(self.host.port)]
-        if self.host.key_filename:
-            cmd.extend(["-i", str(Path(self.host.key_filename).expanduser().resolve())])
+        # Shares the control socket with the rsync transport, so a deploy's
+        # transfer and any follow-up downloads multiplex one SSH connection.
+        cmd = ["ssh", *ssh_client_opts(self.host)]
         cmd.extend([f"{self.host.user}@{self.host.address}", "cat", "--", remote_path])
         with open(local, "wb") as out_fh:
             result = subprocess.run(

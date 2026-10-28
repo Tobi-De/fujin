@@ -158,7 +158,9 @@ class TestRsyncToStaging:
             "--chmod=D755",
             "--itemize-changes",
             "-e",
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p 22",
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+            " -o ConnectTimeout=10 -o ControlMaster=auto"
+            " -o ControlPath=/tmp/fujin-ssh-%C -o ControlPersist=60s -p 22",
             f"{local}/",
             "deploy@203.0.113.7:/opt/fujin/myapp/releases/.staging-42",
         ]
@@ -229,7 +231,10 @@ class TestRsyncToStaging:
         argv = calls[-1]["argv"]
         assert argv[argv.index("-e") + 1].startswith(
             "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-            " -o ConnectTimeout=10 -p 22 -i "
+            " -o ConnectTimeout=10"
+            " -o ControlMaster=auto"
+            " -o ControlPath=/tmp/fujin-ssh-%C"
+            " -o ControlPersist=60s -p 22 -i "
         )
 
     def test_paths_quoted_alongside_local_trailing_slash(self, tmp_path, monkeypatch):

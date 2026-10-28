@@ -47,6 +47,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### ⚡ Performance
 
+- *(deploy)* Build before opening SSH and taking the remote lock
 - *(deploy)* Skip unit and Caddy installs when nothing changed
 - *(deploy)* Clone the live venv when requirements are unchanged
 - *(deploy)* Hash server-built files once per deploy

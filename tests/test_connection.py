@@ -6,6 +6,8 @@ import os
 import re
 import shlex
 import socket
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import cappa
@@ -417,3 +419,101 @@ def test_spool_upload_transport_failure_is_connection_error(spool_connection):
 
 
 # ============================================================================
+# External ssh invocations (get)
+# ============================================================================
+
+
+EXPECTED_CONTROL_OPTS = [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    "ControlPath=/tmp/fujin-ssh-%C",
+    "-o",
+    "ControlPersist=60s",
+]
+
+
+def capture_external_ssh(monkeypatch, *, returncode=0, stderr=b""):
+    """Replace subprocess.run, capturing the argv of the external ssh call."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["argv"] = cmd
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=returncode, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return captured
+
+
+def test_get_uses_shared_ssh_control_socket(connection, tmp_path, monkeypatch):
+    captured = capture_external_ssh(monkeypatch)
+    target = tmp_path / "downloaded"
+
+    connection.get("/opt/fujin/app/state.json", str(target))
+
+    argv = captured["argv"]
+    dest = "testuser@example.com"
+    assert argv[0] == "ssh"
+    # destination and remote command are unchanged and still last
+    assert argv[argv.index(dest) :] == [
+        dest,
+        "cat",
+        "--",
+        "/opt/fujin/app/state.json",
+    ]
+    # options: control socket group, then port (as before, right after them)
+    assert argv[1 : argv.index(dest)] == [*EXPECTED_CONTROL_OPTS, "-p", "22"]
+
+
+def test_get_and_rsync_share_one_control_socket(connection, tmp_path, monkeypatch):
+    from fujin.transfer import _ssh_transport_opts
+
+    captured = capture_external_ssh(monkeypatch)
+    connection.get("/opt/fujin/app/state.json", str(tmp_path / "downloaded"))
+
+    argv = captured["argv"]
+    get_opts = argv[1 : argv.index("testuser@example.com")]
+
+    rsync_opts = shlex.split(_ssh_transport_opts(connection.host))
+    assert rsync_opts[0] == "ssh"
+    assert rsync_opts[1:] == get_opts
+    control_path = get_opts.index("ControlPath=/tmp/fujin-ssh-%C")
+    assert get_opts[control_path - 1] == "-o"
+
+
+def test_get_raises_upload_error_on_nonzero_exit(connection, tmp_path, monkeypatch):
+    capture_external_ssh(monkeypatch, returncode=255, stderr=b"ssh: connect failed")
+    target = tmp_path / "downloaded"
+
+    with pytest.raises(UploadError) as excinfo:
+        connection.get("/opt/fujin/app/state.json", str(target))
+
+    message = excinfo.value.message
+    assert "Download failed for /opt/fujin/app/state.json (exit 255)" in message
+    assert "ssh: connect failed" in message
+    assert not target.exists()
+
+
+def test_get_key_filename_option_kept(connection, tmp_path, monkeypatch):
+    connection.host = HostConfig(
+        address="example.com", user="testuser", _key_filename="~/.ssh/id_ed25519"
+    )
+    captured = capture_external_ssh(monkeypatch)
+
+    connection.get("/opt/fujin/app/state.json", str(tmp_path / "downloaded"))
+
+    argv = captured["argv"]
+    assert argv[1 : argv.index("testuser@example.com")] == [
+        *EXPECTED_CONTROL_OPTS,
+        "-p",
+        "22",
+        "-i",
+        os.path.expanduser("~/.ssh/id_ed25519"),
+    ]

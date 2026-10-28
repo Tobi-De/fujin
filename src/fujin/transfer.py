@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
+from fujin.connection import ssh_client_opts
 from fujin.errors import DeploymentError
 from fujin.exit_codes import EXIT_HOST_UNREACHABLE
 
@@ -166,21 +167,9 @@ def verify_report(staging: str, result: VerifyResult) -> str:
 
 
 def _ssh_transport_opts(host: Any) -> str:
-    opts = [
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ConnectTimeout=10",
-        "-p",
-        str(host.port),
-    ]
-    if host.key_filename:
-        key_path = Path(host.key_filename).expanduser().resolve()
-        opts.extend(["-i", str(key_path)])
-    return " ".join(opts)
+    # Same option list (incl. the shared ControlPath) as ``SSH2Connection.get``,
+    # so rsync and later downloads reuse one OpenSSH master connection.
+    return " ".join(["ssh", *ssh_client_opts(host)])
 
 
 def _rsync_installed_locally() -> bool:
