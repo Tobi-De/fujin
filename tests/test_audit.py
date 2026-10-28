@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from fujin.audit import log_operation
+from fujin.audit import format_operation, log_file, log_operation, write_command
 from fujin.commands.audit import Audit
 
 # ============================================================================
@@ -355,3 +355,44 @@ def test_log_operation_omits_digest_when_not_given():
     encoded = write_cmd.split("echo ", 1)[1].split(" | sudo tee", 1)[0]
     record = json.loads(json.loads(encoded))
     assert "digest" not in record
+
+
+def test_log_operation_is_one_fused_command():
+    """mkdir + tee share one round-trip, not two."""
+    conn = MagicMock()
+
+    log_operation(conn, "myapp", "deploy", host="example.com", digest="d" * 64)
+
+    assert conn.run.call_count == 1
+    cmd = conn.run.call_args.args[0]
+    assert cmd.startswith("sudo mkdir -p /opt/fujin/.audit && echo ")
+    assert " | sudo tee -a /opt/fujin/.audit/myapp.log >/dev/null" in cmd
+
+
+def test_format_operation_returns_the_jsonl_line():
+    line = format_operation(
+        "myapp",
+        "rollback",
+        host="example.com",
+        from_version="2.0.0",
+        to_version="1.0.0",
+        digest="e" * 64,
+    )
+
+    record = json.loads(line)
+    assert record["app_name"] == "myapp"
+    assert record["operation"] == "rollback"
+    assert record["from_version"] == "2.0.0"
+    assert record["to_version"] == "1.0.0"
+    assert record["digest"] == "e" * 64
+    assert "timestamp" in record and "user" in record
+
+
+def test_log_file_path():
+    assert log_file("myapp") == "/opt/fujin/.audit/myapp.log"
+
+
+def test_write_command_quotes_shell_metacharacters():
+    cmd = write_command("my app", '{"operation": "deploy"}')
+    assert "tee -a '/opt/fujin/.audit/my app.log'" in cmd
+    assert 'echo "{\\"operation\\": \\"deploy\\"}"' in cmd

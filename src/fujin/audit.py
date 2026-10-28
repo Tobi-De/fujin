@@ -2,11 +2,67 @@ from __future__ import annotations
 
 import getpass
 import json
+import shlex
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fujin.connection import SSH2Connection
+
+#: Server-side audit log directory (root-owned, written via sudo).
+AUDIT_DIR = "/opt/fujin/.audit"
+
+
+def log_file(app_name: str) -> str:
+    """Absolute path of the app's JSONL audit log on the server."""
+    return f"{AUDIT_DIR}/{app_name}.log"
+
+
+def format_operation(
+    app_name: str,
+    operation: str,
+    host: str,
+    *,
+    version: str | None = None,
+    git_commit: str | None = None,
+    from_version: str | None = None,
+    to_version: str | None = None,
+    digest: str | None = None,
+) -> str:
+    """Serialize one audit record to its JSONL line (no I/O).
+
+    Split out so a caller fusing the append into a bigger remote script
+    (``serverops.finalize_deploy``) can build the line locally.
+    """
+    record: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "operation": operation,
+        "user": getpass.getuser(),
+        "host": host,
+        "app_name": app_name,
+    }
+
+    if version:
+        record["version"] = version
+    if git_commit:
+        record["git_commit"] = git_commit
+    if from_version:
+        record["from_version"] = from_version
+    if to_version:
+        record["to_version"] = to_version
+    if digest:
+        record["digest"] = digest
+
+    return json.dumps(record)
+
+
+def write_command(app_name: str, line: str) -> str:
+    """Shell snippet appending one audit *line* to the app's log (one command)."""
+    return (
+        f"sudo mkdir -p {AUDIT_DIR}"
+        f" && echo {json.dumps(line)}"
+        f" | sudo tee -a {shlex.quote(log_file(app_name))} >/dev/null"
+    )
 
 
 def log_operation(
@@ -36,30 +92,17 @@ def log_operation(
         digest: Release digest the operation acted on (``fujin doctor``
             verifies it still exists on disk)
     """
-    record: dict[str, Any] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "operation": operation,
-        "user": getpass.getuser(),
-        "host": host,
-        "app_name": app_name,
-    }
-
-    if version:
-        record["version"] = version
-    if git_commit:
-        record["git_commit"] = git_commit
-    if from_version:
-        record["from_version"] = from_version
-    if to_version:
-        record["to_version"] = to_version
-    if digest:
-        record["digest"] = digest
-
-    log_file = f"/opt/fujin/.audit/{app_name}.log"
-    json_line = json.dumps(record)
-
-    connection.run("sudo mkdir -p /opt/fujin/.audit")
-    connection.run(f"echo {json.dumps(json_line)} | sudo tee -a {log_file} >/dev/null")
+    line = format_operation(
+        app_name,
+        operation,
+        host,
+        version=version,
+        git_commit=git_commit,
+        from_version=from_version,
+        to_version=to_version,
+        digest=digest,
+    )
+    connection.run(write_command(app_name, line))
 
 
 def read_logs(

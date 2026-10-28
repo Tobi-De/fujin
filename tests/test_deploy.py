@@ -217,9 +217,36 @@ def setup_deploy(
     monkeypatch.setattr(fujin.serverops, "install_units", install_units)
     monkeypatch.setattr(fujin.serverops, "set_envfile_mode", MagicMock())
     write_states = []
-    monkeypatch.setattr(
-        fujin.serverops, "write_state", lambda _c, _a, s: write_states.append(s)
-    )
+    log_calls = []
+    finalize_calls: list[dict] = []
+
+    def _finalize(
+        _conn,
+        _app_dir,
+        state,
+        *,
+        keep_budget=None,
+        audit_line=None,
+        app_name=None,
+        persist_state=True,
+        output=None,
+    ):
+        # Same observable surface the old write_state/log_operation spies had.
+        if state is not None and persist_state:
+            write_states.append(state)
+        if audit_line is not None:
+            log_calls.append(((), json.loads(audit_line)))
+        finalize_calls.append(
+            {
+                "state": state,
+                "keep_budget": keep_budget,
+                "app_name": app_name,
+                "persist_state": persist_state,
+            }
+        )
+        return [], ()
+
+    monkeypatch.setattr(fujin.serverops, "finalize_deploy", _finalize)
     stop_and_disable = MagicMock(return_value=True)
     monkeypatch.setattr(fujin.serverops, "stop_and_disable", stop_and_disable)
     enable_and_start = MagicMock(return_value=True)
@@ -245,11 +272,6 @@ def setup_deploy(
     monkeypatch.setattr(fujin.transfer, "swap_current", swap)
     cleanup = MagicMock()
     monkeypatch.setattr(fujin.transfer, "cleanup_staging", cleanup)
-
-    log_calls = []
-    monkeypatch.setattr(
-        deploy_mod, "log_operation", lambda *a, **k: log_calls.append((a, k))
-    )
 
     if replicas is not None:
         minimal_config.replicas = replicas
@@ -302,6 +324,7 @@ def setup_deploy(
         "verify": verify,
         "install_units": install_units,
         "write_states": write_states,
+        "finalize_calls": finalize_calls,
         "log_calls": log_calls,
         "enable_and_start": enable_and_start,
         "stop_and_disable": stop_and_disable,
@@ -657,9 +680,10 @@ def test_full_restart_restarts_everything(monkeypatch, minimal_config, tmp_path)
 # ===========================================================================
 
 
-def test_deploy_records_state_and_gcs_old_releases(
+def test_deploy_records_state_and_delegates_gc_to_finalize(
     monkeypatch, minimal_config, tmp_path
 ):
+    """State, release listing, GC and audit are one fused finalize call."""
     state = State(current="old-a", previous=[], deploys=[])
     minimal_config.versions_to_keep = 2
     cmd, spies = setup_deploy(
@@ -669,16 +693,21 @@ def test_deploy_records_state_and_gcs_old_releases(
         state=state,
         prev_manifest=manifest_for(),
     )
-    spies["conn"].append_response("ls -1t releases/", "old-b\nold-a\n")
     invoke(cmd)
 
     written = spies["write_states"][0]
     assert written.previous == ["old-a"]
     assert written.deploys[-1].result == "ok"
 
+    finalize = spies["finalize_calls"][-1]
+    assert finalize["state"] is written
+    assert finalize["keep_budget"] == 2
+    assert finalize["persist_state"] is True
+    assert finalize["app_name"] == "testapp"
+
+    # GC never runs as a separate deploy-side step anymore
     rms = [c for c, _ in spies["conn"].calls if "rm -rf" in c and "releases/" in c]
-    assert any("old-b" in c for c in rms), rms
-    assert not any("old-a" in c for c in rms), rms
+    assert rms == []
     operations = [k.get("operation") or a[2] for a, k in spies["log_calls"]]
     assert "deploy" in operations
     assert spies["released"] == ["flock:1"]
@@ -2151,6 +2180,7 @@ MUTATION_TARGETS = {
         "normalize_staging_ownership",
         "set_envfile_mode",
         "collect_garbage",
+        "finalize_deploy",
         "install_caddyfile",
     ),
     "transfer": (
@@ -2285,8 +2315,8 @@ def _dry_run_setup(
             monkeypatch.setattr(target, name, spy)
             spies[name] = spy
     log = MagicMock()
-    monkeypatch.setattr(deploy_mod, "log_operation", log)
-    spies["log_operation"] = log
+    monkeypatch.setattr(deploy_mod, "format_operation", log)
+    spies["format_operation"] = log
 
     cmd = Deploy(no_input=True)
     cmd.dry_run = True

@@ -25,6 +25,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🐛 Bug Fixes
 
+- *(deploy)* Bound and retry short read-only probes
 - *(deploy)* Resolve {shared_dir} in templates; dropin dir creation; doctor instance scan
 - Anchor-free gitignore patterns for nested .fujin dirs (examples project)
 - Adversarial review round 2 - 8 behavior fixes

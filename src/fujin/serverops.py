@@ -21,6 +21,7 @@ from typing import Any
 import cappa
 
 from fujin import manifest as m
+from fujin.audit import write_command as audit_write_command
 from fujin.store import (
     State,
     convergence,
@@ -36,6 +37,10 @@ UV_PYTHON_INSTALL_DIR = "/opt/fujin/.python"
 #: Holder TTL must outlive the longest deploy phase (the rsync transfer alone
 #: allows up to 3600s); renewal is done implicitly by releasing and re-taking.
 LOCK_TTL = 7200
+#: Holder acquisition is polled on the server: 40 x 50ms = 2s worst case,
+#: instead of an unconditional 500ms sleep on every deploy.
+LOCK_POLL_INTERVAL = 0.05
+LOCK_POLL_ATTEMPTS = 40
 LOCK_PATH = "store/lock"
 LEGACY_LOCK_PATH = ".deploy_lock"
 STATE_PATH = "store/state.json"
@@ -228,6 +233,15 @@ def list_staging_dirs(conn: Any, app_dir: str) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def _remove_releases(conn: Any, app_dir: str, digests: Sequence[str]) -> bool:
+    """Remove all *digests* in ONE ``rm -rf``; returns whether it succeeded."""
+    targets = " ".join(
+        shlex.quote(f"{app_dir}/releases/{digest}") for digest in digests
+    )
+    _, ok = conn.run(f"rm -rf {targets}", warn=True, hide=True)
+    return ok
+
+
 def collect_garbage(
     conn: Any,
     app_dir: str,
@@ -238,15 +252,118 @@ def collect_garbage(
 ) -> tuple[str, ...]:
     """Delete releases outside ``store.gc_plan``'s keep-set; returns digest list."""
     kill = gc_plan(state.current, state.previous, releases, keep_budget)
-    for digest in kill:
-        conn.run(
-            f"rm -rf {shlex.quote(f'{app_dir}/releases/{digest}')}",
-            warn=True,
-            hide=True,
-        )
     if kill:
-        output.info(f"Garbage-collected {len(kill)} old release(s).")
+        if _remove_releases(conn, app_dir, kill):
+            output.info(f"Garbage-collected {len(kill)} old release(s).")
+        else:
+            output.warning(f"Failed to remove {len(kill)} old release(s).")
     return kill
+
+
+#: Markers of the fused ``finalize_deploy`` script: one per sub-step so a
+#: failure can be attributed without a second round-trip.
+FINALIZE_STATE_FAILED = "FUJIN-FAIL:state"
+FINALIZE_AUDIT_WARNED = "FUJIN-WARN:audit"
+FINALIZE_RELEASES_BEGIN = "FUJIN-RELEASES"
+FINALIZE_RELEASES_END = "FUJIN-RELEASES-END"
+
+
+def finalize_deploy(
+    conn: Any,
+    app_dir: str,
+    state: State | None,
+    *,
+    keep_budget: int | None,
+    audit_line: str | None = None,
+    app_name: str | None = None,
+    persist_state: bool = True,
+    output: Any = None,
+) -> tuple[list[str], tuple[str, ...]]:
+    """Post-activation bookkeeping: state, release list, GC and the audit line.
+
+    Fuses what used to be 5+ sequential calls into two:
+
+    1. one script that writes ``state.json`` atomically, lists ``releases/``
+       and appends *audit_line* (``mkdir`` + ``tee`` fused). The audit append
+       stays best-effort, like :func:`fujin.audit.log_operation`.
+    2. a single ``rm -rf`` for every digest outside ``store.gc_plan``'s
+       keep-set, skipped entirely when nothing is collectable.
+
+    ``state=None`` (auto-rollback with no recorded state) skips both the
+    state write and GC, matching the pre-fusion behaviour; so does a state
+    with ``current=None`` (no live release anchors the keep-set, so every
+    release would look collectable). A no-op deploy still passes its live
+    state for the GC decision but sets ``persist_state=False``: nothing
+    changed, so nothing is rewritten.
+
+    Returns ``(releases, removed)``; raises :class:`ServerOpsError` naming the
+    failed sub-step when the state write (or the script itself) fails.
+    """
+    state_path = f"{app_dir}/{STATE_PATH}"
+    script: list[str] = []
+    if state is not None and persist_state:
+        tmp_q = shlex.quote(f"{state_path}.tmp")
+        script.append(
+            f"printf '%s' {_b64(serialize_state(state))}"
+            f" | base64 -d > {tmp_q} && mv -f {tmp_q} {shlex.quote(state_path)}"
+            f" || {{ echo '{FINALIZE_STATE_FAILED}'; exit 1; }}"
+        )
+    script.append(f"echo '{FINALIZE_RELEASES_BEGIN}'")
+    script.append(f"cd {shlex.quote(app_dir)} && ls -1t releases/ 2>/dev/null || true")
+    script.append(f"echo '{FINALIZE_RELEASES_END}'")
+    if audit_line is not None:
+        if app_name is None:
+            raise ValueError("app_name is required to append the audit entry")
+        script.append(
+            f"{{ {audit_write_command(app_name, audit_line)}; }}"
+            f" || echo '{FINALIZE_AUDIT_WARNED}'"
+        )
+
+    out, ok = conn.run("\n".join(script), warn=True, hide=True)
+    if FINALIZE_STATE_FAILED in out:
+        raise ServerOpsError(
+            f"Failed to write {state_path} on server (finalize step: state)"
+        )
+    if not ok:
+        raise ServerOpsError(
+            f"Deploy finalize failed on the server (finalize step: bookkeeping):\n"
+            f"{out.strip()}"
+        )
+
+    releases: list[str] = []
+    listing = out.split(f"{FINALIZE_RELEASES_BEGIN}\n", 1)
+    if len(listing) == 2:
+        for line in listing[1].split(f"{FINALIZE_RELEASES_END}", 1)[0].splitlines():
+            digest = line.strip()
+            if digest and not digest.startswith(".staging-"):
+                releases.append(digest)
+
+    if FINALIZE_AUDIT_WARNED in out:
+        message = f"Failed to append the audit entry for {app_name}"
+        if output is not None:
+            output.warning(message)
+        else:
+            logger.warning(message)
+
+    if state is None or state.current is None:
+        # No recorded state, or no live release to anchor the keep-set:
+        # with ``current`` missing every release looks collectable, so
+        # skipping GC is the only safe answer.
+        return releases, ()
+
+    removed = gc_plan(state.current, state.previous, releases, keep_budget)
+    if removed and not _remove_releases(conn, app_dir, removed):
+        message = (
+            f"Failed to remove {len(removed)} old release(s)"
+            " (finalize step: garbage collection)"
+        )
+        if output is not None:
+            output.warning(message)
+        else:
+            logger.warning(message)
+    elif removed and output is not None:
+        output.info(f"Garbage-collected {len(removed)} old release(s).")
+    return releases, removed
 
 
 def _b64(content: bytes | str) -> str:
@@ -314,18 +431,25 @@ def ensure_layout(conn: Any, app_dir: str, app_user: str, deploy_user: str) -> N
 def ensure_app_user(conn: Any, app_user: str) -> None:
     """Create the app system user/group idempotently (no home, nologin).
 
-    Non-fatal to no-op when the user already exists; raises when the user
-    is still missing afterwards (mirrors the retired installer PHASE 1 and
-    ``server bootstrap``'s user creation).
+    One round-trip, three fused steps: ensure the group, create the user only
+    when it is missing, then prove the uid resolves. The group guard is not
+    short-circuited by the user probe: a pre-existing user whose group is
+    missing would otherwise make the follow-up ``chown deploy:<app_user>``
+    fail. ``getent group`` keeps the fast path sudo-free when both exist.
+    Raises when the user/group cannot be created (mirrors the retired
+    installer PHASE 1 and ``server bootstrap``'s user creation).
     """
+    user_q = shlex.quote(app_user)
     cmd = (
-        f"sudo groupadd -f {shlex.quote(app_user)} && "
+        f"{{ getent group {user_q} >/dev/null 2>&1 || sudo groupadd -f {user_q}; }}"
+        " && "
+        f"{{ id -u {user_q} >/dev/null 2>&1 || "
         "sudo useradd --system --no-create-home --shell /usr/sbin/nologin "
-        f"-g {shlex.quote(app_user)} {shlex.quote(app_user)} || true"
+        f"-g {user_q} {user_q}; }}"
+        f" && id -u {user_q}"
     )
-    conn.run(cmd, warn=True, hide=True)
-    _, exists = conn.run(f"id -u {shlex.quote(app_user)}", warn=True, hide=True)
-    if not exists:
+    _, ok = conn.run(cmd, warn=True, hide=True)
+    if not ok:
         raise ServerOpsError(f"Failed to create app user {app_user}")
 
 
@@ -339,10 +463,16 @@ def acquire_lock(conn: Any, app_dir: str, *, ttl: int = LOCK_TTL) -> str:
 
     Two belts:
 
-    1. ``flock`` on ``store/lock`` via a detached holder process that keeps
-       the lock for ``ttl`` seconds (preferred, works across shells). The
-       holder writes its pid to ``store/lock.holder`` once it owns the lock,
-       which lets a crashed deployer's stale marker be detected and stolen.
+    1. ``flock`` on ``store/lock`` held by a detached holder process for
+       ``ttl`` seconds (preferred, works across shells). The holder takes
+       the flock FIRST (``flock -n 9 || exit 1``) and writes
+       ``<pid>-<token>`` to ``store/lock.holder`` only afterwards, so a
+       holder that loses the race exits without touching the marker of
+       whoever holds the lock. Every acquisition attempt uses a fresh random
+       token and the parent accepts a probe line only when it names that
+       token AND the flock is still taken: a blocked or foreign holder can
+       never be mistaken for our success. A stale marker (dead pid, flock
+       free) is cleaned up and retried once.
     2. The legacy noclobber ``.deploy_lock`` file (``set -C``) only when
        ``flock`` is unavailable on the host.
 
@@ -360,67 +490,98 @@ def acquire_lock(conn: Any, app_dir: str, *, ttl: int = LOCK_TTL) -> str:
 
     if has_flock:
         for _ in range(2):  # one retry after clearing a stale holder
+            token = secrets.token_hex(8)
             # Fully detached from the SSH exec session: setsid + nohup +
             # </dev/null. A partially detached background child would keep
             # the SSH channel from reaching EOF and make conn.run hang.
-            # The holder writes ITS OWN pid + a random token (setsid may
-            # fork, so the shell's $! is unreliable) as the single truth.
-            token = secrets.token_hex(8)
+            # The flock comes BEFORE the marker write: a blocked holder must
+            # not clobber the marker of the process that owns the lock.
             holder_cmd = (
-                f"FUJIN_LOCK_TOKEN={token} setsid nohup bash -c "
-                f"'echo $$-$FUJIN_LOCK_TOKEN > {holder_q}; "
-                f"exec 9>{lock_q}; flock -x 9 && sleep {ttl}'"
-                f" >/dev/null 2>&1 & echo $!"
+                f'setsid nohup bash -c "exec 9>>{lock_q}; '
+                f"flock -n 9 || exit 1; "
+                f"echo \\$\\$-{token} > {holder_q}; "
+                f'sleep {ttl}" >/dev/null 2>&1 & echo $!'
             )
             out, ok = conn.run(holder_cmd, warn=True, hide=True)
             holder_pid = out.strip() if ok else ""
 
+            # Poll for OUR token instead of sleeping a fixed 500ms: the
+            # marker appears only after the flock is owned, and it is only
+            # reported as OURS while ``flock -n`` still fails and the marker
+            # pid is alive (a dead holder can leave a stale marker while a
+            # foreign process holds the flock). After the deadline the flock
+            # is judged in the state it is in *then*: held (BUSY, with
+            # whatever marker exists, ``?`` when none), free with a live
+            # marker (ALIVE) or free with a dead one (DEAD).
             probe, _ = conn.run(
-                f"sleep 0.5; "
-                f"if flock -n {lock_q} true 2>/dev/null; then echo FREE; "
-                f"else echo HELD-$(cat {holder_q} 2>/dev/null || echo ?); fi; "
-                f"pid=$(cat {holder_q} 2>/dev/null | cut -d- -f1); "
-                f'if [ -n "$pid" ] && [ "$pid" != "?" ] && kill -0 "$pid" 2>/dev/null; '
-                f'then echo ALIVE-"$pid"; else echo DEAD; fi',
+                f"tok={token}; hf={holder_q}; lk={lock_q}; i=0; "
+                f'while [ "$i" -lt {LOCK_POLL_ATTEMPTS} ]; do '
+                f'h=$(cat "$hf" 2>/dev/null || true); '
+                f'case "$h" in *-"$tok") '
+                f'if ! flock -n "$lk" true 2>/dev/null; '
+                f'then echo "OURS:$h"; exit 0; fi ;; esac; '
+                f"sleep {LOCK_POLL_INTERVAL}; i=$((i + 1)); done; "
+                f'h=$(cat "$hf" 2>/dev/null || true); '
+                f'case "$h" in *-"$tok") hp=${{h%%-*}}; '
+                f'if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null && '
+                f'! flock -n "$lk" true 2>/dev/null; '
+                f'then echo "OURS:$h"; exit 0; fi ;; esac; '
+                f'if ! flock -n "$lk" true 2>/dev/null; '
+                f'then echo "BUSY:${{h:-?}}"; '
+                f'elif [ -n "$h" ]; then hp=${{h%%-*}}; '
+                f'if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; '
+                f'then echo "ALIVE:$h"; else echo "DEAD:$h"; fi; '
+                f'else echo "FREE:"; fi',
                 warn=True,
                 hide=True,
             )
-            lines = [line.strip() for line in probe.splitlines() if line.strip()]
-            held_line = next((l for l in lines if l.startswith("HELD-")), None)
-            alive = next((l for l in lines if l.startswith("ALIVE-")), None)
+            first = (probe.strip().splitlines() or [""])[0]
+            status, _, marker = first.partition(":")
+            marker = "" if marker.strip() == "?" else marker.strip()
+            file_pid, _, file_token = marker.partition("-")
 
-            # The holder file ("pid-token") is the authority: setsid may
-            # fork, so the shell's $! is not the holder pid.
-            holder_file = held_line.removeprefix("HELD-") if held_line else None
-            if holder_file == "?":
-                holder_file = None
-            file_pid = None
-            file_token = None
-            if holder_file:
-                file_pid, _, file_token = holder_file.partition("-")
+            # Only our own token, confirmed while the flock is still taken,
+            # counts as ownership.
+            if status == "OURS" and file_pid and file_token == token:
+                return f"flock:{file_pid}"
 
-            if file_pid and alive == f"ALIVE-{file_pid}":
-                if file_token == token:
-                    return f"flock:{file_pid}"
-                # A live holder with a different token: never switch belts.
+            if status == "BUSY":
+                # The flock is owned and no marker names our token: the
+                # holder we spawned lost the race and wrote nothing.
+                by = f" by pid {file_pid}" if file_pid else ""
+                raise ServerOpsError(
+                    "Another deployment is in progress on the server\n"
+                    f"({app_dir}/{LOCK_PATH} is flock'ed{by})."
+                    " Wait for it to finish."
+                )
+
+            if status == "ALIVE":
+                # Marker of a live process while the flock is free: it may
+                # be about to acquire, so never steal from it and never
+                # switch belts.
                 raise ServerOpsError(
                     "Another deployment is in progress on the server\n"
                     f"(flock holder pid {file_pid}). Wait for it to finish."
                 )
 
-            # Stale state (holder crashed, lock free after crash, or our own
-            # holder failed to acquire): clean up and retry once.
-            dead_pid, _, _ = (holder_file or "").partition("-")
+            # DEAD: stale marker (dead pid, flock free) -> clean and retry.
+            # FREE: our holder never got the flock (unsupported filesystem,
+            # ...) -> the noclobber belt is safe.
             conn.run(
                 f"kill {shlex.quote(holder_pid)} 2>/dev/null; "
-                f"kill {shlex.quote(dead_pid or '')} 2>/dev/null; true",
+                f"kill {shlex.quote(file_pid)} 2>/dev/null; true",
                 warn=True,
                 hide=True,
             )
-            conn.run(f"rm -f {holder_q}", warn=True, hide=True)
-            if held_line is None:
-                # Lock is genuinely free but flock could not hold it here
-                # (unsupported filesystem, ...): the noclobber belt is safe.
+            # Compare-and-delete: never remove a marker another deployer
+            # wrote in the meantime.
+            conn.run(
+                f"h=$(cat {holder_q} 2>/dev/null || true); "
+                f'[ "$h" = {shlex.quote(marker)} ] && rm -f {holder_q}; true',
+                warn=True,
+                hide=True,
+            )
+            if status != "DEAD":
                 break
         else:
             raise ServerOpsError(
@@ -471,12 +632,15 @@ def release_lock(conn: Any, app_dir: str, lock: str) -> None:
 
 
 def parse_holder_pid(output: str) -> str | None:
-    """Parse the holder pid from an acquire_lock probe line, or None if free."""
-    if output.startswith("HELD-"):
-        value = output.removeprefix("HELD-")
-        if value and value != "?":
-            return value
-    return None
+    """Parse the holder pid from an acquire_lock probe line, or None if free.
+
+    Probe lines are ``<STATUS>:<pid>-<token>``; ``FREE:`` and ``BUSY:?``
+    record no holder pid.
+    """
+    _, _, marker = output.strip().partition(":")
+    marker = "" if marker.strip() == "?" else marker.strip()
+    pid, _, _ = marker.partition("-")
+    return pid or None
 
 
 class LockProbe(msgspec.Struct, frozen=True):
@@ -547,8 +711,9 @@ def install_code_into_staging(
     - ``binary``: the dist file is staged as ``{staging}/bin/{app_name}``
       (rsynced); this only ensures the directory exists and the file is 755.
 
-    ``requirements`` is a local requirements.txt path, uploaded to
-    ``{staging}/requirements.txt`` (it is committed as an asset entry).
+    ``requirements`` is the local requirements.txt path; the build already
+    committed the same file into the staging tree that rsync uploaded, so it
+    is never transferred here - the pip command only asserts it is present.
     """
     staging_q = shlex.quote(staging_dir)
     dist_in_tree = f"{staging_q}/{shlex.quote(dist_tree_path)}"
@@ -570,10 +735,23 @@ def install_code_into_staging(
             f"{dist_in_tree} --no-deps"
         )
         if requirements:
-            conn.put(requirements, f"{staging_dir}/requirements.txt")
-            pip_cmd += f" -r {staging_q}/requirements.txt"
+            req_in_tree = f"{staging_dir}/requirements.txt"
+            req_q = shlex.quote(req_in_tree)
+            # The file rides in with the rsynced tree (an asset entry); fail
+            # loudly here rather than letting uv report a missing -r file.
+            pip_cmd = (
+                f"test -f {req_q}"
+                f" || {{ echo 'fujin: {req_in_tree} missing from the staging tree';"
+                f" exit 1; }}; "
+                f"{pip_cmd} -r {req_q}"
+            )
         _pip_out, ok = conn.run(pip_cmd, warn=True)
         if not ok:
+            if "missing from the staging tree" in _pip_out:
+                raise ServerOpsError(
+                    f"{staging_dir}/requirements.txt is missing from the staging"
+                    " tree; the upload did not carry the build's requirements entry"
+                )
             raise ServerOpsError(
                 f"uv pip install into staging venv failed:\n{_pip_out.strip()}"
             )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import shlex
+import subprocess
 from unittest.mock import MagicMock
 
 import pytest
@@ -60,6 +61,121 @@ def test_ensure_layout_failure(conn):
 
 
 # =============================================================================
+# ensure_app_user
+# =============================================================================
+
+
+def test_ensure_app_user_single_round_trip(conn):
+    """One command: group guard, user creation and the uid probe fused."""
+    serverops.ensure_app_user(conn, "myapp")
+    conn.run.assert_called_once()
+    cmd = conn.run.call_args[0][0]
+    assert cmd.startswith(
+        "{ getent group myapp >/dev/null 2>&1 || sudo groupadd -f myapp; }"
+    )
+    assert (
+        "sudo useradd --system --no-create-home --shell /usr/sbin/nologin"
+        " -g myapp myapp" in cmd
+    )
+    # the group is ensured BEFORE the user branch (useradd -g needs it)
+    assert cmd.index("groupadd -f myapp") < cmd.index("useradd")
+    # and the resolved uid is the final proof the user exists
+    assert cmd.endswith("&& id -u myapp")
+    assert cmd.count("id -u myapp") == 2
+
+
+def test_ensure_app_user_existing_user_runs_no_sudo(conn):
+    """Both probes succeed, so neither ``sudo`` branch is entered."""
+    conn.run.return_value = ("1000", True)
+    serverops.ensure_app_user(conn, "myapp")
+    cmd = conn.run.call_args[0][0]
+    assert cmd.count("sudo") == 2  # both behind a ``||`` guard
+    assert conn.run.call_count == 1
+
+
+def test_ensure_app_user_failure_raises(conn):
+    conn.run.return_value = ("", False)
+    with pytest.raises(serverops.ServerOpsError, match="Failed to create app user"):
+        serverops.ensure_app_user(conn, "myapp")
+
+
+def _stub(bin_dir, name, body):
+    path = bin_dir / name
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+
+
+class _LocalShellConn:
+    """Run the fused command for real with stub sudo/getent/id/useradd."""
+
+    def __init__(self, root):
+        self.bin_dir = root / "bin"
+        self.bin_dir.mkdir()
+        self.state = root / "state"
+        self.state.mkdir()
+        self.log = root / "sudo.log"
+        _stub(self.bin_dir, "sudo", 'printf "%s\\n" "sudo $*" >> "$LOG"\nexec "$@"\n')
+        _stub(self.bin_dir, "getent", '[ -f "$STATE/group" ]\n')
+        _stub(self.bin_dir, "groupadd", ': > "$STATE/group"\n')
+        _stub(
+            self.bin_dir,
+            "useradd",
+            '[ -f "$STATE/group" ] || exit 1\n: > "$STATE/user"\n',
+        )
+        _stub(self.bin_dir, "id", '[ -f "$STATE/user" ] || exit 1\necho 1000\n')
+
+    def run(self, cmd, **_kwargs):
+        proc = subprocess.run(
+            ["bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+                "STATE": str(self.state),
+                "LOG": str(self.log),
+            },
+        )
+        return proc.stdout, proc.returncode == 0
+
+    def sudo_log(self):
+        return self.log.read_text() if self.log.exists() else ""
+
+
+def test_ensure_app_user_repairs_missing_group_of_existing_user(tmp_path):
+    """A pre-existing user whose group is gone gets the group recreated."""
+    shell = _LocalShellConn(tmp_path)
+    (shell.state / "user").touch()  # user exists, group missing
+
+    serverops.ensure_app_user(shell, "myapp")
+
+    assert "sudo groupadd -f myapp" in shell.sudo_log()
+    assert "useradd" not in shell.sudo_log()
+
+
+def test_ensure_app_user_creates_group_before_user(tmp_path):
+    shell = _LocalShellConn(tmp_path)
+
+    serverops.ensure_app_user(shell, "myapp")
+
+    assert shell.sudo_log().splitlines() == [
+        "sudo groupadd -f myapp",
+        "sudo useradd --system --no-create-home --shell /usr/sbin/nologin"
+        " -g myapp myapp",
+    ]
+    assert (shell.state / "user").exists()
+
+
+def test_ensure_app_user_fast_path_runs_no_sudo(tmp_path):
+    shell = _LocalShellConn(tmp_path)
+    (shell.state / "user").touch()
+    (shell.state / "group").touch()
+
+    serverops.ensure_app_user(shell, "myapp")
+
+    assert shell.sudo_log() == ""
+
+
+# =============================================================================
 # Deploy lock
 # =============================================================================
 
@@ -84,65 +200,113 @@ def test_acquire_lock_busy_fallback_raises(conn):
         serverops.acquire_lock(conn, "/opt/fujin/myapp")
 
 
-def test_acquire_lock_flock_holder(conn):
+def test_lock_holder_writes_marker_only_after_flock(conn, monkeypatch):
+    """The flock is owned before the holder may write the marker."""
+    monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
         ("/usr/bin/flock", True),  # flock available
-        ("", True),  # holder spawn
-        ("HELD-12345-TOK1\nALIVE-12345", True),  # probe: our live holder
+        ("4242", True),  # holder spawn
+        ("OURS:4242-TOK1", True),  # probe: our holder owns the flock
     ]
-    import fujin.serverops as _so
-
-    prev = _so.secrets.token_hex
-    _so.secrets.token_hex = lambda _n: "TOK1"
-    try:
-        token = serverops.acquire_lock(conn, "/opt/fujin/myapp", ttl=7200)
-    finally:
-        _so.secrets.token_hex = prev
-    assert token == "flock:12345"
+    token = serverops.acquire_lock(conn, "/opt/fujin/myapp", ttl=7200)
+    assert token == "flock:4242"
     holder_cmd = conn.run.call_args_list[1][0][0]
-    assert "flock -x" in holder_cmd and "sleep 7200" in holder_cmd
+    assert "flock -n 9 || exit 1" in holder_cmd
+    # acquisition strictly precedes the marker write
+    assert holder_cmd.index("flock -n 9") < holder_cmd.index("-TOK1")
+    assert r"echo \$\$-TOK1 > /opt/fujin/myapp/store/lock.holder" in holder_cmd
+    assert "sleep 7200" in holder_cmd
 
 
-def _holder_token(conn) -> str:
-    """Extract the random lock token from the recorded holder command."""
-    holder_cmd = conn.run.call_args_list[1][0][0]
-    return holder_cmd.split("FUJIN_LOCK_TOKEN=")[1].split(" ")[0]
-
-
-def test_acquire_lock_foreign_live_holder_raises(conn):
+def test_acquire_lock_polls_instead_of_fixed_sleep(conn, monkeypatch):
+    """No unconditional 0.5s sleep: the probe polls for our own token."""
+    monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
         ("/usr/bin/flock", True),
-        ("", True),  # holder spawn
-        ("HELD-999\nALIVE-999", True),  # foreign live holder (different token)
+        ("4242", True),
+        ("OURS:4242-TOK1", True),
+    ]
+    serverops.acquire_lock(conn, "/opt/fujin/myapp")
+
+    probe = conn.run.call_args_list[2][0][0]
+    assert "sleep 0.5" not in probe
+    assert f"sleep {serverops.LOCK_POLL_INTERVAL}" in probe
+    assert f'[ "$i" -lt {serverops.LOCK_POLL_ATTEMPTS} ]' in probe
+    assert "flock -n" in probe
+    # success is gated on the per-call token AND the flock still being held
+    assert 'case "$h" in *-"$tok")' in probe
+    assert '"OURS:$h"' in probe
+
+
+def test_acquire_lock_foreign_live_holder_raises(conn, monkeypatch):
+    monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
+    conn.run.side_effect = [
+        ("/usr/bin/flock", True),
+        ("4242", True),  # our holder loses the race and writes nothing
+        ("BUSY:999-TOK9", True),  # foreign live holder still owns the flock
+    ]
+    with pytest.raises(serverops.ServerOpsError, match="pid 999"):
+        serverops.acquire_lock(conn, "/opt/fujin/myapp")
+
+    commands = [c[0][0] for c in conn.run.call_args_list]
+    # the foreign marker is neither removed nor overwritten; no belt switch
+    assert not any("rm -f" in c for c in commands)
+    assert not any("set -C" in c for c in commands)
+    assert conn.run.call_count == 3
+
+
+def test_acquire_lock_own_token_under_foreign_flock_never_wins(conn, monkeypatch):
+    """P1 regression: a marker carrying our token while a foreign process
+    holds the flock must never be accepted as success."""
+    monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
+    conn.run.side_effect = [
+        ("/usr/bin/flock", True),
+        ("4242", True),
+        ("BUSY:4242-TOK1", True),  # our token, but the flock is still taken
     ]
     with pytest.raises(serverops.ServerOpsError, match="Another deployment"):
         serverops.acquire_lock(conn, "/opt/fujin/myapp")
-    # must NOT fall back to the noclobber belt
-    assert not any("set -C" in c[0][0] for c in conn.run.call_args_list)
+
+
+def test_acquire_lock_live_holder_with_free_flock_raises(conn, monkeypatch):
+    monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
+    conn.run.side_effect = [
+        ("/usr/bin/flock", True),
+        ("4242", True),
+        ("ALIVE:999-TOK9", True),  # holder alive but the flock is free
+    ]
+    with pytest.raises(serverops.ServerOpsError, match="pid 999"):
+        serverops.acquire_lock(conn, "/opt/fujin/myapp")
+    assert not any("rm -f" in c[0][0] for c in conn.run.call_args_list)
 
 
 def test_acquire_lock_stale_holder_is_stolen(conn, monkeypatch):
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
         ("/usr/bin/flock", True),
-        ("", True),  # holder spawn
-        ("HELD-999-TOK9\nDEAD", True),  # dead pid -> stale, steal
-        ("", True),  # cleanup kills
-        ("", True),  # rm holder file
-        ("", True),  # retried holder spawn
-        ("HELD-222-TOK1\nALIVE-222", True),  # acquired on retry
+        ("4242", True),  # holder spawn
+        ("DEAD:999-TOK9", True),  # stale marker, flock free -> steal
+        ("", True),  # cleanup kill
+        ("", True),  # compare-and-delete of the stale marker
+        ("5555", True),  # retried holder spawn
+        ("OURS:222-TOK1", True),  # acquired on retry
     ]
     token = serverops.acquire_lock(conn, "/opt/fujin/myapp")
     assert token == "flock:222"
+    delete = conn.run.call_args_list[4][0][0]
+    assert "rm -f /opt/fujin/myapp/store/lock.holder" in delete
+    # only the marker we observed may be removed
+    assert "999-TOK9" in delete
 
 
-def test_acquire_lock_flock_free_falls_back(conn):
+def test_acquire_lock_flock_free_falls_back(conn, monkeypatch):
+    monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
         ("/usr/bin/flock", True),
-        ("", True),  # holder spawn
-        ("FREE", True),  # probe: lock is free, so we don't hold it
+        ("4242", True),  # holder spawn
+        ("FREE:", True),  # our holder never acquired: no marker, flock free
         ("", True),  # kill holder
-        ("", True),  # rm holder file
+        ("", True),  # no marker to delete
         ("", True),  # noclobber
     ]
     token = serverops.acquire_lock(conn, "/opt/fujin/myapp")
@@ -153,12 +317,12 @@ def test_acquire_lock_stale_persists_raises(conn, monkeypatch):
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
         ("/usr/bin/flock", True),
+        ("4242", True),
+        ("DEAD:999-TOK9", True),
         ("", True),
-        ("HELD-999-DEAD\nDEAD", True),
         ("", True),
-        ("", True),
-        ("", True),
-        ("HELD-999-DEAD\nDEAD", True),  # stale again on retry
+        ("5555", True),
+        ("DEAD:999-TOK9", True),  # stale again on retry
         ("", True),
         ("", True),
     ]
@@ -167,9 +331,9 @@ def test_acquire_lock_stale_persists_raises(conn, monkeypatch):
 
 
 def test_parse_holder_pid():
-    assert serverops.parse_holder_pid("HELD-42") == "42"
-    assert serverops.parse_holder_pid("HELD-?") is None
-    assert serverops.parse_holder_pid("FREE") is None
+    assert serverops.parse_holder_pid("OURS:42-abc") == "42"
+    assert serverops.parse_holder_pid("BUSY:?") is None
+    assert serverops.parse_holder_pid("FREE:") is None
 
 
 def test_release_lock_flock(conn):
@@ -205,26 +369,22 @@ def test_install_code_python(conn, tmp_path):
         "bin/myapp-1.0-py3-none-any.whl",
         app_name="myapp",
     )
-    # dist is part of the rsynced staging tree; only requirements is uploaded
-    uploaded = {c.args[0]: c.args[1] for c in conn.put.call_args_list}
-    assert uploaded == {
-        str(req): "/opt/fujin/myapp/releases/.staging-1/requirements.txt"
-    }
+    # dist and requirements are part of the rsynced staging tree: nothing is
+    # uploaded again (the pip command only asserts requirements.txt exists)
+    assert conn.put.call_args_list == []
 
     cmds = [c[0][0] for c in conn.run.call_args_list]
     assert any(
         "uv venv --relocatable -p 3.11 --managed-python" in c and "staging-1/venv" in c
         for c in cmds
     )
-    assert any(
-        "uv pip install --python" in c
-        and "--no-deps" in c
-        and "staging-1/bin/myapp-1.0-py3-none-any.whl" in c
-        and "-r /opt/fujin/myapp/releases/.staging-1/requirements.txt" in c
-        and "UV_COMPILE_BYTECODE=1" in c
-        and "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python" in c
-        for c in cmds
-    )
+    pip = next(c for c in cmds if "uv pip install --python" in c)
+    assert "--no-deps" in pip
+    assert "staging-1/bin/myapp-1.0-py3-none-any.whl" in pip
+    assert "test -f /opt/fujin/myapp/releases/.staging-1/requirements.txt" in pip
+    assert "-r /opt/fujin/myapp/releases/.staging-1/requirements.txt" in pip
+    assert "UV_COMPILE_BYTECODE=1" in pip
+    assert "UV_PYTHON_INSTALL_DIR=/opt/fujin/.python" in pip
     # no transient distfile upload/cleanup exists anymore
     assert not any(".distfile" in c for c in cmds)
 
@@ -273,6 +433,23 @@ def test_install_code_unknown_mode(conn):
             None,
             None,
             "bin/d",
+            app_name="x",
+        )
+
+
+def test_install_code_python_missing_requirements_fails(conn):
+    conn.run.side_effect = [
+        ("", True),  # uv venv
+        ("fujin: /s/requirements.txt missing from the staging tree", False),
+    ]
+    with pytest.raises(serverops.ServerOpsError, match="missing from the staging"):
+        serverops.install_code_into_staging(
+            conn,
+            "/s",
+            "python-package",
+            "3.11",
+            "local/requirements.txt",
+            "bin/myapp-1.0-py3-none-any.whl",
             app_name="x",
         )
 
@@ -612,6 +789,170 @@ def test_write_state_failure(conn):
     state = State(current="abc", previous=[], units_installed_from=[], deploys=[])
     with pytest.raises(serverops.ServerOpsError):
         serverops.write_state(conn, "/opt/fujin/myapp", state)
+
+
+# =============================================================================
+# finalize_deploy / collect_garbage
+# =============================================================================
+
+
+def _finalize_state(**kwargs) -> State:
+    return State(**{"previous": [], "deploys": [], **kwargs})
+
+
+def test_finalize_deploy_fuses_state_releases_and_audit(conn):
+    current, prev, old1, old2 = "a" * 64, "b" * 64, "c" * 64, "d" * 64
+    state = _finalize_state(current=current, previous=[prev])
+    conn.run.side_effect = [
+        (
+            "FUJIN-RELEASES\n"
+            f"{current}\n{prev}\n{old1}\n.staging-99\n{old2}\n"
+            "FUJIN-RELEASES-END\n",
+            True,
+        ),
+        ("", True),
+    ]
+    output = MagicMock()
+
+    releases, removed = serverops.finalize_deploy(
+        conn,
+        "/opt/fujin/myapp",
+        state,
+        keep_budget=0,
+        audit_line='{"operation": "deploy"}',
+        app_name="myapp",
+        output=output,
+    )
+
+    assert releases == [current, prev, old1, old2]
+    assert removed == (old1, old2)
+
+    script = conn.run.call_args_list[0][0][0]
+    # state write, release listing and the audit append in ONE round-trip
+    assert "state.json.tmp" in script and "mv -f" in script
+    assert "ls -1t releases/" in script
+    assert "sudo mkdir -p /opt/fujin/.audit" in script
+    assert "tee -a /opt/fujin/.audit/myapp.log" in script
+    assert '{\\"operation\\": \\"deploy\\"}' in script
+
+    # every GC digest goes out in a single rm -rf
+    assert conn.run.call_count == 2
+    rm_cmd = conn.run.call_args_list[1][0][0]
+    assert rm_cmd == (
+        f"rm -rf /opt/fujin/myapp/releases/{old1} /opt/fujin/myapp/releases/{old2}"
+    )
+    output.info.assert_called_once()
+
+
+def test_finalize_deploy_names_the_failing_step(conn):
+    state = _finalize_state(current="a" * 64)
+    conn.run.return_value = ("FUJIN-FAIL:state", False)
+    with pytest.raises(serverops.ServerOpsError, match="finalize step: state"):
+        serverops.finalize_deploy(
+            conn, "/opt/fujin/myapp", state, keep_budget=0, output=MagicMock()
+        )
+
+
+def test_finalize_deploy_names_the_failing_gc_step(conn):
+    current, old = "a" * 64, "c" * 64
+    state = _finalize_state(current=current)
+    conn.run.side_effect = [
+        (f"FUJIN-RELEASES\n{current}\n{old}\nFUJIN-RELEASES-END\n", True),
+        ("rm: permission denied", False),
+    ]
+    output = MagicMock()
+    _releases, removed = serverops.finalize_deploy(
+        conn, "/opt/fujin/myapp", state, keep_budget=0, output=output
+    )
+    assert removed == (old,)
+    message = output.warning.call_args[0][0]
+    assert "finalize step: garbage collection" in message
+
+
+def test_finalize_deploy_audit_failure_is_not_fatal(conn):
+    state = _finalize_state(current="a" * 64)
+    conn.run.return_value = (
+        "FUJIN-RELEASES\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "FUJIN-RELEASES-END\nFUJIN-WARN:audit\n",
+        True,
+    )
+    output = MagicMock()
+    releases, removed = serverops.finalize_deploy(
+        conn,
+        "/opt/fujin/myapp",
+        state,
+        keep_budget=0,
+        audit_line="{}",
+        app_name="myapp",
+        output=output,
+    )
+    assert releases == ["a" * 64]
+    assert removed == ()
+    assert "audit entry" in output.warning.call_args[0][0]
+
+
+def test_finalize_deploy_without_state_skips_write_and_gc(conn):
+    """Auto-rollback with no recorded state: audit only, no state/GC."""
+    conn.run.return_value = ("FUJIN-RELEASES\nx\nFUJIN-RELEASES-END\n", True)
+    releases, removed = serverops.finalize_deploy(
+        conn,
+        "/opt/fujin/myapp",
+        None,
+        keep_budget=0,
+        audit_line="{}",
+        app_name="myapp",
+        output=MagicMock(),
+    )
+    assert releases == ["x"]
+    assert removed == ()
+    script = conn.run.call_args_list[0][0][0]
+    assert "state.json.tmp" not in script
+    assert conn.run.call_count == 1
+
+
+def test_finalize_deploy_without_current_skips_gc(conn):
+    """No live release anchors the keep-set: deleting would hit every release."""
+    conn.run.return_value = (
+        "FUJIN-RELEASES\n" + "a" * 64 + "\n" + "b" * 64 + "\nFUJIN-RELEASES-END\n",
+        True,
+    )
+    output = MagicMock()
+    releases, removed = serverops.finalize_deploy(
+        conn,
+        "/opt/fujin/myapp",
+        _finalize_state(current=None),
+        keep_budget=0,
+        output=output,
+    )
+    assert releases == ["a" * 64, "b" * 64]
+    assert removed == ()
+    assert conn.run.call_count == 1  # no rm -rf round-trip
+    output.info.assert_not_called()
+
+
+def test_collect_garbage_one_command(conn):
+    current, old1, old2 = "a" * 64, "b" * 64, "c" * 64
+    state = _finalize_state(current=current)
+    output = MagicMock()
+
+    killed = serverops.collect_garbage(
+        conn, "/opt/fujin/myapp", state, [current, old1, old2], 0, output
+    )
+
+    assert killed == (old1, old2)
+    conn.run.assert_called_once()
+    assert conn.run.call_args[0][0] == (
+        f"rm -rf /opt/fujin/myapp/releases/{old1} /opt/fujin/myapp/releases/{old2}"
+    )
+    output.info.assert_called_once()
+
+
+def test_write_state_failure_semantics_unchanged(conn):
+    """write_state itself is still a single atomic command (rollback/doctor)."""
+    state = _finalize_state(current="a" * 64)
+    serverops.write_state(conn, "/opt/fujin/myapp", state)
+    cmd = conn.run.call_args[0][0]
+    assert "base64 -d" in cmd and "mv -f" in cmd
 
 
 def test_read_current_manifest(conn):

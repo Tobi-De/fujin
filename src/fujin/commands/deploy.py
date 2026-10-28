@@ -22,7 +22,7 @@ from rich.table import Table
 from fujin import build, connection
 from fujin import manifest as m
 from fujin import serverops, store, transfer
-from fujin.audit import log_operation
+from fujin.audit import format_operation
 from fujin.commands import BaseCommand
 from fujin.config import get_git_short_hash
 from fujin.errors import (
@@ -785,14 +785,21 @@ class Deploy(BaseCommand):
             else:
                 self._converge(conn, client_manifest)
             self._run_hooks(conn, "post_start", context, release_path=None)
-            self._gc(conn, state, self._list_releases(conn))
-            log_operation(
+            serverops.finalize_deploy(
                 conn,
-                config.app_name,
-                "noop",
-                host=self.selected_host.name or self.selected_host.address,
-                version=config.local_version,
-                digest=client_digest,
+                app_dir,
+                state,
+                keep_budget=config.versions_to_keep,
+                persist_state=False,
+                audit_line=format_operation(
+                    config.app_name,
+                    "noop",
+                    host=self.selected_host.name or self.selected_host.address,
+                    version=config.local_version,
+                    digest=client_digest,
+                ),
+                app_name=config.app_name,
+                output=self.output,
             )
             self.output.success("Deployment already up to date!")
             return
@@ -1038,16 +1045,21 @@ class Deploy(BaseCommand):
                 client_digest=client_digest,
                 config_fingerprint=client_manifest.config_fingerprint,
             )
-            serverops.write_state(conn, app_dir, new_state)
-            self._gc(conn, new_state, self._list_releases(conn))
-            log_operation(
+            serverops.finalize_deploy(
                 conn,
-                config.app_name,
-                "deploy",
-                host=self.selected_host.name or self.selected_host.address,
-                version=config.local_version,
-                git_commit=get_git_short_hash(),
-                digest=final_digest,
+                app_dir,
+                new_state,
+                keep_budget=config.versions_to_keep,
+                audit_line=format_operation(
+                    config.app_name,
+                    "deploy",
+                    host=self.selected_host.name or self.selected_host.address,
+                    version=config.local_version,
+                    git_commit=get_git_short_hash(),
+                    digest=final_digest,
+                ),
+                app_name=config.app_name,
+                output=self.output,
             )
         except DeploymentError as exc:
             # Cleanup is best effort: the taxonomy code (3/4/5/6) of the
@@ -1629,6 +1641,7 @@ class Deploy(BaseCommand):
             self._converge(conn, prev_manifest)
 
         state = serverops.read_state(conn, app_dir)
+        new_state = None
         if state is not None:
             new_state = store.record_rollback(
                 state,
@@ -1636,14 +1649,19 @@ class Deploy(BaseCommand):
                 datetime.now(UTC).isoformat(),
                 config_fingerprint=prev_manifest.config_fingerprint,
             )
-            serverops.write_state(conn, app_dir, new_state)
-            self._gc(conn, new_state, self._list_releases(conn))
-        log_operation(
+        serverops.finalize_deploy(
             conn,
-            self.config.app_name,
-            "rollback",
-            host=self.selected_host.name or self.selected_host.address,
-            digest=prev_digest,
+            app_dir,
+            new_state,
+            keep_budget=self.config.versions_to_keep,
+            audit_line=format_operation(
+                self.config.app_name,
+                "rollback",
+                host=self.selected_host.name or self.selected_host.address,
+                digest=prev_digest,
+            ),
+            app_name=self.config.app_name,
+            output=self.output,
         )
 
     # =======================================================================================
@@ -1668,25 +1686,6 @@ class Deploy(BaseCommand):
             )
         else:
             self.output.info("Caddy reloaded with the new configuration.")
-
-    # =======================================================================================
-    # Store / helpers
-    # =======================================================================================
-
-    def _list_releases(self, conn) -> list[str]:
-        """Digests under releases/, newest (mtime) first; staging excluded."""
-        return serverops.list_releases(conn, self.config.app_dir)
-
-    def _gc(self, conn, state: store.State, releases: list[str]) -> None:
-        """GC via store.gc_plan: keep current + previous[0] + newest releases."""
-        serverops.collect_garbage(
-            conn,
-            self.config.app_dir,
-            state,
-            releases,
-            self.config.versions_to_keep,
-            self.output,
-        )
 
     # =======================================================================================
     # Hooks
