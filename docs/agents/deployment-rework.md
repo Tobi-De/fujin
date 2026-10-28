@@ -143,10 +143,20 @@ Implemented so far (all unit-tested, committed):
 - Commands >4 KiB are spooled to a private remote temp file (`sh <file>`);
   admin scripts use `run_script` (`sudo bash <file>`). This removes the
   libssh2 exec-channel stalls that made CI time out.
-- Integration suite: 13 tests, ~32 s with `-n 4` (was 27 tests, 15+ min and
-  hanging). Harness: content-addressed image + flock, shared container for
-  app-scoped tests with per-app teardown, fresh containers only for
-  bootstrap/create-user/harden, no fixed sleeps.
+- Unchanged unit/dropin sets and unchanged Caddyfiles are not rewritten:
+  `install_units` is skipped when `units_installed_from` matches the live
+  digest and the manifest diff has no unit change; `install_caddyfile`
+  short-circuits when the server content already matches.
+- The local build and the client manifest/digest are computed before the SSH
+  connection and the remote lock; a build failure exits 4 with no SSH I/O.
+  Concurrent local builds serialize on `.fujin/cache/.build.lock`.
+- `rsync` and `conn.get()` share one OpenSSH ControlMaster
+  (`ControlPath=/tmp/fujin-ssh-%C`, `ControlPersist=60s`).
+- Integration suite: 14 tests, ~32–52 s with `-n 4` (was 27 tests, 15+ min and
+  hanging). CI runs it serially (~2 min job) because four privileged
+  systemd containers starved the runner. Harness: content-addressed image +
+  flock, shared container for app-scoped tests with per-app teardown, fresh
+  containers only for bootstrap/create-user/harden, no fixed sleeps.
 
 Measured on the Docker test app (small dependency set): v1 full install
 1.32 s, v2 venv clone 1.13 s. The clone/hash-reuse win grows with the number
@@ -215,11 +225,14 @@ The one skipped unit test is the `visudo -c` syntax check (skips when
 - **Transport:** large commands are spooled now; the remaining risk is the
   default 300 s idle deadline on genuinely silent long commands. Consider a
   shorter default plus per-command overrides.
-- **Speedup items not yet done** (`docs/agents/deployment-speedup.md`):
-  skip unchanged unit/Caddy installs (item 3), build before opening SSH
-  (item 5), further staging fusion (item 7 remainder), OpenSSH ControlMaster
-  for rsync/`get` (item 11), and fusing the merged-manifest write to drop the
-  SCP (item 2 remainder).
+- **Speedup items still open** (`docs/agents/deployment-speedup.md`):
+  item 2 second half (write the merged manifest server-side and drop the SCP)
+  and the item 7 remainder (fewer staging round trips). Everything else —
+  items 1, 3, 4, 5, 6, 8, 9, 10, 11 — is implemented and unit-tested.
+- A real-app measurement is still missing: the numbers above come from the
+  Docker test app (a handful of dependencies). Profile `time fujin deploy` on
+  a real Django project (hundreds of venv files) before/after to confirm the
+  venv-clone and hash-reuse wins.
 - The older open issues (pre-dating this rework) were not touched; some may
   be redundant now (`#67`, `#72`, …) and need a pass.
 - `#95` follow-ups deliberately out of scope: attachments/SSH keys,
