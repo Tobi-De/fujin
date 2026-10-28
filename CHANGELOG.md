@@ -37,6 +37,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 📚 Documentation
 
+- *(server)* Drop Sphinx role from harden help text
 - Add fujin cache page to commands reference
 
 ### 🎨 Styling

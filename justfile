@@ -131,7 +131,7 @@ download-pocketbase:
     uv run pytest --ignore=tests/integration -sv {{ ARGS }}
 
 @test-integration *ARGS:
-    uv run pytest tests/integration {{ ARGS }}
+    uv run pytest tests/integration --timeout=180 --timeout-method=thread {{ ARGS }}
 
 # -------------------------------------------------------------------------
 # RELEASE UTILITIES

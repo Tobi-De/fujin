@@ -53,6 +53,7 @@ scripts.fujin = "fujin.__main__:main"
 dev = [
   "fujin-secrets-bitwarden",
   "pytest>=9.0.1",
+  "pytest-timeout>=2.4",
 ]
 docs = [
   "myst-parser",
