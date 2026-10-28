@@ -505,7 +505,10 @@ user
 
 **(Required)**
 
-The login user for running remote tasks. Should have passwordless sudo access for optimal operation.
+The login user for running remote tasks. It needs passwordless sudo for a
+fixed set of deployment commands, installed by ``fujin server create-user``
+(new servers) or ``fujin server harden`` (existing servers). It does **not**
+need ``NOPASSWD:ALL``; see :ref:`deploy-user-sudo`.
 
 .. note::
 
@@ -579,6 +582,108 @@ Environment variable containing the SSH key passphrase if your key is encrypted.
    [[hosts]]
    key_filename = "~/.ssh/deploy_key"
    key_passphrase_env = "SSH_KEY_PASSPHRASE"
+
+.. _deploy-user-sudo:
+
+Deploy user sudo permissions
+----------------------------
+
+Fujin **never grants** ``NOPASSWD:ALL``. The deploy user receives passwordless
+sudo for a fixed, app-scoped command list, installed as a drop-in at
+``/etc/sudoers.d/fujin-<user>``. The drop-in defines ``Defaults`` plus
+``Cmnd_Alias`` groups and two rules::
+
+    Defaults:<user> env_keep += "DEBIAN_FRONTEND"
+    Cmnd_Alias FUJIN_DEPLOY = ...
+    <user> ALL=(root) NOPASSWD: FUJIN_DEPLOY
+    <user> ALL=(<app_user>) NOPASSWD: FUJIN_DEPLOY_APP
+
+The second rule is only ``sudo -u <app_user>`` (``fujin server exec
+--appenv`` and ``fujin app exec``) and the app user is unprivileged, so it
+does not grant root.
+
+Allowed commands, rendered for the project's ``app_name``:
+
+**systemd** - ``systemctl``, ``journalctl``
+    ``systemctl {start,stop,restart,reload-or-restart,enable,disable,
+    reset-failed,is-active,is-failed,status}`` only with unit arguments
+    matching ``<app>-*``; bare ``daemon-reload``; ``reload caddy``;
+    ``journalctl -u <app>-*`` for ``fujin app logs``.
+
+**app files** - ``mkdir``, ``touch``, ``tee``, ``mv``, ``rm``, ``chown``,
+``chgrp``, ``chmod``, ``find``
+    Only under ``/opt/fujin/<app>*`` (staging, releases, store, app user
+    ownership, setgid/mode fixups, garbage collection).
+
+**unit and Caddy files** - ``tee``, ``mv``, ``rm``, ``cp``, ``chown``
+    Only under ``/etc/systemd/system/<app>*`` (including
+    ``*.wants/<app>*``) and ``/etc/caddy/conf.d/<app>.caddy*``, plus
+    ``caddy validate`` for that config and ``caddy upgrade``.
+
+**audit log** - ``mkdir -p /opt/fujin/.audit``, ``tee -a
+/opt/fujin/.audit/<app>.log``.
+
+**runtime directory** - ``chmod g+rx /run/<app>*`` (socket access for
+``fujin doctor --fix``).
+
+**app account** - ``groupadd -f <app_user>``, the exact ``useradd`` command,
+``userdel <app_user>``, ``pkill [-9] -u <app_user>`` (teardown). These let a
+fresh deploy create its own app user without ``NOPASSWD:ALL``.
+
+**packages** - the exact ``apt-get update -qq``, ``apt-get ... upgrade`` and
+``apt-get ... install sqlite3 curl rsync`` lines run by
+``fujin server upgrade``. ``DEBIAN_FRONTEND=noninteractive`` is kept across
+sudo by the ``Defaults`` line.
+
+There is deliberately **no** grant for ``visudo``, ``python3``, ``base64``,
+editors, or bare ``bash`` as root.
+
+Administrative actions are **not** in the scoped rule and therefore need an
+operator with full sudo: ``fujin server bootstrap``, ``fujin server
+create-user``, ``fujin server harden`` and ``fujin server migrate``. In
+particular ``harden`` runs as one ``sudo bash`` transaction.
+
+The exact list lives in ``src/fujin/sudoers.py`` and is covered by a test
+that scans every ``sudo`` invocation in the deploy-path modules and fails
+(not skips) when a command is interpolated or carries an environment
+assignment after ``sudo``. It compares the full command path (for example
+``/usr/bin/systemctl``), not just the basename.
+
+Honest residual risk: writing ``/etc/systemd/system/<app>-*.service`` is
+equivalent to executing code as root, and the file-command globs can be
+abused with path traversal by a malicious deploy user. A stolen deploy
+credential therefore remains effectively privileged. The rule removes the
+trivial ``sudo anything`` capability, prevents interpreters/editors from
+being run as root, and makes the normal deploy path least-privilege; it is
+**not** a sandbox for a deploy user that is already actively malicious.
+
+Validation and rollback
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Every drop-in is produced inside a single root shell script: the rule is
+written to an unpredictable, root-owned ``mktemp`` file *inside*
+``/etc/sudoers.d`` (never ``/tmp``, no symlink following), checked with
+``visudo -c -f``, installed with ``install -m 0440 -o root -g root``, and
+the complete configuration is validated again with ``visudo -c``. A
+``trap`` restores the previous drop-in on any failure. ``create-user`` also
+verifies (client side and again inside the root script) that
+``/etc/sudoers`` loads ``/etc/sudoers.d``; without the include it aborts
+with instructions instead of installing a rule that sudo would ignore.
+
+Existing servers keep their old ``NOPASSWD:ALL`` line until you opt in with
+``fujin server harden``. That command is an administrator action: it runs
+one root shell script which verifies the include, installs the validated
+drop-in, and only then rewrites ``/etc/sudoers`` — removing **only** the
+user's exact ``<user> ALL=(ALL) NOPASSWD:ALL`` whole-line rule (the
+``(ALL:ALL)`` spelling is accepted; the filter runs inside the script
+against the current file). It backs up ``/etc/sudoers`` to
+``/etc/sudoers.fujin-backup-<timestamp>`` **only when it actually rewrites
+it**, validates the replacement with ``visudo -c`` before ``mv``, runs a
+final ``visudo -c``, and verifies with ``sudo -l -U <user>`` that the alias
+is present and no ``NOPASSWD: ALL`` rule remains. On any failure the trap
+restores both ``/etc/sudoers`` and the previous drop-in and re-validates;
+the command never claims success unless that verification passed. See
+:doc:`commands/server`.
 
 .. _config-fingerprint:
 

@@ -183,7 +183,7 @@ class App(BaseCommand):
             self.output.output("\n[bold]Status:[/bold]")
             for unit_name in deployed_unit.service_instances():
                 # Get status with uptime info
-                status_cmd = f"sudo systemctl show {unit_name} --property=ActiveState,SubState,LoadState,ActiveEnterTimestamp --no-pager"
+                status_cmd = f"systemctl show {unit_name} --property=ActiveState,SubState,LoadState,ActiveEnterTimestamp --no-pager"
                 status_output, success = conn.run(status_cmd, warn=True, hide=True)
 
                 if success:
@@ -451,7 +451,7 @@ class App(BaseCommand):
                 self.output.warning("No services found")
                 return
 
-            conn.run(f"sudo systemctl cat {' '.join(names)} --no-pager", pty=True)
+            conn.run(f"systemctl cat {' '.join(names)} --no-pager", pty=True)
 
     def _get_available_options(self) -> str:
         """Get formatted, colored list of available service and unit options."""

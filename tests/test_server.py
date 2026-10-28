@@ -1,16 +1,20 @@
-"""Tests for server command - setup-ssh functionality.
+"""Tests for the server commands.
 
-Bootstrap, status, and create-user tests have been migrated to integration tests.
-See tests/integration/test_server_bootstrap.py
+Bootstrap, status and end-to-end create-user/deploy flows live in
+tests/integration/test_server_bootstrap.py.  The unit tests here cover
+setup-ssh, upgrade handling and the scoped-sudoers transactions.
 """
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import cappa
 import pytest
 
+from fujin import sudoers
 from fujin.commands.server import Server
 from fujin.config import tomllib
 from fujin.errors import SSHKeyError
@@ -297,7 +301,7 @@ def test_upgrade_command_all_success(minimal_config, mock_connection):
         elif "uv --version" in cmd:
             return ("uv 0.5.0", True)  # uv version format
         elif (
-            "apt update" in cmd
+            "apt-get update" in cmd
             or "caddy upgrade" in cmd
             or "uv self update" in cmd
             or "uv python upgrade" in cmd
@@ -339,7 +343,7 @@ def test_upgrade_command_partial_failure(minimal_config, mock_connection):
             return ("v2.8.0 h1:hash", True)  # Caddy version format
         elif "uv --version" in cmd:
             return ("uv 0.5.0", True)  # uv version format
-        elif "apt update" in cmd:
+        elif "apt-get update" in cmd:
             return ("", True)  # apt succeeds
         elif "caddy upgrade" in cmd:
             return ("", False)  # Caddy upgrade fails
@@ -377,7 +381,7 @@ def test_upgrade_command_components_not_installed(minimal_config, mock_connectio
     def run_side_effect(cmd, warn=False, hide=False):
         if "command -v" in cmd:
             return ("", False)  # Nothing installed
-        elif "apt update" in cmd:
+        elif "apt-get update" in cmd:
             return ("", True)  # apt succeeds
         return ("", True)
 
@@ -400,3 +404,217 @@ def test_upgrade_command_components_not_installed(minimal_config, mock_connectio
         ) or any(
             "not installed" in str(call) for call in mock_output.warning.call_args_list
         )
+
+
+# ============================================================================
+# create-user / harden (scoped sudoers, issue #93)
+# ============================================================================
+
+
+class FakeConn:
+    """Records commands; exact-match responses first, then substring match."""
+
+    def __init__(self, exact=None, contains=None):
+        self.commands: list[str] = []
+        self.exact = exact or {}
+        self.contains = contains or {}
+
+    def run(self, command, **kwargs):
+        self.commands.append(command)
+        if command in self.exact:
+            return self.exact[command]
+        for needle, result in self.contains.items():
+            if needle in command:
+                return result
+        return ("", True)
+
+
+def _run_with_fake(conn: FakeConn, config, method, *args, **kwargs):
+    with (
+        patch("fujin.config.Config.read", return_value=config),
+        patch(
+            "fujin.connection.connection",
+            return_value=MagicMock(
+                __enter__=lambda x: conn, __exit__=lambda *args: False
+            ),
+        ),
+        patch.object(Server, "output", MagicMock()) as mock_output,
+    ):
+        server = Server()
+        getattr(server, method)(*args, **kwargs)
+    return mock_output
+
+
+SUDOERS_WITH_INCLUDE = (
+    "#includedir /etc/sudoers.d\n\nroot ALL=(ALL:ALL) ALL\n%sudo ALL=(ALL:ALL) ALL\n"
+)
+
+SUDOERS_WITH_LEGACY = (
+    "#includedir /etc/sudoers.d/\n"
+    "\n"
+    "root ALL=(ALL:ALL) ALL\n"
+    "deploy ALL=(ALL) NOPASSWD:ALL\n"
+    "%sudo ALL=(ALL:ALL) ALL\n"
+)
+
+CAT = "sudo cat /etc/sudoers"
+
+
+def _install_cmd(name: str = "newdeploy") -> str:
+    rule = sudoers.render_rule(name, "testapp", "testapp")
+    script = sudoers.install_dropin_script(name, rule)
+    return f"sudo bash -c {shlex.quote(script)}"
+
+
+def _harden_cmd() -> str:
+    rule = sudoers.render_rule("deploy", "testapp", "testapp")
+    script = sudoers.harden_script("deploy", "testapp", "testapp", rule)
+    return f"sudo bash -c {shlex.quote(script)}"
+
+
+def test_create_user_installs_scoped_dropin_and_never_appends_nopasswd(
+    minimal_config,
+):
+    cmd = _install_cmd()
+    conn = FakeConn(
+        exact={CAT: (SUDOERS_WITH_INCLUDE, True), cmd: ("FUJIN_DROPIN_OK", True)}
+    )
+    output = _run_with_fake(conn, minimal_config, "create_user", "newdeploy")
+
+    assert conn.commands[0] == CAT
+    creation = conn.commands[1]
+    assert "sudo adduser --disabled-password" in creation
+    assert "NOPASSWD" not in creation
+    assert "/etc/sudoers" not in creation
+    assert cmd in conn.commands
+
+    joined = "\n".join(conn.commands)
+    assert "NOPASSWD:ALL" not in joined
+    assert "install -m 0440 -o root -g root" in cmd
+    assert "/etc/sudoers.d/fujin-newdeploy" in cmd
+    # Drop-in content is installed, never appended to /etc/sudoers.
+    assert not any("tee -a /etc/sudoers" in c for c in conn.commands)
+    assert output.success.called
+
+
+def test_create_user_aborts_with_instructions_when_sudoers_d_is_not_included(
+    minimal_config,
+):
+    conn = FakeConn(exact={CAT: ("root ALL=(ALL:ALL) ALL\n", True)})
+    with pytest.raises(cappa.Exit) as exc:
+        _run_with_fake(conn, minimal_config, "create_user", "newdeploy")
+
+    assert exc.value.code == 1
+    assert conn.commands == [CAT]
+    assert "includedir" in str(exc.value.message)
+
+
+def test_create_user_rejects_dot_in_username(minimal_config):
+    conn = FakeConn()
+    with pytest.raises(cappa.Exit) as exc:
+        _run_with_fake(conn, minimal_config, "create_user", "deploy.prod")
+
+    assert exc.value.code == 1
+    assert conn.commands == []
+
+
+def test_create_user_does_not_report_success_when_validation_fails(minimal_config):
+    cmd = _install_cmd()
+    conn = FakeConn(
+        exact={
+            CAT: (SUDOERS_WITH_INCLUDE, True),
+            cmd: ("FUJIN_DROPIN_FAILED reason=error", False),
+        }
+    )
+    with pytest.raises(cappa.Exit) as exc:
+        _run_with_fake(conn, minimal_config, "create_user", "newdeploy")
+
+    assert exc.value.code == 1
+    assert "restored the previous state" in str(exc.value.message)
+
+
+def test_harden_dry_run_mutates_nothing(minimal_config):
+    conn = FakeConn(exact={CAT: (SUDOERS_WITH_LEGACY, True)})
+    output = _run_with_fake(conn, minimal_config, "harden", dry_run=True)
+
+    assert conn.commands == [CAT]
+    printed = "\n".join(
+        str(call) for call in output.output.call_args_list + output.info.call_args_list
+    )
+    assert "deploy ALL=(root) NOPASSWD: FUJIN_DEPLOY" in printed
+    assert "deploy ALL=(ALL) NOPASSWD:ALL" in printed
+    assert "no changes made" in printed.lower()
+
+
+def test_harden_runs_one_root_transaction_and_removes_exact_legacy_line(
+    minimal_config,
+):
+    cmd = _harden_cmd()
+    conn = FakeConn(
+        exact={
+            cmd: (
+                "FUJIN_HARDEN_OK backup=/etc/sudoers.fujin-backup-20260101T000000Z",
+                True,
+            ),
+        }
+    )
+    output = _run_with_fake(conn, minimal_config, "harden")
+
+    # Exactly one root shell (one round trip); no client-side read, backup
+    # or replace step that could leave a half-migrated box behind.
+    assert conn.commands == [cmd]
+    assert "trap cleanup EXIT" in cmd
+    assert 'cp -a "$BACKUP" "$SUDOERS"' in cmd
+    assert "sed -E" in cmd
+    assert "sudo -l -U deploy" in cmd
+    assert any(
+        "Backup of the previous sudoers file" in str(call)
+        for call in output.info.call_args_list
+    )
+    assert output.success.called
+
+
+def test_harden_skips_sudoers_rewrite_when_no_legacy_rule(minimal_config):
+    cmd = _harden_cmd()
+    conn = FakeConn(exact={cmd: ("FUJIN_HARDEN_OK backup=none", True)})
+    output = _run_with_fake(conn, minimal_config, "harden")
+
+    assert conn.commands == [cmd]
+    printed = "\n".join(str(call) for call in output.info.call_args_list)
+    assert "was not modified" in printed
+
+
+def test_harden_aborts_when_sudoers_d_is_not_included(minimal_config):
+    cmd = _harden_cmd()
+    conn = FakeConn(
+        exact={
+            cmd: ("FUJIN_HARDEN_FAILED reason=includedir-missing", False),
+        }
+    )
+    with pytest.raises(cappa.Exit) as exc:
+        _run_with_fake(conn, minimal_config, "harden")
+
+    assert exc.value.code == 1
+    assert conn.commands == [cmd]
+    assert "rolled back" in str(exc.value.message)
+
+
+def test_harden_post_install_validation_failure_rolls_back_without_success_claim(
+    minimal_config,
+):
+    cmd = _harden_cmd()
+    conn = FakeConn(
+        exact={
+            # The final `visudo -c` (after the mv) failed inside the script.
+            cmd: ("FUJIN_HARDEN_FAILED reason=visudo", False),
+        }
+    )
+    with pytest.raises(cappa.Exit) as exc:
+        _run_with_fake(conn, minimal_config, "harden")
+
+    assert exc.value.code == 1
+    assert "rolled back" in str(exc.value.message)
+    assert conn.commands == [cmd]
+    # The script, not the client, owns the restore.
+    assert 'cp -a "$BACKUP" "$SUDOERS"' in cmd
+    assert 'mv -f "$DROPIN_BAK" "$DROPIN"' in cmd

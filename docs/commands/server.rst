@@ -15,7 +15,8 @@ Use ``fujin server`` to manage server-level operations:
 - View server information
 - Bootstrap server with required dependencies
 - Upgrade server components (Caddy, uv, Python, system packages)
-- Create deployment users
+- Create deployment users with a scoped sudo rule
+- Harden an existing server (replace ``NOPASSWD:ALL`` with the scoped rule)
 - Set up SSH keys
 - Execute commands on the server with optional app environment
 
@@ -115,25 +116,97 @@ The upgrade command shows version changes (e.g., "Caddy upgraded from v2.7.0 to 
 create-user
 ~~~~~~~~~~~
 
-Create a new user with sudo access and SSH key setup.
+Create a new user with a scoped sudo rule and SSH key setup.
 
 .. image:: ../_static/images/help/server-create-user-help.png
    :alt: fujin server create-user command help
    :width: 80%
 
+This is an **administrator action** (creating users needs full sudo); it is
+not part of the scoped deploy rule.
+
 Creates a deployment user with:
 
-- Passwordless sudo access
-- SSH keys copied from root user
-- Home directory and proper permissions
+- A scoped passwordless sudo rule in ``/etc/sudoers.d/fujin-<name>``
+  (see :ref:`deploy-user-sudo` for the exact command list)
+- SSH keys copied from the current user
+- A home directory with proper permissions
 
-**Example:**
+The rule is installed by one root shell script: checked with
+``visudo -c -f`` before installation, ``install -m 0440 -o root -g root``
+into the drop-in path, and the complete configuration validated with
+``visudo -c`` afterwards. The scratch file is an unpredictable root-owned
+``mktemp`` file inside ``/etc/sudoers.d`` (never ``/tmp``), and any failure
+restores the previous drop-in. ``fujin`` never appends ``NOPASSWD:ALL`` to
+``/etc/sudoers``.
+
+Before creating anything, ``create-user`` verifies that ``/etc/sudoers``
+loads ``/etc/sudoers.d`` (inside the root script too). If the include is
+missing it aborts with instructions; a rule sudo would ignore is never
+installed and success is never reported.
 
 .. code-block:: bash
 
    $ fujin server create-user deploy
 
 This creates a user named "deploy" that you can use for deployments.
+
+.. note::
+
+   The rule includes a ``sudo -u <app_user>`` (Runas) entry used by
+   ``server exec --appenv``. The app user is unprivileged, so that entry
+   does not grant root.
+
+   User names containing ``.`` are rejected: sudo ignores includedir files
+   whose name contains a dot, so such a drop-in would silently never load.
+
+harden
+~~~~~~
+
+Replace ``NOPASSWD:ALL`` with the scoped sudo rule on an existing server.
+
+This is an **opt-in, administrator-only migration**: it runs the whole
+change as one ``sudo bash`` transaction, so the connecting user needs full
+sudo. Servers created by older fujin versions still carry
+``<user> ALL=(ALL) NOPASSWD:ALL``; nothing changes until you run this
+command.
+
+.. code-block:: bash
+
+   # Preview the rule and the exact /etc/sudoers edit
+   $ fujin server harden --dry-run
+
+   # Apply it (needs full sudo)
+   $ fujin server harden
+
+The root script:
+
+1. Refuses to run unless ``/etc/sudoers`` includes ``/etc/sudoers.d``
+   (installing the drop-in without the include would be ignored).
+2. Installs ``/etc/sudoers.d/fujin-<user>`` from an unpredictable
+   root-owned ``mktemp`` file inside ``/etc/sudoers.d``, after
+   ``visudo -c -f`` and with mode ``0440 root:root``.
+3. If the user's exact whole-line rule exists in the current
+   ``/etc/sudoers`` (``<user> ALL=(ALL) NOPASSWD:ALL`` or the ``(ALL:ALL)``
+   spelling), backs it up to
+   ``/etc/sudoers.fujin-backup-<UTC timestamp>`` and replaces the file with
+   an exact-line-filtered copy that passed ``visudo -c -f``. The filter runs
+   inside the script against the live file; other users, comments and
+   compound/list rules are preserved. No backup is written when no rewrite
+   is needed.
+4. Runs a final ``visudo -c`` and verifies with ``sudo -l -U <user>`` that
+   the ``FUJIN_DEPLOY`` alias is visible and no ``NOPASSWD: ALL`` rule
+   remains.
+5. Prints ``FUJIN_HARDEN_OK`` (or ``FUJIN_HARDEN_FAILED reason=...``). A
+   ``trap`` restores both ``/etc/sudoers`` and the previous drop-in on any
+   failure and re-validates, so there is no path that ends without
+   passwordless sudo while claiming success.
+
+Run ``fujin deploy`` afterwards (as the deploy user) to confirm a normal
+deployment still works.
+
+**Dry run output** shows the rendered drop-in and the line that would be
+removed; it makes no changes to the server.
 
 setup-ssh
 ~~~~~~~~~
@@ -162,25 +235,45 @@ Common Workflows
 
 **Initial server setup**
 
+Bootstrap and user creation are administrator actions (they need full sudo);
+the scoped rule only covers deployment.
+
 .. code-block:: bash
 
    # 1. Set up SSH keys (if not already configured)
    fujin server setup-ssh
 
-   # 2. Create a deployment user
-   fujin server create-user deploy
-
-   # 3. Update fujin.toml to use the new user
-   # Edit fujin.toml: user = "deploy"
-
-   # 4. Bootstrap the server
+   # 2. Bootstrap the server as an administrator (full sudo)
    fujin server bootstrap
 
-**Or use the all-in-one command:**
+   # 3. Create a deployment user (administrator action)
+   fujin server create-user deploy
+
+   # 4. Update fujin.toml to use the new user
+   # Edit fujin.toml: user = "deploy"
+
+   # 5. Deploy as the new user with only the scoped sudo rule
+   fujin deploy
+
+**Or use the all-in-one command (requires full sudo for bootstrap):**
 
 .. code-block:: bash
 
    fujin up  # Does bootstrap + deploy in one step
+
+**Migrate an existing server off NOPASSWD:ALL**
+
+.. code-block:: bash
+
+   # 1. Inspect the scoped rule and the /etc/sudoers edit
+   fujin server harden --dry-run
+
+   # 2. Apply it as an administrator (one root transaction, opt-in,
+   #    /etc/sudoers is backed up and restored on failure)
+   fujin server harden
+
+   # 3. Confirm deployments still work
+   fujin deploy
 
 **Keep server up to date**
 

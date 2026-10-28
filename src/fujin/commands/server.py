@@ -16,6 +16,7 @@ from rich.table import Table
 
 from fujin import caddy
 from fujin import serverops
+from fujin import sudoers
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
 from fujin import connection
@@ -31,6 +32,7 @@ class Server(BaseCommand):
     Examples:
       fujin server setup-ssh      Interactive SSH key setup
       fujin server bootstrap      Setup server with dependencies and Caddy
+      fujin server harden         Replace NOPASSWD:ALL with a scoped rule
       fujin server status         Show server system information
     """
 
@@ -219,12 +221,21 @@ class Server(BaseCommand):
 
     def _upgrade_system(self, conn, packages: str | None = None):
         self.output.info("Upgrading system packages...")
+        # DEBIAN_FRONTEND survives the sudo call because the scoped rule has
+        # `Defaults:<user> env_keep += "DEBIAN_FRONTEND"`.  The Dpkg options
+        # are part of the exact command lines allowed by the rule.
         apt_opts = (
-            "-o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'"
+            "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
         )
-        command = f"sudo apt update -qq && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y -qq {apt_opts}"
+        command = (
+            "DEBIAN_FRONTEND=noninteractive sudo apt-get update -qq && "
+            f"DEBIAN_FRONTEND=noninteractive sudo apt-get -y -qq {apt_opts} upgrade"
+        )
         if packages:
-            command += f"&& sudo apt install -y -qq {apt_opts} {packages}"
+            command += (
+                " && DEBIAN_FRONTEND=noninteractive "
+                f"sudo apt-get -y -qq {apt_opts} install {packages}"
+            )
         _, success = conn.run(command, warn=True)
         if success:
             self.output.success("System packages upgraded successfully!")
@@ -232,7 +243,8 @@ class Server(BaseCommand):
             self.output.warning("Warning: Failed to upgrade system packages.")
 
     @cappa.command(
-        name="create-user", help="Create a new user with sudo and ssh access"
+        name="create-user",
+        help="Create a new user with a scoped sudoers rule and ssh access",
     )
     def create_user(
         self,
@@ -241,7 +253,33 @@ class Server(BaseCommand):
             bool, cappa.Arg(long="--with-password")
         ] = False,  # no short arg to force explicitness
     ):
+        try:
+            rule = sudoers.render_rule(name, self.config.app_user, self.config.app_name)
+        except ValueError as exc:
+            raise cappa.Exit(str(exc), code=1) from None
+
         with connection.connection(host=self.selected_host) as conn:
+            # Refuse to create a user whose rule cannot take effect: without
+            # the include the drop-in is dead weight (and a later harden
+            # would have to abort).  The same check runs again inside the
+            # root script, where it is authoritative.
+            content, readable = conn.run(
+                f"sudo cat {shlex.quote(sudoers.SUDOERS_PATH)}", warn=True, hide=True
+            )
+            if not readable:
+                raise cappa.Exit(
+                    f"Could not read {sudoers.SUDOERS_PATH}; cannot verify that "
+                    f"it loads {sudoers.DROPIN_DIR}. Aborting without changes.",
+                    code=1,
+                )
+            if not sudoers.has_includedir(content):
+                raise cappa.Exit(
+                    f"{sudoers.SUDOERS_PATH} does not include {sudoers.DROPIN_DIR}. "
+                    "Add a line such as `#includedir /etc/sudoers.d` to "
+                    f"{sudoers.SUDOERS_PATH} (as root) and re-run create-user.",
+                    code=1,
+                )
+
             commands = [
                 f"sudo adduser --disabled-password --gecos '' {name}",
                 f"sudo mkdir -p /home/{name}/.ssh",
@@ -256,11 +294,144 @@ class Server(BaseCommand):
                 [
                     f"sudo chmod 700 /home/{name}/.ssh",
                     f"sudo chmod 600 /home/{name}/.ssh/authorized_keys",
-                    f"echo '{name} ALL=(ALL) NOPASSWD:ALL' | sudo tee -a /etc/sudoers",
                 ]
             )
             conn.run(" && ".join(commands), pty=True)
+
+            self.output.info("Installing scoped sudoers rule...")
+            script = sudoers.install_dropin_script(name, rule)
+            output, installed = conn.run(
+                f"sudo bash -c {shlex.quote(script)}",
+                warn=True,
+                pty=True,
+            )
+            if not installed or sudoers.DROPIN_OK not in output:
+                raise cappa.Exit(
+                    f"User {name} was created, but the sudoers rule was not "
+                    "installed (visudo validation failed or the include is "
+                    f"missing). The root script restored the previous state. "
+                    "Fix the reported error and run `fujin server harden` "
+                    "(or re-run create-user).",
+                    code=1,
+                )
+
             self.output.success(f"New user {name} created successfully!")
+            self.output.info(f"Sudo rule installed at {sudoers.DROPIN_PATH(name)}")
+
+    @cappa.command(
+        name="harden",
+        help="Replace NOPASSWD:ALL with a scoped sudoers rule (opt-in)",
+    )
+    def harden(
+        self,
+        dry_run: Annotated[
+            bool,
+            cappa.Arg(
+                long="--dry-run",
+                help=(
+                    "Show the rule and the /etc/sudoers edit without changing anything"
+                ),
+            ),
+        ] = False,
+    ):
+        """Migrate an existing server from ``NOPASSWD:ALL`` to the scoped rule.
+
+        This is an **administrator action**: it runs as one ``sudo bash``
+        script, so the connecting user needs full sudo (the scoped rule does
+        not grant ``bash``/``visudo``).  The script backs up and restores
+        everything it touches on any failure; see
+        :func:`fujin.sudoers.harden_script`.
+        """
+        user = self.selected_host.user
+        app_user = self.config.app_user
+        try:
+            rule = sudoers.render_rule(user, app_user, self.config.app_name)
+        except ValueError as exc:
+            raise cappa.Exit(str(exc), code=1) from None
+
+        dropin = sudoers.DROPIN_PATH(user)
+        with connection.connection(host=self.selected_host) as conn:
+            if dry_run:
+                # The only read: dry-run inspects the current file without
+                # changing anything.  The real migration does not race a
+                # client-side copy: it derives the edit inside the script.
+                content, ok = conn.run(
+                    f"sudo cat {shlex.quote(sudoers.SUDOERS_PATH)}",
+                    warn=True,
+                    hide=True,
+                )
+                if not ok:
+                    raise cappa.Exit(
+                        f"Could not read {sudoers.SUDOERS_PATH} to plan the change.",
+                        code=1,
+                    )
+                if not sudoers.has_includedir(content):
+                    raise cappa.Exit(
+                        f"{sudoers.SUDOERS_PATH} does not load "
+                        f"{sudoers.DROPIN_DIR}; installing the scoped rule "
+                        "would be ignored. Add a line such as "
+                        f"`#includedir /etc/sudoers.d` to "
+                        f"{sudoers.SUDOERS_PATH} and re-run harden.",
+                        code=1,
+                    )
+                _, had_old_rule = sudoers.strip_nopasswd_all(content, user)
+                self.output.info(f"Would install {dropin}:")
+                self.output.output(rule)
+                if had_old_rule:
+                    self.output.info(
+                        f"Would remove this line from {sudoers.SUDOERS_PATH}:"
+                    )
+                    self.output.output(f"{user} ALL=(ALL) NOPASSWD:ALL")
+                else:
+                    self.output.info(
+                        f"No `{user} ALL=(ALL) NOPASSWD:ALL` line found; "
+                        f"{sudoers.SUDOERS_PATH} would not be rewritten."
+                    )
+                self.output.info("Dry run: no changes made.")
+                return
+
+            # One root shell, one transaction, one round trip.  The script
+            # re-derives the legacy line from the live file (no TOCTOU) and
+            # restores both files itself if anything fails.
+            script = sudoers.harden_script(user, app_user, self.config.app_name, rule)
+            output, ok = conn.run(
+                f"sudo bash -c {shlex.quote(script)}",
+                warn=True,
+                pty=True,
+            )
+            if not ok or sudoers.HARDEN_OK not in output:
+                reason = "unknown cause"
+                for line in output.splitlines():
+                    if sudoers.HARDEN_FAILED in line:
+                        reason = line.split("reason=", 1)[-1].strip() or reason
+                raise cappa.Exit(
+                    f"harden failed ({reason}); the transaction was rolled back "
+                    f"({sudoers.SUDOERS_PATH} and {dropin} were restored). "
+                    "Inspect the command output above and fix the reported "
+                    "cause before retrying.",
+                    code=1,
+                )
+
+            backup = "none"
+            for line in output.splitlines():
+                if line.strip().startswith(sudoers.HARDEN_OK):
+                    parts = line.split()
+                    backup = next(
+                        (p.split("=", 1)[1] for p in parts if p.startswith("backup=")),
+                        "none",
+                    )
+            if backup != "none":
+                self.output.success(
+                    f"Removed `{user} ALL=(ALL) NOPASSWD:ALL` from "
+                    f"{sudoers.SUDOERS_PATH}."
+                )
+                self.output.info(f"Backup of the previous sudoers file: {backup}")
+            else:
+                self.output.info(
+                    f"No legacy NOPASSWD:ALL rule for {user}; "
+                    f"{sudoers.SUDOERS_PATH} was not modified."
+                )
+            self.output.success(f"Installed scoped sudoers rule at {dropin}")
 
     @cappa.command(
         name="setup-ssh", help="Interactive SSH key setup and fujin.toml configuration"

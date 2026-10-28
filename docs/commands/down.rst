@@ -10,7 +10,7 @@ The ``fujin down`` command tears down your application by stopping services and 
 Overview
 --------
 
-Use ``fujin down`` to remove your application from the server. The command runs the bundle's uninstall script, which stops and disables systemd services, removes systemd unit files, cleans up Caddy configuration, deletes the application user, and removes the application directory.
+Use ``fujin down`` to remove your application from the server. The command stops and disables systemd services, removes systemd unit files, cleans up Caddy configuration, deletes the application user, and removes the application directory.
 
 .. warning::
 
@@ -23,7 +23,7 @@ Options
    Also uninstall Caddy web server. Use this if you're completely removing fujin from the server.
 
 ``--force``
-   Continue teardown even if the uninstall script fails. When set, forces removal of the app directory regardless of errors.
+   Continue teardown even if a teardown step fails. When set, forces removal of the app directory regardless of errors.
 
 How it works
 ------------
@@ -34,13 +34,18 @@ Here's what happens when you run ``fujin down``:
 
 2. **Stop services**: Stops and disables all configured systemd services (app services, sockets, timers).
 
-3. **Legacy uninstall**: If the app still has an old-style ``.versions/*.pyz`` bundle, its uninstall script is executed first.
+3. **Legacy layout**: If the app still has an old-style ``.versions/*.pyz``
+   bundle, Fujin warns that the legacy uninstaller was not run (Fujin does
+   not execute interpreters as root) and tells you to run
+   ``sudo python3 <bundle> uninstall`` as an administrator. Teardown then
+   continues normally.
 
-4. **Remove app directory**: Deletes the entire application directory
+4. **Remove unit files and app directory**: Deletes the app's systemd unit
+   files and wants-symlinks, then the entire application directory
    (``/opt/fujin/your-app``), including the release tree
-   (``releases/``, ``store/``, ``shared/``), any leftover legacy
-   ``.install/``/``.versions/`` directories, and the application user is
-   deleted.
+   (``releases/``, ``store/``, ``shared/``) and any leftover legacy
+   ``.install/``/``.versions/`` directories. The application user is
+   deleted as well.
 
 5. **Uninstall Caddy** (if ``--full``): Removes the Caddy web server from the system.
 

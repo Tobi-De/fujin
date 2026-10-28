@@ -209,11 +209,17 @@ def test_create_user_creates_user_with_ssh_access(
     )
     assert stdout == "600", f"authorized_keys should have 600 permissions: {stdout}"
 
-    # Verify sudo access
+    # Verify the scoped sudoers drop-in (and no NOPASSWD:ALL anywhere)
     stdout, _ = exec_in_container(
-        vps_container["name"], "grep 'newdeploy.*NOPASSWD' /etc/sudoers"
+        vps_container["name"], "sudo cat /etc/sudoers.d/fujin-newdeploy"
     )
-    assert "newdeploy" in stdout, "User should have NOPASSWD sudo access"
+    assert "newdeploy ALL=(root) NOPASSWD: FUJIN_DEPLOY" in stdout
+    assert "NOPASSWD:ALL" not in stdout
+    stdout, _ = exec_in_container(
+        vps_container["name"],
+        "grep -c 'newdeploy.*NOPASSWD:ALL' /etc/sudoers || true",
+    )
+    assert stdout.strip() in ("", "0"), "NOPASSWD:ALL must not be granted"
 
 
 def test_create_user_with_password_generates_password(
@@ -256,3 +262,176 @@ def test_create_user_with_password_generates_password(
     assert stdout and stdout not in ["", "*", "!", "!!"], (
         f"User should have a password set: {stdout}"
     )
+
+
+# ============================================================================
+# Scoped sudo rule end-to-end (issue #93)
+# ============================================================================
+
+
+def _write_scoped_app(tmp_path, app: str, port: int) -> dict:
+    """A minimal binary app + fujin config dict for deploy tests."""
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    distfile = dist_dir / f"{app}-1.0.0"
+    distfile.write_text(
+        "#!/usr/bin/env python3\n"
+        "import http.server\n"
+        "import socketserver\n"
+        "\n"
+        f"PORT = {port}\n"
+        "Handler = http.server.SimpleHTTPRequestHandler\n"
+        "with socketserver.TCPServer(('', PORT), Handler) as httpd:\n"
+        "    httpd.serve_forever()\n"
+    )
+    distfile.chmod(0o755)
+
+    systemd_dir = tmp_path / ".fujin" / "systemd"
+    systemd_dir.mkdir(parents=True)
+    (systemd_dir / "web.service").write_text(
+        "[Unit]\n"
+        f"Description={app} web\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={{app_dir}}/current/bin/{app}\n"
+        "WorkingDirectory={app_dir}\n"
+        "Restart=always\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+    return {
+        "app": app,
+        "version": "1.0.0",
+        "build_command": "echo building",
+        "distfile": str(distfile),
+        "installation_mode": "binary",
+    }
+
+
+def test_scoped_create_user_then_deploy_as_that_user(
+    vps_container, ssh_key, tmp_path, monkeypatch
+):
+    """Fresh box: create-user, then deploy as the new user with only the rule."""
+    from fujin.commands.deploy import Deploy
+
+    monkeypatch.chdir(tmp_path)
+    app = "scopedapp"
+    app_config = _write_scoped_app(tmp_path, app, 8000)
+
+    admin_config = msgspec.convert(
+        {
+            **app_config,
+            "hosts": [
+                {
+                    "address": vps_container["ip"],
+                    "user": vps_container["user"],
+                    "port": vps_container["port"],
+                    "key_filename": ssh_key,
+                }
+            ],
+        },
+        type=Config,
+    )
+
+    with patch("fujin.config.Config.read", return_value=admin_config):
+        Server().bootstrap()
+        Server().create_user(name="newdeploy", with_password=False)
+
+    # The new user has the scoped drop-in and no NOPASSWD:ALL of its own.
+    stdout, _ = exec_in_container(
+        vps_container["name"], "sudo cat /etc/sudoers.d/fujin-newdeploy"
+    )
+    assert "newdeploy ALL=(root) NOPASSWD: FUJIN_DEPLOY" in stdout
+    assert f"/opt/fujin/{app}" in stdout
+    stdout, _ = exec_in_container(
+        vps_container["name"],
+        "grep -c 'newdeploy.*NOPASSWD:ALL' /etc/sudoers || true",
+    )
+    assert stdout.strip() in ("", "0")
+
+    # Deploy with the new user's SSH credentials only.
+    deploy_config = msgspec.convert(
+        {
+            **app_config,
+            "hosts": [
+                {
+                    "address": vps_container["ip"],
+                    "user": "newdeploy",
+                    "port": vps_container["port"],
+                    "key_filename": ssh_key,
+                }
+            ],
+        },
+        type=Config,
+    )
+    with patch("fujin.config.Config.read", return_value=deploy_config):
+        Deploy(no_input=True)()
+
+    stdout, success = exec_in_container(
+        vps_container["name"], f"systemctl is-active {app}-web.service"
+    )
+    assert success, f"Service not active: {stdout}"
+    assert stdout == "active"
+    stdout, _ = exec_in_container(
+        vps_container["name"], "sudo cat /opt/fujin/.audit/scopedapp.log"
+    )
+    assert '"operation": "deploy"' in stdout
+
+
+def test_harden_nopasswd_all_box_then_deploy_still_works(
+    vps_container, ssh_key, tmp_path, monkeypatch
+):
+    """harden replaces NOPASSWD:ALL in one transaction; deploy still works."""
+    from fujin.commands.deploy import Deploy
+
+    monkeypatch.chdir(tmp_path)
+    app = "hardenapp"
+    app_config = _write_scoped_app(tmp_path, app, 8000)
+    config = msgspec.convert(
+        {
+            **app_config,
+            "hosts": [
+                {
+                    "address": vps_container["ip"],
+                    "user": vps_container["user"],
+                    "port": vps_container["port"],
+                    "key_filename": ssh_key,
+                }
+            ],
+        },
+        type=Config,
+    )
+
+    with patch("fujin.config.Config.read", return_value=config):
+        Server().bootstrap()
+        Server().harden()
+
+    # The legacy line is gone, the drop-in is present, and the listing still
+    # grants the alias without NOPASSWD: ALL.
+    stdout, _ = exec_in_container(
+        vps_container["name"],
+        f"grep -c '{vps_container['user']}.*NOPASSWD:[ ]*ALL' /etc/sudoers || true",
+    )
+    assert stdout.strip() in ("", "0")
+    stdout, _ = exec_in_container(
+        vps_container["name"],
+        f"sudo cat /etc/sudoers.d/fujin-{vps_container['user']}",
+    )
+    assert "FUJIN_DEPLOY" in stdout
+    stdout, _ = exec_in_container(
+        vps_container["name"],
+        f"sudo -l -U {vps_container['user']}",
+    )
+    assert "FUJIN_DEPLOY" in stdout
+    assert "NOPASSWD: ALL" not in stdout
+
+    with patch("fujin.config.Config.read", return_value=config):
+        Deploy(no_input=True)()
+
+    stdout, success = exec_in_container(
+        vps_container["name"], f"systemctl is-active {app}-web.service"
+    )
+    assert success, f"Service not active: {stdout}"
+    assert stdout == "active"
