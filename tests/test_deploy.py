@@ -545,13 +545,19 @@ def test_convergence_stops_leftovers_when_template_removed(
     monkeypatch, minimal_config, tmp_path
 ):
     monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
-    state = State(current="prev", client_digest="digest-x")
+    state = State(current="prev", client_digest="old")
     cmd, spies = setup_deploy(
         monkeypatch,
         minimal_config,
         tmp_path,
         state=state,
-        files={"systemd/testapp-web.service": WEB_UNIT},
+        files={
+            "systemd/testapp-web.service": WEB_UNIT,
+            "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
+        },
+        # the live release still declares the template: its instances may
+        # linger and must be stopped
+        prev_manifest=manifest_for(),
     )
     spies["conn"].responses = [
         (
@@ -3319,6 +3325,54 @@ def test_unchanged_units_skip_install(monkeypatch, minimal_config, tmp_path):
     assert not any("daemon-reload" in c for c, _ in spies["conn"].calls)
 
 
+def test_convergence_skips_plan_without_template_units(
+    monkeypatch, minimal_config, tmp_path
+):
+    """No ``@.service`` in either manifest: the presence query is not run."""
+    files = {
+        "systemd/testapp-web.service": WEB_UNIT,
+        "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
+    }
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=files,
+        prev_manifest=manifest_for(files=files),
+    )
+    assert invoke(cmd) == 0
+
+    assert not any("list-unit-files" in c for c, _ in spies["conn"].calls)
+    spies["enable_and_start"].assert_not_called()
+    spies["stop_and_disable"].assert_not_called()
+
+
+def test_force_runs_convergence_without_template_units(
+    monkeypatch, minimal_config, tmp_path
+):
+    """``--force`` reconciles instances even with no template in the tree."""
+    files = {
+        "systemd/testapp-web.service": WEB_UNIT,
+        "bin/testapp-1.0.0-py3-none-any.whl": b"wheel",
+    }
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=files,
+        prev_manifest=manifest_for(files=files),
+    )
+    cmd.force = True
+    assert invoke(cmd) == 0
+
+    assert any("list-unit-files" in c for c, _ in spies["conn"].calls)
+
+
+# ===========================================================================
+# Changed-unit-only install
+# ===========================================================================
+
+
 def test_changed_unit_installs(monkeypatch, minimal_config, tmp_path):
     prev_files = dict(STAGING_FILES)
     prev_files["systemd/testapp-web.service"] = "[Service]\nExecStart=/old\n"
@@ -3332,6 +3386,7 @@ def test_changed_unit_installs(monkeypatch, minimal_config, tmp_path):
     assert invoke(cmd) == 0
 
     spies["install_units"].assert_called_once()
+    assert spies["install_units"].call_args.kwargs["changed"] == {"testapp-web.service"}
 
 
 def test_force_installs_unchanged_units(monkeypatch, minimal_config, tmp_path):

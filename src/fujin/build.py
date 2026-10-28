@@ -346,15 +346,25 @@ def _load_built_record(cache_dir: Path) -> _BuiltRecord | None:
     return record
 
 
-def _verify_staged_files(cache_dir: Path, record: _BuiltRecord) -> bool:
-    """sha256 re-check of every staged file against ``built.json``."""
+def _verify_staged_files(
+    cache_dir: Path, record: _BuiltRecord
+) -> dict[str, bytes] | None:
+    """sha256 re-check of every staged file against ``built.json``.
+
+    Returns ``{tree_path: content}`` on success (each file read exactly once,
+    so a cache hit does not read the same bytes again), or None on any
+    missing/mismatching entry.
+    """
+    verified: dict[str, bytes] = {}
     for tree_path, expected in record.files.items():
         staged = cache_dir / tree_path
         if not staged.is_file():
-            return False
-        if hash_bytes(staged.read_bytes()) != expected:
-            return False
-    return True
+            return None
+        content = staged.read_bytes()
+        if hash_bytes(content) != expected:
+            return None
+        verified[tree_path] = content
+    return verified
 
 
 def _find_cached_dist(
@@ -555,15 +565,20 @@ def _run_build_locked(
 
     if not no_cache:
         record = _load_built_record(cache_dir)
-        if record is not None and _verify_staged_files(cache_dir, record):
+        verified = (
+            _verify_staged_files(cache_dir, record) if record is not None else None
+        )
+        if record is not None and verified is not None:
             logger.debug("Build cache hit: %s", key)
-            files: dict[str, InputFile] = {}
-            for tree_path in record.files:
-                content = (cache_dir / tree_path).read_bytes()
-                files[tree_path] = InputFile(
+            # The verification pass already read every file once: reuse those
+            # bytes instead of reading the staging tree a second time.
+            files: dict[str, InputFile] = {
+                tree_path: InputFile(
                     content=content,
                     mode=0o755 if tree_path.startswith(BIN_DIR + "/") else None,
                 )
+                for tree_path, content in verified.items()
+            }
             dist_path, dist_sha256 = _find_cached_dist(files, cache_dir)
             # Refresh interpolated unit/Caddyfile/asset content that drifted
             # without busting the key (the hashed sources did not change).
@@ -573,8 +588,9 @@ def _run_build_locked(
                     if tree_path in pre.asset_tree
                     else pre.unit_tree[tree_path]
                 )
-                if refreshed != (cache_dir / tree_path).read_text():
-                    (cache_dir / tree_path).write_text(refreshed)
+                current = verified.get(tree_path)
+                if current is None or current.decode("utf-8") != refreshed:
+                    (cache_dir / tree_path).write_bytes(refreshed.encode("utf-8"))
                     files[tree_path] = InputFile(content=refreshed.encode("utf-8"))
             _write_built_record(cache_dir, key, files, config.local_version)
             return BuildResult(

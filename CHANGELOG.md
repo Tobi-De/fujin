@@ -25,6 +25,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🐛 Bug Fixes
 
+- Address review findings in transport, verification and locking
 - *(ssh)* Spool large admin scripts instead of sending them inline
 - *(deploy)* Keep venv setgid and enablement symlinks intact
 - *(deploy)* Bound and retry short read-only probes

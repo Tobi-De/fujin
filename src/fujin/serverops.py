@@ -51,6 +51,11 @@ SYSTEMD_DIR = "/etc/systemd/system"
 _PYTHON_ROOT = "venv"
 _BINARY_ROOT = "bin"
 
+#: Marker created immediately before the clone-path wheel install; the venv
+#: permission passes only touch entries ``-newer`` than it, so hardlinked
+#: live-release inodes stay untouched. Removed by the permission pass.
+CLONE_MARKER_PATH = ".fujin-install-marker"
+
 #: End-of-section markers for the fused ``install_units`` script: the scans
 #: are printed first (diagnostics), the mutating steps follow.
 INSTALL_INSTALLED_END = "FUJIN-INSTALLED-END"
@@ -647,14 +652,14 @@ def release_lock(conn: Any, app_dir: str, lock: str) -> None:
     """
     if lock.startswith("flock:"):
         pid = lock.removeprefix("flock:")
+        pid_q = shlex.quote(pid)
+        holder_q = shlex.quote(f"{app_dir}/{LOCK_PATH}.holder")
+        # One round trip: kill the group + holder, then drop the marker. The
+        # marker removal is unconditional (``;``, not ``&&``) so a stale
+        # holder file never survives a dead pid.
         conn.run(
-            f"kill -- -{shlex.quote(pid)} 2>/dev/null;"
-            f" kill {shlex.quote(pid)} 2>/dev/null; true",
-            warn=True,
-            hide=True,
-        )
-        conn.run(
-            f"rm -f {shlex.quote(f'{app_dir}/{LOCK_PATH}.holder')}",
+            f"kill -- -{pid_q} 2>/dev/null; kill {pid_q} 2>/dev/null;"
+            f" rm -f {holder_q}; true",
             warn=True,
             hide=True,
         )
@@ -767,11 +772,16 @@ def prepare_staging(
     - ``python-package``, full install: ``uv venv`` (1), ``uv pip install``
       (1), then the fused permission pass (1) below.
     - ``python-package``, ``clone_from`` set: ``cp -al`` of the live
-      release's ``venv/`` (1), ``uv pip install --no-deps --no-compile`` of
-      the new dist (1), then the fused permission pass (1). Hardlinked
-      dependency files are never read, rewritten or byte-compiled; only the
-      app distribution is installed into the clone (``--no-compile`` keeps
-      uv from writing ``__pycache__`` through a hardlinked tree).
+      release's ``venv/`` (1), ``uv pip install --no-deps
+      --compile-bytecode`` of the new dist (1), then the fused permission
+      pass (1). Hardlinked dependency files are never read, rewritten or
+      byte-compiled; only the app distribution is installed into the clone.
+      ``--compile-bytecode`` compiles exactly that newly installed package
+      (writing fresh ``__pycache__`` inodes, never through a hardlink). The
+      permission pass only touches the files this install created: a marker
+      file is created immediately before ``uv pip install`` and the venv
+      passes select ``find <venv> -newer <marker>``, so the live release's
+      hardlinked inodes keep their modes and ctimes.
     - ``binary``: the rsynced dist file plus the fused permission pass (1).
 
     ``clone_from`` is the live release directory; the caller decides
@@ -794,6 +804,7 @@ def prepare_staging(
     """
     staging_q = shlex.quote(staging_dir)
     dist_in_tree = f"{staging_q}/{shlex.quote(dist_tree_path)}"
+    clone_marker: str | None = None
 
     if installation_mode == "python-package":
         if not python_version:
@@ -812,13 +823,20 @@ def prepare_staging(
                 conn.run(f"rm -rf {venv_q}", warn=True, hide=True)
         if cloned:
             # App package only: dependencies and every other file are the
-            # live release's inodes. ``--no-compile`` is mandatory here -
-            # bytecode writes would mutate hardlinked files in the live
-            # release.
+            # live release's inodes. Compiling bytecode is safe for the wheel
+            # just installed (new files); the marker created in the same
+            # command bounds the permission pass to exactly those files.
+            clone_marker = f"{staging_dir}/{CLONE_MARKER_PATH}"
             pip_cmd = (
+                # The marker is backdated a second: filesystems with coarse
+                # timestamps (tmpfs) can give the marker and the install's
+                # first writes the *same* mtime, which ``-newer`` would miss.
+                # Live-release files are always older than this deploy.
+                f"touch {shlex.quote(clone_marker)}"
+                f" && touch -d '1 second ago' {shlex.quote(clone_marker)} && "
                 f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} "
                 f"uv pip install --python {venv_q}/bin/python "
-                f"{dist_in_tree} --no-deps --no-compile"
+                f"{dist_in_tree} --no-deps --compile-bytecode"
             )
             _pip_out, ok = conn.run(pip_cmd, warn=True)
             if not ok:
@@ -866,7 +884,11 @@ def prepare_staging(
         raise ServerOpsError(f"Unknown installation mode: {installation_mode}")
 
     script = _staging_permissions_script(
-        staging_dir, app_user, installation_mode, dist_in_tree
+        staging_dir,
+        app_user,
+        installation_mode,
+        dist_in_tree,
+        clone_marker=clone_marker,
     )
     out, ok = conn.run(script, warn=True)
     if ok:
@@ -898,6 +920,8 @@ def _staging_permissions_script(
     app_user: str,
     installation_mode: str,
     dist_in_tree: str,
+    *,
+    clone_marker: str | None = None,
 ) -> str:
     """One shell script applying every staging mode/ownership rule.
 
@@ -916,24 +940,60 @@ def _staging_permissions_script(
     over the whole tree would mutate the inodes hardlinked from the live
     release (``link_unchanged``), so only directories and *private* files
     (``-links 1``) are touched by the tree-wide passes.
+
+    ``clone_marker`` is set on the venv-clone path: the venv was
+    ``cp -al``-cloned from the live release, so every pre-existing venv
+    *file* is a live inode. Recursive chmod/chgrp over it would rewrite the
+    live release's modes/ctimes; the venv passes therefore only select
+    entries newer than the marker (created immediately before the wheel
+    install). Venv *directories* are private clone inodes and keep the
+    regular walk. The marker itself is removed here.
     """
     staging_q = shlex.quote(staging_dir)
     venv_q = shlex.quote(f"{staging_dir}/{_PYTHON_ROOT}")
     lines = []
-    if installation_mode == "python-package":
+    if installation_mode == "python-package" and clone_marker is None:
         # Group-readable/executable venv, owner-writable (installer PHASE 2
         # permission model), applied BEFORE hashing so recorded modes match.
         lines += [
             f"chmod -R u+rwX,go+rX {staging_q}/{_PYTHON_ROOT} {_fail_marker('venv-mode')}",
             f"chmod -R u+x {staging_q}/{_PYTHON_ROOT}/bin {_fail_marker('venv-exec')}",
         ]
-    else:
+    elif installation_mode != "python-package":
         # The dist file ships via the rsynced tree; only its directory and
         # mode need enforcing. A failed mkdir surfaces through the chmod.
         lines.append(f"mkdir -p {staging_q}/{_BINARY_ROOT} || true")
         lines.append(f"chmod 755 {dist_in_tree} {_fail_marker('dist-mode')}")
+
+    lines.append(f"chmod 0640 {staging_q}/{ENV_PATH} {_fail_marker('env-mode')}")
+    if clone_marker is not None:
+        marker_q = shlex.quote(clone_marker)
+        lines += [
+            # Venv directories are clone-private inodes (cp -al hardlinks
+            # files only), so they keep the full venv mode normalization.
+            f"sudo find {venv_q} -type d -exec chmod u+rwX,go+rX {{}} +"
+            f" {_fail_marker('venv-mode')}",
+            # Fresh tree entries (private inodes) plus the install's own venv
+            # outputs; hardlinked live entries are never selected.
+            f"sudo find {staging_q} -path {venv_q} -prune -o"
+            f" \\( -type d -o -links 1 \\) -exec chgrp {shlex.quote(app_user)}"
+            f" {{}} + {_fail_marker('chgrp')}",
+            f"sudo find {venv_q} -newer {marker_q} -exec chgrp"
+            f" {shlex.quote(app_user)} {{}} + {_fail_marker('chgrp')}",
+            f"sudo find {venv_q} -newer {marker_q} -type f -exec chmod"
+            f" u+rwX,go+rX {{}} + {_fail_marker('venv-mode')}",
+            f"sudo find {venv_q}/bin -newer {marker_q} -type f -exec chmod u+x"
+            f" {{}} + {_fail_marker('venv-exec')}",
+            # Directories (venv included) are clone-private inodes.
+            f"sudo find {staging_q} -type d"
+            f" -exec chmod g+rxs {{}} + {_fail_marker('dirs')}",
+            f"sudo find {staging_q} -path {venv_q} -prune -o -links 1 -type f"
+            f" -exec chmod g+rX {{}} + {_fail_marker('files')}",
+            f"rm -f {marker_q}",
+        ]
+        return "\n".join(lines)
+
     lines += [
-        f"chmod 0640 {staging_q}/{ENV_PATH} {_fail_marker('env-mode')}",
         f"sudo chgrp -R {shlex.quote(app_user)} {staging_q} {_fail_marker('chgrp')}",
         # Directories (venv included): group-traversable, and setgid so late
         # writes (hooks, runtime) keep inheriting the group.
@@ -1097,6 +1157,8 @@ def install_units(
     app_name: str,
     unit_files: Mapping[str, str],
     dropins: Mapping[str, Mapping[str, str]] | None = None,
+    *,
+    changed: set[str] | None = None,
 ) -> None:
     """Install unit files (service/socket/timer) + dropins into
     ``/etc/systemd/system``, remove stale units of this app, and
@@ -1105,6 +1167,12 @@ def install_units(
     ``unit_files`` maps the unit file name (e.g. ``myapp-web@.service``) to
     its rendered content. ``dropins`` maps a unit name to
     ``{dropin-filename: content}``; the caller expands ``common.d`` per unit.
+
+    ``changed`` (optional) is the set of unit/dropin tree names whose content
+    changed in this release; only those are (re)written. ``valid``/stale
+    scanning and the single ``daemon-reload`` always cover the full declared
+    set, so unchanged units keep their installed files untouched. ``None``
+    means "write everything" (first deploy, ``--force``, repair paths).
 
     The script starts with the two read-only scans (installed units at depth 1
     plus dropin *files* at depth 2, and empty declared ``*.d`` dirs) so
@@ -1127,8 +1195,23 @@ def install_units(
         f"{unit}.d" for unit, files in dropins.items() if files
     }
 
+    write_units = (
+        unit_files
+        if changed is None
+        else {name: content for name, content in unit_files.items() if name in changed}
+    )
+    write_dropins: dict[str, dict[str, str]] = {}
+    for unit, files in dropins.items():
+        selected = {
+            name: content
+            for name, content in files.items()
+            if changed is None or f"{unit}.d/{name}" in changed
+        }
+        if selected:
+            write_dropins[unit] = selected
+
     out, ok = conn.run(
-        _install_units_script(app_name, unit_files, dropins, valid, prune),
+        _install_units_script(app_name, write_units, write_dropins, valid, prune),
         warn=True,
         hide=True,
     )
@@ -1304,6 +1387,11 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
     function is a no-op (no backup write, no rewrite, no reload) and True is
     returned immediately.
 
+    A config restored from a leftover ``.fujin-bak`` is *not* a no-op even
+    when it matches *content*: the previous run died mid-write, so Caddy may
+    still be running something else. The restore then takes the normal
+    success path (write, reload) and clears the stale backup.
+
     Returns True on successful reload. On failure the previous config (if
     any) is restored to disk without reloading (Caddy never loaded the new
     config) and False is returned.
@@ -1316,7 +1404,9 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
     _, bak_exists = conn.run(f"test -f {bak_q}", warn=True, hide=True)
 
     # Crash recovery sweep: a previous run died between the backup and the
-    # main write. Restore the backup before touching anything else.
+    # main write. Restore the backup before touching anything else; the
+    # restore forces the reload path below.
+    restored = False
     if bak_exists and not main_exists:
         conn.run(
             f"sudo cp {bak_q} {path_q} && sudo chown caddy:caddy {path_q}",
@@ -1324,13 +1414,14 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
             hide=True,
         )
         main_exists = True
+        restored = True
 
     old_content: str | None = None
     if main_exists:
         out, ok = conn.run(f"cat {path_q}", warn=True, hide=True)
         old_content = out if ok else None
 
-    if old_content == content:
+    if old_content == content and not restored:
         # The server already serves byte-identical content: no backup, no
         # rewrite, no reload (a reload would restart Caddy for nothing).
         logger.info("Caddy config at %s is already current; skipping", path_q)
@@ -1343,6 +1434,10 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
 
     _, ok = conn.run("sudo systemctl reload caddy", warn=True)
     if ok:
+        if restored:
+            # The restored config is now written and loaded; the leftover
+            # backup from the crashed run is no longer a recovery candidate.
+            conn.run(f"sudo rm -f {bak_q}", warn=True, hide=True)
         return True
 
     logger.warning("Caddy reload failed; restoring previous configuration")

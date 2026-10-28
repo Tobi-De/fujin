@@ -149,6 +149,17 @@ def collect_local_units(
     return serverops.expand_dropins(unit_contents)
 
 
+def _has_template_unit(manifest: m.Manifest | None) -> bool:
+    """True when *manifest* declares an instantiated (``@.service``) unit."""
+    if manifest is None:
+        return False
+    return any(
+        entry.kind is m.EntryKind.UNIT
+        and serverops.unit_rel_name(path).endswith("@.service")
+        for path, entry in manifest.entries.items()
+    )
+
+
 _TYPE_NOTIFY_RE = re.compile(r"^\s*Type\s*=\s*notify\s*$", re.IGNORECASE | re.MULTILINE)
 _LISTEN_STREAM_RE = re.compile(
     r"^\s*ListenStream\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE
@@ -657,14 +668,19 @@ class Deploy(BaseCommand):
         acceptance test a real build performs before reusing the cache.
         """
         record = build._load_built_record(cache_dir)
-        if record is None or not build._verify_staged_files(cache_dir, record):
+        verified = (
+            build._verify_staged_files(cache_dir, record)
+            if record is not None
+            else None
+        )
+        if verified is None:
             return None
         files = {
             path: m.InputFile(
-                content=(cache_dir / path).read_bytes(),
+                content=content,
                 mode=0o755 if path.startswith(build.BIN_DIR + "/") else None,
             )
-            for path in record.files
+            for path, content in verified.items()
         }
         dist_path = next(
             (path for path in sorted(files) if path.startswith(build.BIN_DIR + "/")),
@@ -881,7 +897,7 @@ class Deploy(BaseCommand):
                     oneshots,
                     force_full_restart=True,
                 )
-                self._converge(conn, client_manifest)
+                self._converge(conn, client_manifest, prev_manifest)
             else:
                 self._converge(conn, client_manifest)
             self._run_hooks(conn, "post_start", context, release_path=None)
@@ -1141,6 +1157,32 @@ class Deploy(BaseCommand):
                 transfer.commit_release(conn, remote_staging, final_digest)
 
             unit_files, dropins, oneshots = collect_local_units(files, config)
+            # Only units/dropins whose manifest entry changed need a rewrite;
+            # first deploy and --force keep the full rewrite (server drift is
+            # repaired there as well). The stale-removal scan and the single
+            # daemon-reload always cover the full declared set.
+            changed_units: set[str] | None = None
+            if prev_manifest is not None and not first_deploy and not self.force:
+                changed_units = set()
+                for change in m.diff_manifests(prev_manifest, final_manifest).changes:
+                    if change.kind is not m.EntryKind.UNIT:
+                        continue
+                    rel = serverops.unit_rel_name(change.path)
+                    changed_units.add(rel)
+                    if change.change is m.ChangeType.ADDED and rel in unit_files:
+                        # A new unit also needs its rendered common.d dropins
+                        # even though the common.d source entry did not change.
+                        changed_units.update(
+                            f"{rel}.d/{name}" for name in dropins.get(rel, {})
+                        )
+                    if rel.startswith("common.d/"):
+                        # common.d entries are re-rendered per service unit.
+                        dropin_name = rel.split("/", 1)[1]
+                        changed_units.update(
+                            f"{unit}.d/{dropin_name}"
+                            for unit, names in dropins.items()
+                            if dropin_name in names
+                        )
             # A unit set identical to what is already installed needs no
             # rewrite and no ``daemon-reload``. ``units_installed_from`` is
             # the release whose units the server is known to run; a manual
@@ -1153,12 +1195,7 @@ class Deploy(BaseCommand):
                 and state.units_installed_from is not None
                 and state.units_installed_from == live_digest
                 and prev_manifest is not None
-                and not any(
-                    change.kind is m.EntryKind.UNIT
-                    for change in m.diff_manifests(
-                        prev_manifest, final_manifest
-                    ).changes
-                )
+                and not changed_units
             )
             if (unit_files or dropins) and units_unchanged:
                 self.output.info(
@@ -1167,7 +1204,9 @@ class Deploy(BaseCommand):
                 )
             elif unit_files or dropins:
                 self.output.info("Installing systemd units...")
-                serverops.install_units(conn, config.app_name, unit_files, dropins)
+                serverops.install_units(
+                    conn, config.app_name, unit_files, dropins, changed=changed_units
+                )
 
             caddy_entry = final_manifest.entries.get(m.CADDYFILE_PATH)
             if caddy_entry is not None and caddy_entry.kind is m.EntryKind.CADDY:
@@ -1200,7 +1239,7 @@ class Deploy(BaseCommand):
                 oneshots,
                 force_full_restart=self.full_restart or first_deploy,
             )
-            self._converge(conn, final_manifest)
+            self._converge(conn, final_manifest, prev_manifest)
             # Readiness tiers (#88): notify units were validated by the
             # blocking restart above, ordinary units must reach `active` and
             # socket units must be bound *and* active in the poll, and the
@@ -1454,7 +1493,12 @@ class Deploy(BaseCommand):
             # _handle_failed_units raises a cappa.Exit in all paths.
             self._handle_failed_units(conn, specs)
 
-    def _converge(self, conn, manifest: m.Manifest) -> None:
+    def _converge(
+        self,
+        conn,
+        manifest: m.Manifest,
+        prev_manifest: m.Manifest | None = None,
+    ) -> None:
         """Start missing / stop extra replica instances, both directions.
 
         Desired instances are ``svc@1..N`` from ``config.replicas``; singular
@@ -1462,7 +1506,21 @@ class Deploy(BaseCommand):
         Presence is the union of enabled and running instances, so a manually
         stopped (but still enabled) instance is started again on every deploy,
         including a no-op deploy, and leftovers of a removed template stop.
+
+        With no template unit in either the previous or the final manifest
+        there is nothing to converge (and nothing stale can exist for this
+        app), so the presence query is skipped - unless ``--force`` asks for
+        a full reconciliation. A template *removed* by this deploy is still
+        seen through ``prev_manifest`` and triggers the cleanup query.
         """
+        if not self.force and not (
+            _has_template_unit(manifest) or _has_template_unit(prev_manifest)
+        ):
+            self.output.info(
+                "No template service units in this release; skipping replica"
+                " convergence."
+            )
+            return
         app_name = self.config.app_name
         desired: list[str] = []
         for path in sorted(manifest.entries):

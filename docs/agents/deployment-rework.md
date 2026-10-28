@@ -133,9 +133,13 @@ Implemented so far (all unit-tested, committed):
   uv pip, one fused permission pass) — venv setgid is applied by the
   privileged `find` walk.
 - A redeploy with unchanged requirements hardlink-clones the live venv and
-  installs only the wheel (`--no-deps --no-compile`); `hash_server_built`
-  reuses sha256/mode for files whose inode matches the live release. The live
-  release is proven byte-identical by an integration test.
+  installs only the wheel (`--no-deps --compile-bytecode`; the compile covers
+  just the newly installed package). A marker file created right before the
+  install bounds the permission pass to `find venv -newer <marker>`, so the
+  live release's hardlinked inodes keep their modes and ctimes.
+  `hash_server_built` reuses sha256/mode for files whose inode matches the
+  live release. The live release is proven byte-identical by an integration
+  test.
 - `verify_staging` no longer re-hashes the freshly server-hashed `venv/**`
   (`skip_prefixes`), while the committed-release reuse path still hashes all.
 - Post-activation bookkeeping (state, release listing, audit append, batched
@@ -145,8 +149,15 @@ Implemented so far (all unit-tested, committed):
   libssh2 exec-channel stalls that made CI time out.
 - Unchanged unit/dropin sets and unchanged Caddyfiles are not rewritten:
   `install_units` is skipped when `units_installed_from` matches the live
-  digest and the manifest diff has no unit change; `install_caddyfile`
-  short-circuits when the server content already matches.
+  digest and the manifest diff has no unit change; when some unit did change,
+  only the changed unit/dropin entries are written (stale removal and the
+  single `daemon-reload` still cover the full declared set).
+  `install_caddyfile` short-circuits when the server content already matches;
+  a main config restored from a leftover `.fujin-bak` is reloaded and the
+  stale backup removed instead.
+- `_converge` skips the instance-presence query when neither the previous nor
+  the final manifest declares an `@.service` unit (`--force` still queries).
+- `release_lock` is one round trip (kill group + holder, remove marker).
 - The local build and the client manifest/digest are computed before the SSH
   connection and the remote lock; a build failure exits 4 with no SSH I/O.
   Concurrent local builds serialize on `.fujin/cache/.build.lock`.
@@ -226,9 +237,22 @@ The one skipped unit test is the `visudo -c` syntax check (skips when
   default 300 s idle deadline on genuinely silent long commands. Consider a
   shorter default plus per-command overrides.
 - **Speedup items still open** (`docs/agents/deployment-speedup.md`):
-  item 2 second half (write the merged manifest server-side and drop the SCP)
-  and the item 7 remainder (fewer staging round trips). Everything else —
-  items 1, 3, 4, 5, 6, 8, 9, 10, 11 — is implemented and unit-tested.
+  - item 2 **partial**: `verify_staging` no longer re-hashes `venv/**`, but
+    the merged manifest is still uploaded via SCP (writing it server-side is
+    not implemented).
+  - item 4 **partial**: `acquire_lock` polls instead of sleeping, but the
+    pre-flight handshake (`ensure_app_user` + `ensure_layout` +
+    `acquire_lock` + `sweep_stale_staging` + state read) is still several
+    round trips.
+  - item 5 **partial**: the build runs before the SSH connection, but it is
+    not parallelized with secret resolution.
+  - item 6 **partial**: the build-cache-hit double read is fixed (verified
+    bytes are reused), the local cache of committed manifests by `<digest>`
+    is not implemented.
+  - item 7 **partial**: post-rsync staging preparation is fused, but fewer
+    staging round trips are still possible.
+  Everything else — items 1, 3, 8, 9, 10, 11 — is implemented and
+  unit-tested.
 - A real-app measurement is still missing: the numbers above come from the
   Docker test app (a handful of dependencies). Profile `time fujin deploy` on
   a real Django project (hundreds of venv files) before/after to confirm the

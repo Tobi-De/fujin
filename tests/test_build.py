@@ -110,6 +110,36 @@ def test_cache_hit_skips_build_command(project, monkeypatch):
     assert second.staging_dir == first.staging_dir
 
 
+def test_cache_hit_reads_each_staged_file_once(project, monkeypatch):
+    """Verification bytes are reused: no staged file is read twice on a hit."""
+    config = make_config(project)
+    first = run_build(config)
+    reads: dict[Path, int] = {}
+    real_read_bytes = Path.read_bytes
+    real_read_text = Path.read_text
+
+    def counting_read_bytes(self):
+        reads[self] = reads.get(self, 0) + 1
+        return real_read_bytes(self)
+
+    def counting_read_text(self, *args, **kwargs):
+        reads[self] = reads.get(self, 0) + 1
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    second = run_build(config)
+    assert second.bundle_key == first.bundle_key
+
+    staged_reads = {
+        path: count
+        for path, count in reads.items()
+        if first.staging_dir in path.parents
+    }
+    assert staged_reads, "cache hit did not read the staging tree"
+    assert {path: n for path, n in staged_reads.items() if n != 1} == {}
+
+
 def test_each_input_busts_cache(project):
     config = make_config(project)
     first_key = run_build(config).bundle_key

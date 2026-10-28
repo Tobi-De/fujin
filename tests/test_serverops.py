@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 from unittest.mock import MagicMock
 
@@ -340,7 +341,10 @@ def test_parse_holder_pid():
 def test_release_lock_flock(conn):
     serverops.release_lock(conn, "/opt/fujin/myapp", "flock:42")
     cmds = [c[0][0] for c in conn.run.call_args_list]
-    assert any("kill 42" in c for c in cmds)
+    assert len(cmds) == 1
+    assert "kill -- -42" in cmds[0]
+    assert "kill 42" in cmds[0]
+    assert "rm -f /opt/fujin/myapp/store/lock.holder" in cmds[0]
 
 
 def test_release_lock_file(conn):
@@ -485,6 +489,93 @@ def test_prepare_staging_permission_failure_names_the_step(conn):
     conn.run.side_effect = run
     with pytest.raises(serverops.ServerOpsError, match="normalize ownership"):
         _prepare(conn)
+
+
+def test_clone_permission_pass_leaves_hardlinked_inodes_untouched(tmp_path):
+    """The clone path chmod/chgrp only entries newer than the install marker.
+
+    A hardlinked live file (same inode as in the live release) must keep both
+    its mode and its ctime; the wheel's newly installed files still get the
+    permission model.
+    """
+    import os
+    import subprocess
+
+    staging = tmp_path / "staging"
+    live = tmp_path / "live-venv"
+    (staging / "venv" / "bin").mkdir(parents=True)
+    (staging / "venv" / "lib" / "site-packages").mkdir(parents=True)
+    (live / "lib" / "site-packages").mkdir(parents=True)
+    (staging / ".env").write_text("SECRET=1\n")
+
+    shared = live / "lib" / "site-packages" / "dependency.py"
+    shared.write_text("x = 1\n")
+    shared.chmod(0o640)
+    old = 1_600_000_000
+    os.utime(shared, (old, old))
+    os.link(shared, staging / "venv" / "lib" / "site-packages" / "dependency.py")
+
+    marker = staging / serverops.CLONE_MARKER_PATH
+    marker.touch()
+    # the real install command backdates the marker one second
+    os.utime(marker, (old + 1, old + 1))
+
+    new_file = staging / "venv" / "lib" / "site-packages" / "myapp.py"
+    new_file.write_text("y = 2\n")
+    new_file.chmod(0o600)
+    entrypoint = staging / "venv" / "bin" / "myapp"
+    entrypoint.write_text("#!/bin/sh\n")
+    entrypoint.chmod(0o600)
+
+    shared_stat = shared.stat()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "sudo").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "sudo $*" >> "$SUDO_LOG"\n'
+        'if [ "$1" = chgrp ]; then exit 0; fi\nexec "$@"\n'
+    )
+    (bindir / "sudo").chmod(0o755)
+    # ``find -exec chgrp`` resolves chgrp via PATH; the test user cannot
+    # change groups, so record the call and succeed.
+    (bindir / "chgrp").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "chgrp $*" >> "$SUDO_LOG"\nexit 0\n'
+    )
+    (bindir / "chgrp").chmod(0o755)
+
+    script = serverops._staging_permissions_script(
+        str(staging),
+        "myapp",
+        "python-package",
+        "bin/myapp",
+        clone_marker=str(marker),
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "SUDO_LOG": str(tmp_path / "sudo.log"),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+
+    after = shared.stat()
+    assert (after.st_mode & 0o7777) == 0o640
+    assert after.st_ctime_ns == shared_stat.st_ctime_ns
+    # the install's own files still get the permission model
+    assert (new_file.stat().st_mode & 0o777) in (0o644, 0o664)
+    assert entrypoint.stat().st_mode & 0o100
+    assert not marker.exists()
+
+    sudo_log = (tmp_path / "sudo.log").read_text()
+    # the venv passes are bounded by the marker
+    venv_q = shlex.quote(str(staging / "venv"))
+    marker_q = shlex.quote(str(marker))
+    assert f"{venv_q} -newer {marker_q} -exec chgrp myapp" in sudo_log
+    assert f"{venv_q} -newer {marker_q} -type f -exec chmod u+rwX,go+rX" in sudo_log
+    assert "chgrp -R myapp" not in sudo_log
+    assert "chmod -R u+rwX" not in sudo_log
 
 
 def test_prepare_staging_env_mode_failure_is_attributed(conn):
@@ -683,6 +774,32 @@ def test_install_units_is_one_round_trip(conn):
     assert script.splitlines()[-1].startswith("sudo systemctl daemon-reload")
     # content travels base64-encoded (quoting safe)
     assert base64.b64encode(b"[Service]\nLimitNOFILE=8192\n").decode() in script
+
+
+def test_install_units_writes_only_changed_entries(conn):
+    """One changed unit of three: only that file is written, all still
+    validated/stale-checked, and the daemon-reload still runs."""
+    serverops.install_units(
+        conn, "myapp", UNIT_FILES, DROPINS, changed={"myapp-web.socket"}
+    )
+    assert conn.run.call_count == 1
+    script = conn.run.call_args[0][0]
+    assert script.count("sudo tee ") == 1
+    assert "sudo tee /etc/systemd/system/myapp-web.socket.fujin-new" in script
+    assert ".service.fujin-new" not in script
+    # no dropin changed: no dropin (re)write and no mkdir
+    assert "limits.conf.fujin-new" not in script
+    assert "env.conf.fujin-new" not in script
+    assert "sudo mkdir -p" not in script
+    # every declared entry is still accepted by the stale-removal scan and the
+    # pre-write scan still runs
+    assert "find . -maxdepth 1" in script
+    assert (
+        "myapp-web.service|myapp-web.service.d|myapp-web.service.d/limits.conf"
+        in script
+    )
+    assert "myapp-worker@.service.d/env.conf" in script
+    assert script.count("sudo systemctl daemon-reload") == 1
 
 
 def test_install_units_stale_and_prune_lists_are_literal(conn):
@@ -1473,11 +1590,38 @@ def test_install_caddyfile_crash_recovery_restores_backup(conn):
 
     conn.run.side_effect = run_side
     assert serverops.install_caddyfile(conn, "new", "/etc/caddy/conf.d/myapp.caddy")
+    cmds = [c[0][0] for c in conn.run.call_args_list]
     assert any(
         "sudo cp /etc/caddy/conf.d/myapp.caddy.fujin-bak /etc/caddy/conf.d/myapp.caddy"
-        in c[0][0]
-        for c in conn.run.call_args_list
+        in c
+        for c in cmds
     )
+    assert any("systemctl reload caddy" in c for c in cmds)
+
+
+def test_install_caddyfile_restored_backup_reloads_even_when_equal(conn):
+    """A restored main config that already matches must still be reloaded and
+    the leftover backup removed: the crashed run means Caddy's state is
+    unknown."""
+
+    def run_side(cmd, **kw):
+        if "test -f /etc/caddy/conf.d/myapp.caddy " in cmd + " ":
+            return ("", False)  # main missing (crashed last time)
+        if "test -f /etc/caddy/conf.d/myapp.caddy.fujin-bak" in cmd:
+            return ("", True)  # backup present
+        if "cat /etc/caddy" in cmd:
+            return ("same config\n", True)
+        if "reload caddy" in cmd:
+            return ("", True)
+        return ("", True)
+
+    conn.run.side_effect = run_side
+    assert serverops.install_caddyfile(
+        conn, "same config\n", "/etc/caddy/conf.d/myapp.caddy"
+    )
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    assert any("systemctl reload caddy" in c for c in cmds)
+    assert any("sudo rm -f /etc/caddy/conf.d/myapp.caddy.fujin-bak" in c for c in cmds)
 
 
 # =============================================================================
@@ -1602,7 +1746,7 @@ def test_installed_unit_tree_never_lists_enablement_symlinks(conn):
 
 
 def test_prepare_staging_clone_uses_cp_al_and_app_only_install(conn):
-    """Clone path: one ``cp -al`` and one dependency-free, no-compile install."""
+    """Clone path: one ``cp -al``, one compiled app-only install, marker pass."""
     _prepare(conn, requirements="/local/requirements.txt", clone_from="/live/rel")
     cmds = [c[0][0] for c in conn.run.call_args_list]
     assert len(cmds) == 3
@@ -1612,15 +1756,27 @@ def test_prepare_staging_clone_uses_cp_al_and_app_only_install(conn):
     pip = cmds[1]
     assert "uv pip install --python" in pip
     assert "--no-deps" in pip
-    assert "--no-compile" in pip
+    assert "--compile-bytecode" in pip
+    assert "--no-compile" not in pip
+    # the marker is created before the install, bounding the permission pass
+    marker = "/opt/fujin/myapp/releases/.staging-1/.fujin-install-marker"
+    assert pip.startswith(f"touch {marker} && ")
+    assert "touch -d '1 second ago'" in pip
     assert " -r " not in pip
-    assert "UV_COMPILE_BYTECODE" not in pip
     assert "test -f " not in pip
     joined = "\n".join(cmds)
     assert "uv venv" not in joined
     assert "requirements.txt" not in joined
-    # the permission pass still runs last
-    assert "chmod 0640" in cmds[2]
+    # the permission pass still runs last and only selects newer venv entries
+    script = cmds[2]
+    assert "chmod 0640" in script
+    assert f"find /opt/fujin/myapp/releases/.staging-1/venv -newer {marker}" in script
+    assert "-exec chgrp myapp {} +" in script
+    assert "-exec chmod u+rwX,go+rX {} +" in script
+    assert f"rm -f {marker}" in script
+    # the live release's hardlinked files are never recursively chmod-ed
+    assert "chmod -R u+rwX,go+rX" not in script
+    assert "chgrp -R myapp" not in script
 
 
 def test_prepare_staging_clone_failure_falls_back_to_full_install(conn):
