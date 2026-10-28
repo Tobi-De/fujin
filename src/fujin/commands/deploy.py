@@ -82,6 +82,7 @@ def _comparable(manifest: m.Manifest) -> m.Manifest:
             if entry.kind is not m.EntryKind.ENV and not path.startswith("venv/")
         },
         host=manifest.host,
+        python_version=manifest.python_version,
         created_at=manifest.created_at,
     )
 
@@ -212,6 +213,41 @@ def _is_notify(unit: str, notify: set[str]) -> bool:
         if template in notify:
             return True
     return False
+
+
+def venv_clone_eligible(
+    prev_manifest: m.Manifest | None,
+    target_manifest: m.Manifest,
+    installation_mode: str,
+    python_version: str | None,
+) -> bool:
+    """Whether the live release's ``venv/**`` can seed the new release.
+
+    Cloning is only valid when the dependency set is provably identical, so
+    every condition is a hard requirement (any mismatch falls back to the
+    full ``uv venv`` + ``uv pip install -r`` install):
+
+    - ``python-package`` mode (a binary release has no venv);
+    - a live release with a recorded ``python_version`` that still equals
+      the configured one (manifests written before the field existed record
+      ``""`` and are never eligible);
+    - the live manifest lists ``venv/**`` entries (the server-built tree);
+    - both manifests carry a ``requirements.txt`` entry with the same
+      sha256 — that is the identity of the installed dependency set.
+    """
+    if installation_mode != "python-package":
+        return False
+    if prev_manifest is None or not python_version:
+        return False
+    if prev_manifest.python_version != python_version:
+        return False
+    if not any(path.startswith("venv/") for path in prev_manifest.entries):
+        return False
+    prev_req = prev_manifest.entries.get(build.REQUIREMENTS_TREE_PATH)
+    new_req = target_manifest.entries.get(build.REQUIREMENTS_TREE_PATH)
+    if prev_req is None or new_req is None or prev_req.sha256 is None:
+        return False
+    return prev_req.sha256 == new_req.sha256
 
 
 def merge_server_built(
@@ -599,6 +635,7 @@ class Deploy(BaseCommand):
             dist_sha256=m.hash_bytes(files[dist_path].content or b""),
             files=files,
             host=self.selected_host.name or self.selected_host.address,
+            python_version=self.config.python_version or "",
         )
         return manifest, files
 
@@ -757,6 +794,7 @@ class Deploy(BaseCommand):
             dist_sha256=result.dist_sha256,
             files=client_files,
             host=self.selected_host.name or self.selected_host.address,
+            python_version=config.python_version or "",
         )
         client_digest = m.release_digest(client_manifest)
 
@@ -947,6 +985,22 @@ class Deploy(BaseCommand):
                 for path in sorted(result.files)
                 if path.startswith(build.BIN_DIR + "/")
             )
+            # A python-package deploy whose dependency set (requirements
+            # sha256) and interpreter are unchanged reuses the live release's
+            # venv by hardlink and installs only the app wheel into it. The
+            # live tree stays byte-identical: no hardlinked file is written.
+            clone_source = None
+            if live_digest and venv_clone_eligible(
+                prev_manifest,
+                client_manifest,
+                config.installation_mode.value,
+                config.python_version,
+            ):
+                clone_source = f"{app_dir}/releases/{live_digest}"
+                self.output.info(
+                    "Dependencies unchanged: cloning the live virtualenv and"
+                    " installing the app package only."
+                )
             serverops.prepare_staging(
                 conn,
                 remote_staging,
@@ -956,10 +1010,14 @@ class Deploy(BaseCommand):
                 dist_tree_path,
                 app_name=config.app_name,
                 app_user=config.app_user or config.app_name,
+                clone_from=clone_source,
             )
 
             server_built = serverops.hash_server_built(
-                conn, remote_staging, config.installation_mode.value
+                conn,
+                remote_staging,
+                config.installation_mode.value,
+                live_release_dir=clone_source,
             )
             final_manifest = merge_server_built(client_manifest, server_built)
             final_digest = m.release_digest(final_manifest)

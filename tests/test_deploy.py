@@ -24,7 +24,7 @@ import fujin.serverops
 import fujin.transfer
 from fujin.build import BuildResult
 from fujin.commands.deploy import Deploy
-from fujin.config import HealthCheckConfig
+from fujin.config import HealthCheckConfig, InstallationMode
 from fujin.errors import ConnectionError, DeploymentError, ImproperlyConfiguredError
 from fujin.exit_codes import (
     EXIT_DEPLOY_FAILED,
@@ -245,10 +245,12 @@ def setup_deploy(
     monkeypatch.setattr(
         fujin.serverops, "read_current_manifest", lambda _c, _a: prev_manifest
     )
-    monkeypatch.setattr(fujin.serverops, "prepare_staging", MagicMock())
+    prepare_staging = MagicMock()
+    monkeypatch.setattr(fujin.serverops, "prepare_staging", prepare_staging)
     link_unchanged = MagicMock(return_value=(0, []))
     monkeypatch.setattr(fujin.serverops, "link_unchanged", link_unchanged)
-    monkeypatch.setattr(fujin.serverops, "hash_server_built", lambda *a, **k: {})
+    hash_server_built = MagicMock(return_value={})
+    monkeypatch.setattr(fujin.serverops, "hash_server_built", hash_server_built)
     install_units = MagicMock()
     monkeypatch.setattr(fujin.serverops, "install_units", install_units)
     write_states = []
@@ -365,6 +367,8 @@ def setup_deploy(
         "stop_and_disable": stop_and_disable,
         "cleanup_staging": cleanup,
         "link_unchanged": link_unchanged,
+        "prepare_staging": prepare_staging,
+        "hash_server_built": hash_server_built,
         "released": released,
     }
     return cmd, spies
@@ -2959,3 +2963,123 @@ def test_probe_reraises_after_last_attempt():
         deploy_mod._probe(conn, "readlink /x")
 
     assert conn.run.call_count == 2
+
+
+# ===========================================================================
+# venv clone (unchanged dependencies reuse the live release's venv)
+# ===========================================================================
+
+#: A python-package staging tree: the build always stages requirements.txt.
+CLONE_FILES = {**STAGING_FILES, "requirements.txt": b""}
+
+
+def clone_manifest(
+    *, python_version="3.11", requirements=b"", with_venv=True, dist="dist-000"
+):
+    """A final (server-merged) manifest of a python-package release."""
+    files = dict(CLONE_FILES)
+    if requirements is None:
+        del files["requirements.txt"]
+    else:
+        files["requirements.txt"] = requirements
+    if with_venv:
+        files["venv/lib/python3.11/site-packages/dep.py"] = b"dep = 1\n"
+    return build_manifest(
+        app_name="testapp",
+        version="1.0.0",
+        config_fingerprint="fp0",
+        dist_sha256=dist,
+        files=files,
+        python_version=python_version,
+    )
+
+
+def test_venv_clone_eligible_matrix():
+    live = clone_manifest()
+    target = clone_manifest()
+    assert deploy_mod.venv_clone_eligible(live, target, "python-package", "3.11")
+
+    # requirements.txt content changed: the dependency set is not identical
+    assert not deploy_mod.venv_clone_eligible(
+        live, clone_manifest(requirements=b"newdep==2\n"), "python-package", "3.11"
+    )
+    # configured interpreter changed
+    assert not deploy_mod.venv_clone_eligible(live, target, "python-package", "3.12")
+    # live manifest predates python_version recording
+    assert not deploy_mod.venv_clone_eligible(
+        clone_manifest(python_version=""), target, "python-package", "3.11"
+    )
+    # the live release lists no server-built venv tree
+    assert not deploy_mod.venv_clone_eligible(
+        clone_manifest(with_venv=False), target, "python-package", "3.11"
+    )
+    # binary releases have no venv
+    assert not deploy_mod.venv_clone_eligible(live, target, "binary", "3.11")
+    # first deploy
+    assert not deploy_mod.venv_clone_eligible(None, target, "python-package", "3.11")
+    # no requirements identity on either side: nothing proves the venv matches
+    assert not deploy_mod.venv_clone_eligible(
+        clone_manifest(requirements=None),
+        clone_manifest(requirements=None),
+        "python-package",
+        "3.11",
+    )
+
+
+def test_deploy_clones_live_venv_when_dependencies_unchanged(
+    monkeypatch, minimal_config, tmp_path
+):
+    state = State(current="prev")
+    live = clone_manifest()
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        prev_manifest=live,
+        files=CLONE_FILES,
+    )
+
+    assert invoke(cmd) == 0
+
+    live_dir = "/opt/fujin/testapp/releases/prev"
+    assert spies["prepare_staging"].call_args.kwargs["clone_from"] == live_dir
+    assert spies["hash_server_built"].call_args.kwargs["live_release_dir"] == live_dir
+
+
+def test_deploy_full_install_when_requirements_changed(
+    monkeypatch, minimal_config, tmp_path
+):
+    state = State(current="prev")
+    live = clone_manifest(requirements=b"olddep==1\n")
+    files = {**STAGING_FILES, "requirements.txt": b"newdep==2\n"}
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        prev_manifest=live,
+        files=files,
+    )
+
+    assert invoke(cmd) == 0
+
+    assert spies["prepare_staging"].call_args.kwargs["clone_from"] is None
+    assert spies["hash_server_built"].call_args.kwargs["live_release_dir"] is None
+
+
+def test_deploy_full_install_for_binary_release(monkeypatch, minimal_config, tmp_path):
+    minimal_config.installation_mode = InstallationMode.BINARY
+    state = State(current="prev")
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        prev_manifest=clone_manifest(),
+        files=CLONE_FILES,
+    )
+
+    assert invoke(cmd) == 0
+
+    assert spies["prepare_staging"].call_args.kwargs["clone_from"] is None

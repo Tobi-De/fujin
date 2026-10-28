@@ -5,6 +5,8 @@ These tests use Docker containers to simulate a real VPS environment.
 
 from __future__ import annotations
 
+import json
+import time
 from unittest.mock import MagicMock, patch
 
 import cappa
@@ -407,3 +409,131 @@ def test_doctor_repairs_missing_symlink_and_stopped_instance(shared_vps, project
     stdout, ok = exec_in_container(container, f"readlink {app_dir}/current")
     assert ok and stdout.strip().startswith("releases/")
     wait_for_service(container, "doctorapp-web@2.service")
+
+
+def _release_manifest(container: str, app: str, digest: str) -> dict:
+    stdout, ok = exec_in_container(
+        container, f"cat /opt/fujin/{app}/releases/{digest}/manifest.json"
+    )
+    assert ok, f"Could not read the manifest of release {digest}: {stdout}"
+    return json.loads(stdout)
+
+
+def _venv_hashes(container: str, app: str, digest: str) -> dict[str, str]:
+    """sha256 of every regular file under ``venv/`` of one release."""
+    stdout, ok = exec_in_container(
+        container,
+        f"cd /opt/fujin/{app}/releases/{digest} && "
+        "find venv -type f -print0 | sort -z | xargs -0 -r sha256sum",
+    )
+    assert ok, f"Could not hash the venv of release {digest}: {stdout}"
+    return {
+        path: digest_
+        for digest_, path in (
+            line.split("  ", 1) for line in stdout.splitlines() if line
+        )
+    }
+
+
+def _venv_entries(manifest: dict) -> dict[str, dict]:
+    return {
+        path: entry
+        for path, entry in manifest["entries"].items()
+        if path.startswith("venv/") and entry.get("sha256")
+    }
+
+
+def test_python_package_redeploy_clones_venv_immutably(
+    shared_vps, project, app_port, tmp_path
+):
+    """A redeploy with unchanged requirements clones the live venv.
+
+    The live release must stay byte-identical (hardlinks are never written),
+    only the app package is installed into the clone, and the new release
+    runs.
+    """
+    container = shared_vps["name"]
+    port = app_port
+    units = {
+        "web.service": f"""[Unit]
+Description=Python web
+
+[Service]
+Type=simple
+ExecStart={{app_dir}}/current/venv/bin/python3 -m http.server {port}
+WorkingDirectory={{app_dir}}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+""",
+    }
+
+    def make(version: str):
+        config = project(
+            "cloneapp",
+            shared_vps,
+            mode="python-package",
+            version=version,
+            units=units,
+        )
+        # A (comment-only) requirements file: its sha256 is the identity of
+        # the dependency set the venv clone check compares. An empty file is
+        # not staged as an entry at all, which disables cloning by design.
+        (tmp_path / "requirements.txt").write_text("# no runtime dependencies\n")
+        return config
+
+    started = time.monotonic()
+    deploy_app(make("1.0.0"))
+    v1_seconds = time.monotonic() - started
+    wait_for_service(container, "cloneapp-web.service")
+    assert_http_responds(container, port)
+
+    v1_digest = get_current_release(container, "cloneapp")
+    v1_manifest = _release_manifest(container, "cloneapp", v1_digest)
+    v1_entries = _venv_entries(v1_manifest)
+    assert v1_entries, "the first python-package deploy must record venv/**"
+    v1_hashes = _venv_hashes(container, "cloneapp", v1_digest)
+    assert set(v1_hashes) == set(v1_entries)
+    for path, entry in v1_entries.items():
+        assert entry["sha256"] == v1_hashes[path], path
+
+    # The requirements file is byte-identical, only the wheel changed.
+    started = time.monotonic()
+    deploy_app(make("2.0.0"))
+    v2_seconds = time.monotonic() - started
+    wait_for_service(container, "cloneapp-web.service")
+    assert_http_responds(container, port)
+
+    v2_digest = get_current_release(container, "cloneapp")
+    assert v2_digest != v1_digest
+
+    # Immutability: every v1 venv file hashes exactly as the v1 manifest says.
+    v1_after = _venv_hashes(container, "cloneapp", v1_digest)
+    assert v1_after == v1_hashes
+    for path, entry in v1_entries.items():
+        assert v1_after[path] == entry["sha256"], path
+
+    # The clone really was hardlinked from v1: at least one venv file is the
+    # same inode in both releases (and therefore was never re-read/re-written).
+    _release_manifest(container, "cloneapp", v2_digest)
+    v2_hashes = _venv_hashes(container, "cloneapp", v2_digest)
+    shared = [
+        path
+        for path in v1_hashes
+        if path in v2_hashes and v1_hashes[path] == v2_hashes[path]
+    ]
+    assert shared, "expected unchanged venv files shared between releases"
+    stats, ok = exec_in_container(
+        container,
+        f"stat -c '%i %d' /opt/fujin/cloneapp/releases/{v1_digest}/{shared[0]}"
+        f" /opt/fujin/cloneapp/releases/{v2_digest}/{shared[0]}",
+    )
+    assert ok, stats
+    inode_v1, dev_v1, inode_v2, dev_v2 = stats.split()
+    assert (inode_v1, dev_v1) == (inode_v2, dev_v2), shared[0]
+
+    print(
+        f"\npython-package deploy timings: v1 (full install)={v1_seconds:.2f}s,"
+        f" v2 (venv clone)={v2_seconds:.2f}s"
+    )

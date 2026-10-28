@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import os
 import subprocess
 from unittest.mock import MagicMock
 
@@ -361,6 +363,7 @@ def _prepare(
     requirements=None,
     dist="bin/myapp-1.0-py3-none-any.whl",
     app_name="myapp",
+    clone_from=None,
 ):
     serverops.prepare_staging(
         conn,
@@ -371,6 +374,7 @@ def _prepare(
         dist,
         app_name=app_name,
         app_user="myapp",
+        clone_from=clone_from,
     )
 
 
@@ -1552,3 +1556,160 @@ def test_installed_unit_tree_never_lists_enablement_symlinks(conn):
     assert "-maxdepth 1 -name 'myapp*'" in cmd
     assert "-maxdepth 2 -path './myapp*.d/*'" in cmd
     assert "-maxdepth 2 \\( -name" not in cmd
+
+
+# =============================================================================
+# prepare_staging: venv clone (unchanged dependencies)
+# =============================================================================
+
+
+def test_prepare_staging_clone_uses_cp_al_and_app_only_install(conn):
+    """Clone path: one ``cp -al`` and one dependency-free, no-compile install."""
+    _prepare(conn, requirements="/local/requirements.txt", clone_from="/live/rel")
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    assert len(cmds) == 3
+    assert cmds[0] == (
+        "cp -al /live/rel/venv /opt/fujin/myapp/releases/.staging-1/venv"
+    )
+    pip = cmds[1]
+    assert "uv pip install --python" in pip
+    assert "--no-deps" in pip
+    assert "--no-compile" in pip
+    assert " -r " not in pip
+    assert "UV_COMPILE_BYTECODE" not in pip
+    assert "test -f " not in pip
+    joined = "\n".join(cmds)
+    assert "uv venv" not in joined
+    assert "requirements.txt" not in joined
+    # the permission pass still runs last
+    assert "chmod 0640" in cmds[2]
+
+
+def test_prepare_staging_clone_failure_falls_back_to_full_install(conn):
+    """A vanished live venv degrades to the previous full install."""
+    calls: list[str] = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        if cmd.startswith("cp -al "):
+            return ("cp: cannot stat '/live/rel/venv'", False)
+        return ("", True)
+
+    conn.run.side_effect = run
+    _prepare(conn, requirements="/local/requirements.txt", clone_from="/live/rel")
+
+    assert calls[0].startswith("cp -al ")
+    assert calls[1] == "rm -rf /opt/fujin/myapp/releases/.staging-1/venv"
+    assert "uv venv --relocatable -p 3.11" in calls[2]
+    pip = calls[3]
+    assert " -r " in pip
+    assert "--no-compile" not in pip
+    assert "UV_COMPILE_BYTECODE=1" in pip
+
+
+def test_prepare_staging_clone_pip_failure_is_attributed(conn):
+    def run(cmd, **kw):
+        if cmd.startswith("cp -al "):
+            return ("", True)
+        if "uv pip install" in cmd:
+            return ("boom: resolution exploded", False)
+        return ("", True)
+
+    conn.run.side_effect = run
+    with pytest.raises(serverops.ServerOpsError, match="cloned venv") as exc:
+        _prepare(conn, clone_from="/live/rel")
+    assert "resolution exploded" in str(exc.value)
+
+
+def test_prepare_staging_clone_from_ignored_for_binary(conn):
+    _prepare(conn, mode="binary", python=None, dist="bin/myapp", clone_from="/l/r")
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    assert len(cmds) == 1
+    assert "cp -al" not in cmds[0]
+
+
+# =============================================================================
+# hash_server_built: inode reuse from the live release
+# =============================================================================
+
+
+class _ExecConn:
+    """Execute the generated python script locally, like the remote host."""
+
+    def __init__(self):
+        self.commands: list[str] = []
+
+    def run(self, command, **kwargs):
+        self.commands.append(command)
+        result = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
+        return result.stdout, result.returncode == 0
+
+
+def _write_live_manifest(release, entries):
+    (release / "manifest.json").write_text(json.dumps({"entries": entries}))
+
+
+def test_hash_server_built_reuses_hardlinked_entries(tmp_path):
+    """Only new/changed inodes are read; hardlinked ones reuse the manifest."""
+    live = tmp_path / "releases" / "live"
+    (live / "venv" / "lib").mkdir(parents=True)
+    dep = live / "venv" / "lib" / "dep.py"
+    dep.write_text("real = 1\n")
+    (live / "venv" / "python3").symlink_to("/usr/bin/python3")
+    # Deliberately wrong digests: a re-hash would return the true one, so
+    # getting these back proves the entries were reused, not read.
+    _write_live_manifest(
+        live,
+        {
+            "venv/lib/dep.py": {"sha256": "0" * 64, "mode": "0644"},
+            "venv/python3": {"link": "/usr/bin/python3", "mode": "0777"},
+        },
+    )
+
+    staging = tmp_path / "staging"
+    (staging / "venv" / "lib").mkdir(parents=True)
+    os.link(dep, staging / "venv" / "lib" / "dep.py")
+    (staging / "venv" / "python3").symlink_to("/usr/bin/python3")
+    # A changed file: copied, so a different inode, and it must be hashed.
+    (staging / "venv" / "lib" / "changed.py").write_text("changed = 1\n")
+
+    conn = _ExecConn()
+    result = serverops.hash_server_built(
+        conn, str(staging), "python-package", live_release_dir=str(live)
+    )
+
+    assert result["venv/lib/dep.py"]["sha256"] == "0" * 64
+    # mode is read from the staged inode (the umask decides the group bits)
+    assert result["venv/lib/dep.py"]["mode"] == dep.stat().st_mode & 0o777
+    assert (
+        result["venv/lib/changed.py"]["sha256"]
+        == hashlib.sha256(b"changed = 1\n").hexdigest()
+    )
+    assert result["venv/python3"]["link"] == "/usr/bin/python3"
+
+
+def test_hash_server_built_hashes_everything_without_live_manifest(tmp_path):
+    """A missing/stale live manifest is not fatal: fall back to hashing."""
+    live = tmp_path / "releases" / "live"
+    (live / "venv" / "lib").mkdir(parents=True)
+    dep = live / "venv" / "lib" / "dep.py"
+    dep.write_text("real = 1\n")
+
+    staging = tmp_path / "staging"
+    (staging / "venv" / "lib").mkdir(parents=True)
+    os.link(dep, staging / "venv" / "lib" / "dep.py")
+
+    conn = _ExecConn()
+    result = serverops.hash_server_built(
+        conn, str(staging), "python-package", live_release_dir=str(live)
+    )
+    assert (
+        result["venv/lib/dep.py"]["sha256"] == hashlib.sha256(b"real = 1\n").hexdigest()
+    )
+
+
+def test_hash_server_built_defaults_to_no_reuse(conn):
+    conn.run.return_value = ("{}", True)
+    serverops.hash_server_built(conn, "/s", "python-package")
+    script = conn.run.call_args[0][0]
+    assert "live = None" in script

@@ -177,6 +177,7 @@ def build_manifest(
     dist_sha256: str,
     files: dict[str, InputFile | str | bytes],
     host: str = "",
+    python_version: str = "",
     created_at: datetime | None = None,
 ) -> Manifest:
     """Assemble a Manifest from client-known files (kinds derived from tree paths).
@@ -184,6 +185,12 @@ def build_manifest(
     ``host`` is the target host identity (name, falling back to address). It
     is metadata for the cross-host guard: it is stored in
     ``manifest.json`` but excluded from :func:`release_digest`.
+
+    ``python_version`` is the interpreter the server-built ``venv/**`` was
+    created with. It is recorded so a later deploy can decide whether the live
+    venv is reusable (see :func:`fujin.commands.deploy.venv_clone_eligible`);
+    like ``host`` it is stored in ``manifest.json`` but excluded from the
+    digest (``config_fingerprint`` already covers it).
     """
     return Manifest(
         app_name=app_name,
@@ -192,6 +199,7 @@ def build_manifest(
         dist_sha256=dist_sha256,
         entries={path: build_entry(path, spec) for path, spec in files.items()},
         host=host,
+        python_version=python_version,
         created_at=created_at,
     )
 
@@ -211,6 +219,11 @@ class Manifest(msgspec.Struct, kw_only=True, frozen=True):
     #: ``manifest.json`` for the cross-host guard; never part of the
     #: release digest (the fingerprint already covers host build inputs).
     host: str = ""
+    #: Interpreter of the server-built ``venv/**``. Stored in
+    #: ``manifest.json`` and excluded from the digest (the fingerprint
+    #: already covers ``python_version``); manifests written before the
+    #: field existed decode to ``""`` and are never venv-clone sources.
+    python_version: str = ""
     created_at: datetime | None = None
 
 
@@ -237,6 +250,7 @@ def manifest_to_dict(
         "config_fingerprint": manifest.config_fingerprint,
         "dist_sha256": manifest.dist_sha256,
         "host": manifest.host,
+        "python_version": manifest.python_version,
         "entries": {
             path: _entry_to_dict(entry)
             for path, entry in sorted(manifest.entries.items())
@@ -249,12 +263,17 @@ def manifest_to_dict(
 
 def canonical_manifest_bytes(manifest: Manifest) -> bytes:
     """Canonical manifest bytes: the digest input. ``created_at`` is never
-    included. ``host`` is excluded as well: the per-host config fingerprint
-    already identifies the target build inputs, and adding the display name
-    would fragment releases for a purely cosmetic host rename.
+    included. ``host`` and ``python_version`` are excluded as well: the
+    per-host config fingerprint already identifies the target build inputs
+    (including the interpreter), and adding the host display name would
+    fragment releases for a purely cosmetic rename.
     """
     data = manifest_to_dict(manifest, include_created_at=False)
     data.pop("host", None)
+    # The per-host config fingerprint already covers ``python_version``;
+    # keeping it out of the digest also leaves manifests written before the
+    # field existed with their original release digest.
+    data.pop("python_version", None)
     return canonical_json(data)
 
 
@@ -262,7 +281,8 @@ def stored_manifest_bytes(manifest: Manifest) -> bytes:
     """Canonical bytes written to ``manifest.json`` on the server.
 
     Identical to :func:`canonical_manifest_bytes` plus the ``host`` identity
-    the cross-host guard compares. ``created_at`` stays informational
+    the cross-host guard compares and the ``python_version`` the venv-clone
+    check compares. ``created_at`` stays informational
     and is only written when set.
     """
     return canonical_json(manifest_to_dict(manifest, include_created_at=True))
@@ -307,6 +327,7 @@ def manifest_from_dict(data: dict[str, Any]) -> Manifest:
         # Backward-compatible: manifests written before the host identity
         # existed decode to an empty host.
         host=data.get("host", ""),
+        python_version=data.get("python_version", ""),
         created_at=created_at,
     )
 

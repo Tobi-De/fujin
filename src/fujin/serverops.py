@@ -757,14 +757,28 @@ def prepare_staging(
     *,
     app_name: str,
     app_user: str,
+    clone_from: str | None = None,
 ) -> None:
     """Install the app code and apply the deploy permission model to staging.
 
-    Never touches a live venv. The steps and the number of round-trips:
+    Never touches a live venv's *content*. The steps and the number of
+    round-trips:
 
-    - ``python-package``: ``uv venv`` (1), ``uv pip install`` (1), then the
-      fused permission pass (1) below.
+    - ``python-package``, full install: ``uv venv`` (1), ``uv pip install``
+      (1), then the fused permission pass (1) below.
+    - ``python-package``, ``clone_from`` set: ``cp -al`` of the live
+      release's ``venv/`` (1), ``uv pip install --no-deps --no-compile`` of
+      the new dist (1), then the fused permission pass (1). Hardlinked
+      dependency files are never read, rewritten or byte-compiled; only the
+      app distribution is installed into the clone (``--no-compile`` keeps
+      uv from writing ``__pycache__`` through a hardlinked tree).
     - ``binary``: the rsynced dist file plus the fused permission pass (1).
+
+    ``clone_from`` is the live release directory; the caller decides
+    eligibility (:func:`fujin.commands.deploy.venv_clone_eligible`). If the
+    clone itself fails (e.g. the live venv vanished between the check and
+    now) the full install runs instead, so a stale eligibility decision
+    degrades to the previous behaviour instead of failing the deploy.
 
     The permission pass is one ``conn.run`` that sets the ``.env`` mode, the
     venv modes and the deploy-wide group/setgid model. ``venv/`` is only
@@ -784,40 +798,70 @@ def prepare_staging(
     if installation_mode == "python-package":
         if not python_version:
             raise ServerOpsError("python mode requires a python_version")
-        _, ok = conn.run(
-            f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} "
-            f"uv venv --relocatable -p {shlex.quote(python_version)} --managed-python "
-            f"{staging_q}/{_PYTHON_ROOT}",
-            warn=True,
-        )
-        if not ok:
-            raise ServerOpsError(f"uv venv creation failed in {staging_dir}")
-        pip_cmd = (
-            f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} UV_COMPILE_BYTECODE=1 "
-            f"uv pip install --python {staging_q}/{_PYTHON_ROOT}/bin/python "
-            f"{dist_in_tree} --no-deps"
-        )
-        if requirements:
-            req_in_tree = f"{staging_dir}/requirements.txt"
-            req_q = shlex.quote(req_in_tree)
-            # The file rides in with the rsynced tree (an asset entry); fail
-            # loudly here rather than letting uv report a missing -r file.
+        venv_q = f"{staging_q}/{_PYTHON_ROOT}"
+        cloned = False
+        if clone_from:
+            live_venv = f"{shlex.quote(clone_from)}/{_PYTHON_ROOT}"
+            _cp_out, cp_ok = conn.run(
+                f"cp -al {live_venv} {venv_q}", warn=True, hide=True
+            )
+            cloned = cp_ok
+            if not cloned:
+                # A partially written clone must not be reused as an install
+                # target; start over with the full install.
+                conn.run(f"rm -rf {venv_q}", warn=True, hide=True)
+        if cloned:
+            # App package only: dependencies and every other file are the
+            # live release's inodes. ``--no-compile`` is mandatory here -
+            # bytecode writes would mutate hardlinked files in the live
+            # release.
             pip_cmd = (
-                f"test -f {req_q}"
-                f" || {{ echo 'fujin: {req_in_tree} missing from the staging tree';"
-                f" exit 1; }}; "
-                f"{pip_cmd} -r {req_q}"
+                f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} "
+                f"uv pip install --python {venv_q}/bin/python "
+                f"{dist_in_tree} --no-deps --no-compile"
             )
-        _pip_out, ok = conn.run(pip_cmd, warn=True)
-        if not ok:
-            if "missing from the staging tree" in _pip_out:
+            _pip_out, ok = conn.run(pip_cmd, warn=True)
+            if not ok:
                 raise ServerOpsError(
-                    f"{staging_dir}/requirements.txt is missing from the staging"
-                    " tree; the upload did not carry the build's requirements entry"
+                    f"uv pip install into the cloned venv failed:\n{_pip_out.strip()}"
                 )
-            raise ServerOpsError(
-                f"uv pip install into staging venv failed:\n{_pip_out.strip()}"
+        else:
+            _, ok = conn.run(
+                f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} "
+                f"uv venv --relocatable -p {shlex.quote(python_version)}"
+                f" --managed-python {venv_q}",
+                warn=True,
             )
+            if not ok:
+                raise ServerOpsError(f"uv venv creation failed in {staging_dir}")
+            pip_cmd = (
+                f"UV_PYTHON_INSTALL_DIR={UV_PYTHON_INSTALL_DIR} UV_COMPILE_BYTECODE=1 "
+                f"uv pip install --python {venv_q}/bin/python "
+                f"{dist_in_tree} --no-deps"
+            )
+            if requirements:
+                req_in_tree = f"{staging_dir}/requirements.txt"
+                req_q = shlex.quote(req_in_tree)
+                # The file rides in with the rsynced tree (an asset entry);
+                # fail loudly here rather than letting uv report a missing
+                # -r file.
+                pip_cmd = (
+                    f"test -f {req_q}"
+                    f" || {{ echo 'fujin: {req_in_tree} missing from the staging"
+                    f" tree'; exit 1; }}; "
+                    f"{pip_cmd} -r {req_q}"
+                )
+            _pip_out, ok = conn.run(pip_cmd, warn=True)
+            if not ok:
+                if "missing from the staging tree" in _pip_out:
+                    raise ServerOpsError(
+                        f"{staging_dir}/requirements.txt is missing from the"
+                        " staging tree; the upload did not carry the build's"
+                        " requirements entry"
+                    )
+                raise ServerOpsError(
+                    f"uv pip install into staging venv failed:\n{_pip_out.strip()}"
+                )
     elif installation_mode != "binary":
         raise ServerOpsError(f"Unknown installation mode: {installation_mode}")
 
@@ -903,13 +947,24 @@ def _staging_permissions_script(
 
 
 def hash_server_built(
-    conn: Any, staging_dir: str, installation_mode: str
+    conn: Any,
+    staging_dir: str,
+    installation_mode: str,
+    *,
+    live_release_dir: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Hash server-built entries (``venv/**`` or ``bin/**``) on the remote host.
 
     Returns ``{path: {"sha256": hex, "mode": int}}`` for regular files and
     ``{path: {"link": target, "mode": int}}`` for symlinks, keyed by
     staging-relative paths. Raises on a non-zero exit or undecodable output.
+
+    ``live_release_dir`` is the live release the staging tree was cloned from
+    (see :func:`prepare_staging`). The server script reads that release's
+    ``manifest.json`` and, for every staged file whose ``(st_dev, st_ino)``
+    equals the live file's, reuses the recorded sha256 instead of re-reading
+    the bytes: a hardlinked file is the same inode, so it cannot differ. Only
+    new/changed files (the installed app package, new metadata) are read.
     """
     root = {
         "python-package": _PYTHON_ROOT,
@@ -923,20 +978,51 @@ def hash_server_built(
         [
             "import hashlib, json, os, stat",
             "root = " + repr(root_path),
+            "live = " + repr(live_release_dir),
+            "reusable = {}",
+            "if live:",
+            "    # Only entries under this tree can be reused; a stale or",
+            "    # unreadable live manifest just means hashing everything.",
+            "    try:",
+            "        with open(os.path.join(live, 'manifest.json'),"
+            " encoding='utf-8') as fh:",
+            "            data = json.load(fh)",
+            "        for rel, entry in (data.get('entries') or {}).items():",
+            "            sha = entry.get('sha256')",
+            "            if sha and rel.startswith(" + repr(root + "/") + "):",
+            "                reusable[rel] = sha",
+            "    except (OSError, ValueError, AttributeError):",
+            "        reusable = {}",
             "result = {}",
+            "base = os.path.dirname(root)",
             "for dirpath, dirnames, filenames in os.walk(root):",
             "    for name in dirnames + filenames:",
             "        path = os.path.join(dirpath, name)",
-            "        rel = os.path.relpath(path, os.path.dirname(root))",
+            "        rel = os.path.relpath(path, base)",
             "        if os.path.islink(path):",
             "            result[rel] = {'link': os.readlink(path), 'mode': 0o777}",
             "        elif os.path.isfile(path):",
-            "            digest = hashlib.sha256()",
-            "            with open(path, 'rb') as fh:",
-            "                for chunk in iter(lambda: fh.read(131072), b''):",
-            "                    digest.update(chunk)",
-            "            result[rel] = {'sha256': digest.hexdigest(),"
-            " 'mode': stat.S_IMODE(os.lstat(path).st_mode)}",
+            "            st = os.lstat(path)",
+            "            sha = reusable.get(rel) if live else None",
+            "            if sha:",
+            "                try:",
+            "                    lst = os.lstat(os.path.join(live, rel))",
+            "                except OSError:",
+            "                    lst = None",
+            "                # Same inode => same bytes: reuse the live entry's",
+            "                # digest instead of reading the file again.",
+            "                if lst is None or (lst.st_dev, lst.st_ino) != (",
+            "                    st.st_dev, st.st_ino",
+            "                ):",
+            "                    sha = None",
+            "            if not sha:",
+            "                digest = hashlib.sha256()",
+            "                with open(path, 'rb') as fh:",
+            "                    for chunk in iter(lambda: fh.read(131072), b''):",
+            "                        digest.update(chunk)",
+            "                sha = digest.hexdigest()",
+            "            result[rel] = {'sha256': sha,"
+            " 'mode': stat.S_IMODE(st.st_mode)}",
             "print(json.dumps(result))",
         ]
     )
