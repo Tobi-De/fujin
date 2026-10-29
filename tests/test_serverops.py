@@ -1188,6 +1188,8 @@ def test_install_caddyfile_success(conn):
 
 def test_install_caddyfile_identical_content_is_a_noop(conn):
     def run_side(cmd, **kw):
+        if "test -f /etc/caddy/conf.d/myapp.caddy.fujin-bak" in cmd:
+            return ("", False)  # no leftover backup
         if "test -f" in cmd:
             return ("", True)
         if "cat /etc/caddy" in cmd:
@@ -1630,6 +1632,73 @@ def test_install_caddyfile_restored_backup_reloads_even_when_equal(conn):
     cmds = [c[0][0] for c in conn.run.call_args_list]
     assert any("systemctl reload caddy" in c for c in cmds)
     assert any("sudo rm -f /etc/caddy/conf.d/myapp.caddy.fujin-bak" in c for c in cmds)
+
+
+def test_caddyfile_fingerprint_single_round_trip(conn):
+    conn.run.return_value = ("a" * 64 + "\nBAK\n", True)
+    assert serverops.caddyfile_fingerprint(conn, "/etc/caddy/conf.d/myapp.caddy") == (
+        "a" * 64,
+        True,
+    )
+    assert len(conn.run.call_args_list) == 1
+    cmd = conn.run.call_args[0][0]
+    assert "sha256sum /etc/caddy/conf.d/myapp.caddy" in cmd
+    assert "/etc/caddy/conf.d/myapp.caddy.fujin-bak" in cmd
+
+
+def test_caddyfile_fingerprint_missing_file(conn):
+    conn.run.return_value = ("MISSING\nNOBAK\n", True)
+    assert serverops.caddyfile_fingerprint(conn, "/etc/caddy/conf.d/myapp.caddy") == (
+        None,
+        False,
+    )
+
+
+def _recovery_side_effect(content, reload_ok=True):
+    def run_side(cmd, **kw):
+        if cmd.startswith("test -f"):
+            return ("", True)  # main + backup both exist
+        if "cat /etc/caddy" in cmd:
+            return (content, True)
+        if "reload caddy" in cmd:
+            return ("", reload_ok)
+        return ("", True)
+
+    return run_side
+
+
+def test_install_caddyfile_identical_with_backup_reloads_once_and_cleans_up(conn):
+    """Crash recovery: the main file is already correct, so only reload and
+    drop the stale backup - never rewrite the main file."""
+    conn.run.side_effect = _recovery_side_effect("same config\n")
+    assert serverops.install_caddyfile(
+        conn, "same config\n", "/etc/caddy/conf.d/myapp.caddy"
+    )
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    assert sum("reload caddy" in c for c in cmds) == 1
+    assert any("sudo rm -f /etc/caddy/conf.d/myapp.caddy.fujin-bak" in c for c in cmds)
+    assert not any("base64 -d" in c for c in cmds)
+
+
+def test_install_caddyfile_identical_with_backup_reload_failure_keeps_both(conn):
+    conn.run.side_effect = _recovery_side_effect("same config\n", reload_ok=False)
+    assert not serverops.install_caddyfile(
+        conn, "same config\n", "/etc/caddy/conf.d/myapp.caddy"
+    )
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    assert not any("sudo rm -f /etc/caddy/conf.d/myapp.caddy" in c for c in cmds)
+    assert not any("base64 -d" in c for c in cmds)
+
+
+def test_install_caddyfile_backup_with_differing_content_takes_normal_path(conn):
+    conn.run.side_effect = _recovery_side_effect("old config\n")
+    assert serverops.install_caddyfile(
+        conn, "new config\n", "/etc/caddy/conf.d/myapp.caddy"
+    )
+    cmds = [c[0][0] for c in conn.run.call_args_list]
+    writes = [c for c in cmds if "base64 -d" in c]
+    assert len(writes) == 2  # backup + new config
+    assert any("systemctl reload caddy" in c for c in cmds)
 
 
 # =============================================================================

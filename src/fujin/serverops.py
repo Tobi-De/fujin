@@ -1406,14 +1406,19 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
     before the new one is written, so a crash mid-write never leaves a broken
     main config without a recovery path: a later call restores it.
 
-    When the installed config is already byte-identical to *content* the
-    function is a no-op (no backup write, no rewrite, no reload) and True is
-    returned immediately.
+    When the installed config is already byte-identical to *content* and no
+    backup is left behind, the function is a no-op (no backup write, no
+    rewrite, no reload) and True is returned immediately.
+
+    A leftover ``.fujin-bak`` means a previous run died mid-install. If the
+    main file already matches *content* the install itself is complete, but
+    Caddy's loaded state is unknown: Caddy is reloaded and, on success, only
+    the stale backup is removed (the main file is not rewritten). A reload
+    failure keeps both files and returns False.
 
     A config restored from a leftover ``.fujin-bak`` is *not* a no-op even
-    when it matches *content*: the previous run died mid-write, so Caddy may
-    still be running something else. The restore then takes the normal
-    success path (write, reload) and clears the stale backup.
+    when it matches *content*: the restore then takes the normal success
+    path (write, reload) and clears the stale backup.
 
     Returns True on successful reload. On failure the previous config (if
     any) is restored to disk without reloading (Caddy never loaded the new
@@ -1445,10 +1450,26 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
         old_content = out if ok else None
 
     if old_content == content and not restored:
-        # The server already serves byte-identical content: no backup, no
-        # rewrite, no reload (a reload would restart Caddy for nothing).
-        logger.info("Caddy config at %s is already current; skipping", path_q)
-        return True
+        if not bak_exists:
+            # The server already serves byte-identical content: no backup,
+            # no rewrite, no reload (a reload would restart Caddy for nothing).
+            logger.info("Caddy config at %s is already current; skipping", path_q)
+            return True
+        # Crash recovery: the main file was fully written but the run died
+        # before the reload/cleanup. Do not rewrite the main file; reload so
+        # Caddy's loaded state matches the disk, then drop the stale backup.
+        logger.info(
+            "Caddy config at %s is current but a stale backup exists; reloading",
+            path_q,
+        )
+        _, ok = conn.run("sudo systemctl reload caddy", warn=True)
+        if ok:
+            conn.run(f"sudo rm -f {bak_q}", warn=True, hide=True)
+            return True
+        logger.warning(
+            "Caddy reload failed; keeping %s and its recovery backup", path_q
+        )
+        return False
 
     if old_content is not None:
         _sudo_write(conn, bak_path, old_content, chown="caddy:caddy")
@@ -1471,6 +1492,28 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
     else:
         conn.run(f"sudo rm -f {path_q}", warn=True, hide=True)
     return False
+
+
+def caddyfile_fingerprint(conn: Any, caddy_config_path: str) -> tuple[str | None, bool]:
+    """Probe the installed Caddy config in one round trip.
+
+    Returns ``(sha256_hex_or_None, backup_exists)``: the digest of the
+    installed file (None when it is absent or the probe failed) and whether
+    the crash-recovery sibling ``<path>.fujin-bak`` is present.
+    """
+    path_q = shlex.quote(caddy_config_path)
+    bak_q = shlex.quote(f"{caddy_config_path}.fujin-bak")
+    cmd = (
+        f"if [ -f {path_q} ]; then sha256sum {path_q} | cut -d' ' -f1;"
+        " else echo MISSING; fi;"
+        f" if [ -f {bak_q} ]; then echo BAK; else echo NOBAK; fi"
+    )
+    out, ok = conn.run(cmd, warn=True, hide=True)
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    if not ok or len(lines) != 2:
+        return None, False
+    sha = None if lines[0] == "MISSING" else lines[0]
+    return sha, lines[1] == "BAK"
 
 
 # =============================================================================

@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - *(secrets)* Bitwarden 2FA trusted devices and pre-resolve sync
 
+### ⚡ Performance
+
+- *(deploy)* Resolve secrets concurrently with the local build
+
 ## [0.28.0b3] - 2026-10-29
 
 ### 🚀 Features

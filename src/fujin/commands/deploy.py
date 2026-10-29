@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shlex
@@ -845,7 +846,12 @@ class Deploy(BaseCommand):
         files = dict(result.files)
 
         state = serverops.read_state(conn, app_dir)
-        if state is not None and not self.force and store.is_noop(client_digest, state):
+        if (
+            state is not None
+            and not self.force
+            and store.is_noop(client_digest, state)
+            and self._live_release_matches_state(conn, app_dir, state)
+        ):
             self.output.info(
                 f"No changes detected; release {client_digest} is already live."
             )
@@ -915,6 +921,28 @@ class Deploy(BaseCommand):
                     (staging_dir / name).unlink()
                 except OSError:  # pragma: no cover - best effort
                     pass
+
+    def _live_release_matches_state(
+        self, conn, app_dir: str, state: store.State
+    ) -> bool:
+        """Whether the ``current`` symlink really resolves to ``state.current``.
+
+        ``state.json`` is a cache; the symlink is the source of truth. A
+        missing/unreadable symlink or a different digest means the recorded
+        state is stale, so the no-op path must not be taken. One read-only
+        round trip, only reached when a no-op would otherwise be honored.
+        """
+        target = serverops.read_symlink(conn, f"{app_dir}/current")
+        live = target.rstrip("/").rsplit("/", 1)[-1] if target else ""
+        recorded = store.normalize_digest(state.current) if state.current else ""
+        if live and store.normalize_digest(live) == recorded:
+            return True
+        self.output.warning(
+            f"Recorded live release {recorded or 'none'} does not match the"
+            f" current symlink ({live or 'missing'}); treating state as stale"
+            " and deploying."
+        )
+        return False
 
     def _cleanup_staging(self, conn, remote_staging: str) -> None:
         """Remove the remote staging tree, never masking the real failure.
@@ -1183,7 +1211,8 @@ class Deploy(BaseCommand):
                     and not self.force
                     and prev_manifest is not None
                     and prev_manifest.entries.get(m.CADDYFILE_PATH) == caddy_entry
-                    and self._caddyfile_installed(conn)
+                    and (staging_dir / mfile).is_file()
+                    and self._caddyfile_current(conn, (staging_dir / mfile).read_text())
                 )
                 if caddy_unchanged:
                     self.output.info(
@@ -1774,14 +1803,21 @@ class Deploy(BaseCommand):
     # Caddy
     # =======================================================================================
 
-    def _caddyfile_installed(self, conn) -> bool:
-        """Whether this app's Caddy config already exists on the server."""
-        _, exists = conn.run(
-            f"test -f {serverops.q(self.config.caddy_config_path)}",
-            warn=True,
-            hide=True,
+    def _caddyfile_current(self, conn, expected: str) -> bool:
+        """Whether the installed Caddy config already matches *expected*.
+
+        One round trip fetches the installed file's sha256 plus the presence
+        of a leftover ``.fujin-bak``: a backup means a previous install died
+        mid-way, so the installer must run (it reloads and cleans up).
+        """
+        sha, backup = serverops.caddyfile_fingerprint(
+            conn, self.config.caddy_config_path
         )
-        return bool(exists)
+        return (
+            sha is not None
+            and not backup
+            and sha == hashlib.sha256(expected.encode()).hexdigest()
+        )
 
     def _install_caddyfile(self, conn, local_caddy: Path) -> None:
         if not local_caddy.is_file():

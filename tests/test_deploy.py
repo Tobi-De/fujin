@@ -10,6 +10,7 @@ that flow.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -201,6 +202,9 @@ def invoke(cmd) -> int:
         raise
 
 
+_DEFAULT_SYMLINK = object()
+
+
 def setup_deploy(
     monkeypatch,
     minimal_config,
@@ -213,8 +217,15 @@ def setup_deploy(
     replicas=None,
     hooks=None,
     is_failed="active\nactive\n",
+    symlink_target=_DEFAULT_SYMLINK,
 ):
-    """Mock the whole deploy flow. Returns ``(cmd, spies)``."""
+    """Mock the whole deploy flow. Returns ``(cmd, spies)``.
+
+    ``symlink_target`` is what the fake server's ``current`` symlink resolves
+    to; by default it is kept consistent with ``state.current`` (a missing
+    current means no symlink). Tests for stale state pass an explicit
+    different target or None.
+    """
     if state is None:
         state = State()
     staging, result = build_result_for(tmp_path, files)
@@ -241,6 +252,11 @@ def setup_deploy(
     conn_ctx.return_value.__enter__.return_value = conn
     conn_ctx.return_value.__exit__.return_value = None
     monkeypatch.setattr(fujin.connection, "connection", conn_ctx)
+
+    if symlink_target is _DEFAULT_SYMLINK:
+        symlink_target = f"releases/{state.current}" if state.current else None
+    if symlink_target is not None:
+        conn.append_response("readlink", symlink_target)
 
     monkeypatch.setattr(fujin.serverops, "ensure_layout", MagicMock())
     monkeypatch.setattr(fujin.transfer, "sweep_stale_staging", lambda *a, **k: [])
@@ -3692,7 +3708,11 @@ def test_unchanged_caddyfile_skips_install(monkeypatch, minimal_config, tmp_path
         state=_installed_units_state(),
         prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
     )
-    spies["conn"].append_response(minimal_config.caddy_config_path, "", True)
+    spies["conn"].append_response(
+        minimal_config.caddy_config_path,
+        f"{hashlib.sha256(CADDYFILE.encode()).hexdigest()}\nNOBAK\n",
+        True,
+    )
     assert invoke(cmd) == 0
 
     spies["install_caddyfile"].assert_not_called()
@@ -3727,6 +3747,131 @@ def test_unchanged_caddyfile_reinstalled_when_missing(
         prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
     )
     # No marker registered: the config is NOT installed on the server.
+    assert invoke(cmd) == 0
+
+    spies["install_caddyfile"].assert_called_once()
+
+
+# ===========================================================================
+# No-op freshness probe: the current symlink is the source of truth
+# ===========================================================================
+
+
+def test_stale_state_deploys_when_symlink_points_elsewhere(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    """state.json says release A is live, the symlink points at B: deploy."""
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="release-a", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        symlink_target="releases/release-b",
+    )
+    assert invoke(cmd) == 0
+
+    spies["rsync"].assert_called()
+    spies["commit"].assert_called()
+    spies["swap"].assert_called()
+    _out, err = capsys.readouterr()
+    assert "release-a" in err and "release-b" in err
+
+
+def test_stale_state_deploys_when_symlink_missing(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="release-a", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        symlink_target=None,
+    )
+    assert invoke(cmd) == 0
+
+    spies["commit"].assert_called()
+    _out, err = capsys.readouterr()
+    assert "release-a" in err and "missing" in err
+
+
+def test_consistent_state_takes_noop_without_installs(
+    monkeypatch, minimal_config, tmp_path
+):
+    monkeypatch.setattr(deploy_mod.m, "release_digest", lambda *_a, **_k: "digest-x")
+    state = State(current="release-a", client_digest="digest-x")
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=state,
+        files=CADDY_FILES,
+        prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
+        symlink_target="releases/release-a",
+    )
+    assert invoke(cmd) == 0
+
+    spies["rsync"].assert_not_called()
+    spies["commit"].assert_not_called()
+    spies["swap"].assert_not_called()
+    spies["install_units"].assert_not_called()
+    spies["install_caddyfile"].assert_not_called()
+    operations = [k.get("operation") or a[2] for a, k in spies["log_calls"]]
+    assert "noop" in operations
+
+
+# ===========================================================================
+# Caddy fast path: content hash + crash-recovery backup
+# ===========================================================================
+
+
+def _fingerprint_response(spies, config, sha, backup=False):
+    spies["conn"].append_response(
+        config.caddy_config_path,
+        f"{sha}\n{'BAK' if backup else 'NOBAK'}\n",
+        True,
+    )
+
+
+def test_unchanged_caddyfile_reinstalled_after_external_edit(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=CADDY_FILES,
+        state=_installed_units_state(),
+        prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
+    )
+    _fingerprint_response(
+        spies, minimal_config, hashlib.sha256(b"edited elsewhere").hexdigest()
+    )
+    assert invoke(cmd) == 0
+
+    spies["install_caddyfile"].assert_called_once()
+
+
+def test_unchanged_caddyfile_reinstalled_when_backup_left_behind(
+    monkeypatch, minimal_config, tmp_path
+):
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        files=CADDY_FILES,
+        state=_installed_units_state(),
+        prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
+    )
+    _fingerprint_response(
+        spies,
+        minimal_config,
+        hashlib.sha256(CADDYFILE.encode()).hexdigest(),
+        backup=True,
+    )
     assert invoke(cmd) == 0
 
     spies["install_caddyfile"].assert_called_once()
