@@ -1,6 +1,14 @@
 # Fujin Secrets - Bitwarden
 
-Bitwarden (and Vaultwarden) secret adapter for the Fujin deployment tool.
+Bitwarden (and Vaultwarden) secret adapters for the Fujin deployment tool.
+
+Two adapters are provided:
+
+- `bitwarden` shells out to the Bitwarden CLI (default, described below).
+- `bitwarden-protocol` talks to the server HTTP API and decrypts the vault
+  itself, so neither the CLI nor an unlocked session is needed.
+
+Both resolve the same `$NAME` / `$folder/NAME` refs from your env template.
 
 ## Installation
 
@@ -8,13 +16,16 @@ Bitwarden (and Vaultwarden) secret adapter for the Fujin deployment tool.
 pip install fujin-secrets-bitwarden
 ```
 
-Or with uv:
+Or install it together with the CLI through the `bw` extra:
 
 ```bash
-uv pip install fujin-secrets-bitwarden
+pip install "fujin-cli[bw]"
 ```
 
-## Prerequisites
+## Prerequisites (CLI adapter)
+
+These prerequisites apply to the `bitwarden` CLI adapter only; the
+`bitwarden-protocol` adapter needs no local Bitwarden software.
 
 Download and install the [Bitwarden CLI](https://bitwarden.com/help/cli/#download-and-install)
 and log in to your account. When using a self-hosted [Vaultwarden](https://github.com/dani-garcia/vaultwarden)
@@ -166,6 +177,70 @@ Backwards compatible with earlier releases: every ref is resolved by item name
 across the whole vault with one concurrent `bw get password <name> --raw`
 call per ref. Use `folders` when names can collide between apps and personal
 logins.
+
+## The `bitwarden-protocol` adapter
+
+This adapter talks to Bitwarden/Vaultwarden's HTTP API directly
+(`identity/accounts/prelogin`, `identity/connect/token` and `api/sync`) and
+performs the vault crypto locally. It is read-only and uses only the master
+password: no `bw` binary, no unlocked session, no token stored on disk.
+
+```toml
+[secrets]
+adapter = "bitwarden-protocol"
+
+[secrets.options]
+email = "deploy@example.com"
+password_env = "BW_MASTER_PASSWORD"
+server_url = "https://vault.example.com"          # optional
+folders = ["fujin/myapp/prod", "fujin/shared"]    # optional
+```
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `email` | string (required) | Account email. Stripped and lower-cased before use as the KDF salt. |
+| `password_env` | string (required) | Name of the environment variable holding the master password. |
+| `server_url` | string | Base URL, defaults to `https://vault.bitwarden.com`. A trailing `/` is ignored. |
+| `folders` | string or list of strings | Same lookup-order semantics as the CLI adapter; omitted means whole-vault name lookup. |
+
+`BW_SESSION` is deliberately **not** accepted: a session token cannot decrypt
+the vault, so the master password must always be available in the deploy
+environment. Nothing is persisted between deployments.
+
+### CLI vs protocol
+
+| | `bitwarden` (CLI) | `bitwarden-protocol` (HTTP) |
+| --- | --- | --- |
+| Requires the `bw` binary | yes | no |
+| Requires an unlocked session | yes (`BW_SESSION` or `password_env`) | no, only `password_env` |
+| Performs the crypto | `bw` | this adapter |
+| Two-factor accounts | whatever `bw` supports | not supported |
+| Organizations/collections | via `bw` | not supported |
+| Vault writes | none by Fujin | none; strictly read-only |
+
+### Scope and limits
+
+- Personal vault, login items only. Secure notes, cards, identities, passwordless
+  logins and attachments are ignored. Organization/collection items are skipped
+  because their keys are not implemented.
+- KDFs: PBKDF2-SHA256 (`Kdf = 0`) and Argon2id (`Kdf = 1`), exactly as
+  advertised by the server's prelogin endpoint. Unknown KDFs fail closed.
+- Accounts requiring two-factor authentication cannot log in; the 2FA challenge
+  is reported as a value-free error and the deploy stops.
+- HTTPS with the default certificate verification; there is no insecure
+  override.
+- Errors never include vault values, response bodies or credential material.
+
+### Resolution
+
+Refs use the same syntax as the CLI adapter (`$NAME`, `$folder/NAME`, and `$$`
+for a literal `$`). Folder order, first-match-wins, folder-prefixed refs and
+duplicate folder-name failures behave identically. Without `folders`, each ref
+is matched by exact item name across the whole vault; if the same name exists
+more than once, resolution fails closed instead of picking one arbitrarily.
+
+A deploy whose env template contains no `$REF` performs no network requests at
+all, and does not even require the master password to be set.
 
 ## Related
 
