@@ -43,9 +43,9 @@ def legacy_project(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _run_migrate() -> MagicMock:
+def _run_migrate(**kwargs) -> MagicMock:
     with patch.object(Migrate, "output", MagicMock()) as output:
-        Migrate()()
+        Migrate(**kwargs)()
     return output
 
 
@@ -250,3 +250,49 @@ def test_convert_release_command(release_command, mode, expected_hooks):
     hooks, verbatim = Migrate()._convert_release_command(release_command, "myapp", mode)
     assert hooks == expected_hooks
     assert verbatim == [cmd for cmd in hooks if "sudo" in cmd]
+
+
+# ============================================================================
+# Gitignore
+# ============================================================================
+
+BLOCK = "# fujin local build cache\n**/.fujin/cache/\n"
+
+
+def test_migrate_ignores_fujin_build_cache(legacy_project):
+    output = _run_migrate()
+
+    assert (legacy_project / ".gitignore").read_text() == BLOCK
+    output.success.assert_any_call("Added **/.fujin/cache/ to .gitignore")
+
+
+def test_migrate_dry_run_previews_gitignore_without_writing(legacy_project):
+    output = _run_migrate(dry_run=True)
+
+    assert not (legacy_project / ".gitignore").exists()
+    assert not (legacy_project / ".fujin").exists()
+    assert (legacy_project / "fujin.toml").read_text() == LEGACY_TOML
+    output.output.assert_any_call("  + **/.fujin/cache/")
+
+
+def test_migrate_dry_run_reports_already_ignored(legacy_project):
+    (legacy_project / ".gitignore").write_text("*.pyc\n.fujin/cache/\n")
+
+    output = _run_migrate(dry_run=True)
+
+    assert (legacy_project / ".gitignore").read_text() == ("*.pyc\n.fujin/cache/\n")
+    output.output.assert_any_call("  **/.fujin/cache/ already ignored")
+
+
+def test_migrate_leaves_existing_cache_ignore_untouched(legacy_project):
+    gitignore = legacy_project / ".gitignore"
+    original = "# project\n**/.fujin/cache/\n"
+    gitignore.write_text(original)
+
+    output = _run_migrate()
+
+    assert gitignore.read_text() == original
+    output.success.assert_any_call("Updated fujin.toml")
+    assert not any(
+        "Added **/.fujin/cache/" in str(call) for call in output.success.call_args_list
+    )

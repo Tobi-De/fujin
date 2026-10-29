@@ -9,6 +9,11 @@ import cappa
 
 from fujin.commands import BaseCommand
 from fujin.config import tomllib
+from fujin.gitignore import (
+    CACHE_PATTERN,
+    ensure_fujin_cache_ignored,
+    is_fujin_cache_ignored,
+)
 from fujin.templates import NEW_SERVICE_TEMPLATE
 
 # Migration-specific Caddy templates for converting old config format
@@ -63,7 +68,7 @@ class Migrate(BaseCommand):
             config_dict = tomllib.loads(fujin_toml.read_text())
         except Exception as e:
             self.output.error(f"Failed to parse fujin.toml: {e}")
-            raise cappa.Exit(code=1)
+            raise cappa.Exit(code=1) from None
 
         # Check if already file-based
         if "processes" not in config_dict and "sites" not in config_dict:
@@ -104,6 +109,9 @@ class Migrate(BaseCommand):
                 self.output.success(f"Backup created: {backup_path}")
 
         self._migrate_to_file_based(config_dict)
+
+        if ensure_fujin_cache_ignored():
+            self.output.success(f"Added {CACHE_PATTERN} to .gitignore")
 
         self.output.success("\nMigration completed successfully!")
         self.output.info(
@@ -172,6 +180,12 @@ class Migrate(BaseCommand):
 
         for change in changes:
             self.output.output(change)
+
+        self.output.output("\n[bold cyan].gitignore:[/bold cyan]")
+        if is_fujin_cache_ignored():
+            self.output.output(f"  {CACHE_PATTERN} already ignored")
+        else:
+            self.output.output(f"  + {CACHE_PATTERN}")
 
     def _migrate_to_file_based(self, config: dict):
         """Migrate config to file-based structure."""

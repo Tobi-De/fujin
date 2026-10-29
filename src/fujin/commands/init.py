@@ -9,6 +9,7 @@ import tomli_w
 
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode, tomllib
+from fujin.gitignore import CACHE_PATTERN, ensure_fujin_cache_ignored
 from fujin.templates import CADDYFILE_TEMPLATE, NEW_SERVICE_TEMPLATE
 
 
@@ -70,6 +71,10 @@ class Init(BaseCommand):
         profile_generators[self.profile](app_name, fujin_dir)
 
         self.output.success(f"Generated .fujin/ directory with {self.profile} profile")
+
+        if ensure_fujin_cache_ignored():
+            self.output.info(f"Added {CACHE_PATTERN} to .gitignore")
+
         self.output.info(
             "\nNext steps:\n"
             "  1. Review and customize files in .fujin/systemd/\n"

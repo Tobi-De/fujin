@@ -298,3 +298,35 @@ def test_init_config_has_required_fields(tmp_path, monkeypatch):
         # Verify .fujin/ directory has the actual service/site definitions
         assert (tmp_path / ".fujin/systemd").exists()
         assert (tmp_path / ".fujin/Caddyfile").exists()
+
+
+# ============================================================================
+# Gitignore
+# ============================================================================
+
+
+def test_init_ignores_fujin_build_cache(tmp_path, monkeypatch):
+    """A fresh init adds the local build cache to .gitignore."""
+    monkeypatch.chdir(tmp_path)
+
+    with patch.object(Init, "output", MagicMock()) as mock_output:
+        Init()()
+
+    assert (tmp_path / ".gitignore").read_text() == (
+        "# fujin local build cache\n**/.fujin/cache/\n"
+    )
+    mock_output.info.assert_any_call("Added **/.fujin/cache/ to .gitignore")
+
+
+def test_init_preserves_existing_gitignore(tmp_path, monkeypatch):
+    """init keeps existing .gitignore content and appends the cache block."""
+    monkeypatch.chdir(tmp_path)
+    original = "*.pyc\n.env"
+    (tmp_path / ".gitignore").write_text(original)
+
+    with patch.object(Init, "output", MagicMock()):
+        Init()()
+
+    assert (tmp_path / ".gitignore").read_text() == (
+        original + "\n# fujin local build cache\n**/.fujin/cache/\n"
+    )
