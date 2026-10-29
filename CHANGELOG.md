@@ -4,11 +4,15 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.28.0b7] - 2026-10-29
 
 ### 🚀 Features
 
 - *(deploy)* Restore the pre-deploy confirmation
+
+### 🐛 Bug Fixes
+
+- *(secrets)* Require prompt-capable adapter plugins
 
 ## [0.28.0b6] - 2026-10-29
 

@@ -4,7 +4,7 @@ requires = [ "uv-build>=0.9.18,<0.10" ]
 
 [project]
 name = "fujin-secrets-doppler"
-version = "0.28.0b6"
+version = "0.28.0b7"
 description = "Doppler secret adapter for Fujin"
 readme = "README.md"
 authors = [
@@ -19,7 +19,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "fujin-cli>=0.28.0b6",
+  "fujin-cli>=0.28.0b7",
 ]
 
 urls.Homepage = "https://github.com/Tobi-De/fujin"
