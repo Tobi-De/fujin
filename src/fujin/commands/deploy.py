@@ -1847,7 +1847,11 @@ class Deploy(BaseCommand):
         self.output.info(f"Running {label} hooks...")
 
         release_dir = release_path or f"{self.config.app_dir}/current"
-        select_env = f"source {serverops.q(f'{release_dir}/.env')}"
+        env_q = serverops.q(f"{release_dir}/.env")
+        # On a first deploy there is no live release yet, so the file is
+        # absent: source it only when it exists instead of printing a shell
+        # error before every hook.
+        select_env = f"if [ -f {env_q} ]; then source {env_q}; fi"
         context = {
             **context,
             "app_dir": release_dir,
