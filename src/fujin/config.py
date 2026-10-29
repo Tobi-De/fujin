@@ -4,8 +4,9 @@ from functools import cache, cached_property
 import os
 import subprocess
 import re
-import sys
+import tomllib
 from contextlib import suppress
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -14,19 +15,6 @@ import msgspec
 from fujin.discovery import DeployedUnit, discover_deployed_units
 
 from .errors import ImproperlyConfiguredError
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
-
-try:
-    from enum import StrEnum
-except ImportError:
-    from enum import Enum
-
-    class StrEnum(str, Enum):
-        pass
 
 
 class InstallationMode(StrEnum):

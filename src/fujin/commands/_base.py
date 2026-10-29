@@ -99,19 +99,6 @@ class MessageFormatter:
         """Print info/progress message (blue)."""
         self._output.output(f"[blue]{redact(message)}[/blue]")
 
-    def critical(self, message: str):
-        """Print critical message (bold red)."""
-        self._output.output(f"[bold red]{redact(message)}[/bold red]")
-
     def output(self, message: str):
         """Print plain message (for custom formatting)."""
         self._output.output(redact(message))
-
-    def link(self, url: str, text: str | None = None) -> str:
-        """Format clickable URL link (returns string for inline use)."""
-        display = redact(text or url)
-        return f"[link={url}]{display}[/link]"
-
-    def dim(self, message: str) -> str:
-        """Format dimmed/secondary text (returns string for inline use)."""
-        return f"[dim]{redact(message)}[/dim]"

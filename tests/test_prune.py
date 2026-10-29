@@ -90,28 +90,21 @@ def test_prune_keep_below_2_raises_error(minimal_config_dict, keep):
 @pytest.mark.parametrize(
     "run_side_effects,keep,expected_message",
     [
-        # No release store (pre-release-tree app): nothing to prune
-        (
-            [("", False)],
-            2,
-            "No release store found (pre-release-tree app). Nothing to prune.",
-        ),
         # Store present but state.json missing/corrupt
         (
-            [("", True), ("", True)],
+            [("", True)],
             2,
             "No release store state found. Nothing to prune.",
         ),
         # State present but no releases on disk
         (
-            [("", True), (state_bytes(current="d"), True), ("", True)],
+            [(state_bytes(current="d"), True), ("", True)],
             2,
             "No releases found to prune.",
         ),
         # Fewer releases than keep
         (
             [
-                ("", True),
                 (state_bytes(current="d"), True),
                 (f"{DIGESTS['d']}\n{DIGESTS['a']}", True),
             ],
@@ -145,7 +138,7 @@ def test_prune_deletes_old_releases_when_user_confirms(minimal_config_dict):
     state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
     calls, mock_output, _confirm = make_prune(
         minimal_config_dict,
-        [("", True), (state, True), (releases_output, True), ("", True)],
+        [(state, True), (releases_output, True), ("", True)],
         keep=2,
         confirm=True,
     )
@@ -164,7 +157,7 @@ def test_prune_aborts_when_user_declines(minimal_config_dict):
     state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
     calls, mock_output, mock_confirm = make_prune(
         minimal_config_dict,
-        [("", True), (state, True), (releases_output, True)],
+        [(state, True), (releases_output, True)],
         keep=2,
         confirm=False,
     )
@@ -182,7 +175,7 @@ def test_prune_defaults_to_versions_to_keep(minimal_config_dict):
     state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
     calls, _mock_output, mock_confirm = make_prune(
         minimal_config_dict,
-        [("", True), (state, True), (releases_output, True), ("", True)],
+        [(state, True), (releases_output, True), ("", True)],
         keep=None,
         confirm=True,
     )
@@ -203,7 +196,7 @@ def test_prune_with_keep_2_deletes_all_but_current_and_previous(minimal_config_d
     state = state_bytes(current=DIGESTS["d"], previous=[DIGESTS["c"]])
     calls, _mock_output, _confirm = make_prune(
         minimal_config_dict,
-        [("", True), (state, True), (releases_output, True), ("", True), ("", True)],
+        [(state, True), (releases_output, True), ("", True), ("", True)],
         keep=2,
         confirm=True,
     )
@@ -221,7 +214,7 @@ def test_prune_with_keep_5_keeps_all_if_only_3_releases(minimal_config_dict):
     state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
     calls, mock_output, _confirm = make_prune(
         minimal_config_dict,
-        [("", True), (state, True), (releases_output, True)],
+        [(state, True), (releases_output, True)],
         keep=5,
     )
 
@@ -242,7 +235,7 @@ def test_prune_ignores_staging_entries(minimal_config_dict):
     state = state_bytes(current=DIGESTS["c"], previous=[DIGESTS["b"]])
     calls, mock_output, _confirm = make_prune(
         minimal_config_dict,
-        [("", True), (state, True), (releases_output, True), ("", True)],
+        [(state, True), (releases_output, True), ("", True)],
         keep=2,
         confirm=True,
     )

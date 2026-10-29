@@ -69,11 +69,6 @@ def get_uninstall_commands() -> list[str]:
 def get_latest_gh_tag() -> str:
     logger.debug("Fetching latest Caddy version from GitHub")
     with urllib.request.urlopen(GH_RELEASE_LATEST_URL) as response:
-        if response.status != 200:
-            logger.warning(
-                f"Failed to fetch latest Caddy version, using default: {DEFAULT_VERSION}"
-            )
-            return DEFAULT_VERSION
         try:
             data = json.loads(response.read().decode())
             return data["tag_name"][1:]

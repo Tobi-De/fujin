@@ -79,10 +79,6 @@ def discover_deployed_units(
     service_files = list(systemd_dir.glob("*.service"))
 
     for service_file in service_files:
-        # Skip files in subdirectories (like service.d/)
-        if service_file.parent != systemd_dir:
-            continue
-
         # Parse filename to extract service name
         # Handles both "web.service" and "web@.service"
         filename = service_file.name

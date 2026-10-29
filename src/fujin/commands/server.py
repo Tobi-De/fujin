@@ -110,8 +110,7 @@ class Server(BaseCommand):
 
             if self.config.caddyfile_exists:
                 self.output.info("Setting up Caddy web server...")
-                _, result_ok = conn.run("command -v caddy", warn=True, hide=True)
-                if result_ok:
+                if caddy_present:
                     self.output.warning("Caddy is already installed.")
                     self.output.output(
                         "Please ensure your Caddyfile includes the following line to load Fujin configurations:"
@@ -450,7 +449,7 @@ class Server(BaseCommand):
                 default="",
             )
         except KeyboardInterrupt:
-            raise cappa.Exit("Setup cancelled", code=0)
+            raise cappa.Exit("Setup cancelled", code=0) from None
 
         # Check for existing SSH key
         ssh_dir = Path.home() / ".ssh"

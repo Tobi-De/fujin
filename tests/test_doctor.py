@@ -125,11 +125,12 @@ class FakeConn:
 
     # -- installed-tree helpers ----------------------------------------
     def _find_installed(self, cmd):
-        """Model the depth-2 ``find`` over /etc/systemd/system.
+        """Model the fused depth-2 scan over /etc/systemd/system.
 
         Directories are implicit in ``installed`` (flat path -> content), so
         parent dirs of dropin files are added to the listing the way the real
-        filesystem would show them.
+        filesystem would show them. Records use the same RS-framed format the
+        real script emits.
         """
         name_match = re.search(r"-name '([^']+)'", cmd)
         assert name_match, cmd
@@ -143,16 +144,25 @@ class FakeConn:
             if "/" in key:
                 entries.add(key.split("/", 1)[0])
 
-        lines = []
+        records = []
         for rel in sorted(entries):
             if rel.count("/") + 1 > 2:  # find -maxdepth 2
                 continue
             full = f"./{rel}"
-            if fnmatch.fnmatchcase(rel.rsplit("/", 1)[-1], pattern) or (
-                path_pattern and fnmatch.fnmatchcase(full, path_pattern)
+            if not (
+                fnmatch.fnmatchcase(rel.rsplit("/", 1)[-1], pattern)
+                or (path_pattern and fnmatch.fnmatchcase(full, path_pattern))
             ):
-                lines.append(full)
-        return "\n".join(lines) + ("\n" if lines else ""), True
+                continue
+            if rel not in self.installed:  # implicit dropin directory
+                records.append(f"\x1eD{rel}\n")
+                continue
+            content = self.installed[rel]
+            if content is None:
+                records.append(f"\x1eE{rel}\n")
+            else:
+                records.append(f"\x1eF{rel}\n{content}\x1e")
+        return "".join(records), True
 
     # -- fused install script ------------------------------------------
     def _run_install_script(self, cmd):
@@ -494,6 +504,25 @@ def test_fix_removes_orphans_and_staging(minimal_config_dict, monkeypatch):
     assert f"rm -rf {APP_DIR}/releases/{DIGEST_A}" not in conn.calls
 
 
+def test_fix_removes_all_staging_dirs_in_one_command(minimal_config_dict, monkeypatch):
+    conn = orphan_conn(
+        staging=(
+            f"{APP_DIR}/releases/.staging-111",
+            f"{APP_DIR}/releases/.staging-222",
+        )
+    )
+    messages, exit_code = run_doctor(
+        monkeypatch, make_config(minimal_config_dict), conn, fix=True
+    )
+
+    assert exit_code == 0
+    removals = [cmd for cmd in conn.calls if "rm -rf" in cmd and ".staging-" in cmd]
+    assert len(removals) == 1
+    assert f"{APP_DIR}/releases/.staging-111" in removals[0]
+    assert f"{APP_DIR}/releases/.staging-222" in removals[0]
+    assert "removed 2 orphaned staging dir(s)" in "\n".join(messages)
+
+
 def test_unreadable_state_never_removes_releases(minimal_config_dict, monkeypatch):
     """A corrupt state.json cannot identify the rollback target: delete nothing."""
     conn = FakeConn(
@@ -575,9 +604,10 @@ def test_stray_dropin_inside_kept_dir_is_removed(minimal_config_dict, monkeypatc
     script = "\n".join(conn.calls)
     # stale dropin files are removed by the fused install script, but the
     # kept dropin directory (still declared) survives
-    assert f"{UNIT_NAME}.d/stray.conf" in script
+    assert serverops.INSTALL_INSTALLED_END in script
     assert f'/etc/systemd/system/{UNIT_NAME}.d"' not in script
     assert f"{UNIT_NAME}.d/stray.conf" not in conn.installed
+    assert f"{UNIT_NAME}.d/{DROPIN}" in conn.installed
 
 
 def test_unit_less_release_reports_and_removes_stale_units(

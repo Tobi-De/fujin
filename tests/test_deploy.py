@@ -10,7 +10,6 @@ that flow.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sys
@@ -312,7 +311,7 @@ def setup_deploy(
     monkeypatch.setattr(fujin.serverops, "stop_and_disable", stop_and_disable)
     enable_and_start = MagicMock(return_value=True)
     monkeypatch.setattr(fujin.serverops, "enable_and_start", enable_and_start)
-    install_caddyfile = MagicMock(return_value=True)
+    install_caddyfile = MagicMock(return_value="installed")
     monkeypatch.setattr(fujin.serverops, "install_caddyfile", install_caddyfile)
 
     monkeypatch.setattr(fujin.transfer, "rsync_to_staging", MagicMock(return_value=[]))
@@ -359,15 +358,6 @@ def setup_deploy(
 
         def output(self, m):
             print("OUT:", m, file=_sys.stderr)
-
-        def critical(self, m):
-            print("CRIT:", m, file=_sys.stderr)
-
-        def dim(self, text):
-            return text
-
-        def link(self, url, text=None):
-            return text or url
 
     cmd.output = _Printer()
     for _n in ("ensure_layout",):
@@ -1335,16 +1325,6 @@ class _CapturingPrinter:
         print("OUT:", m, file=sys.stderr)
         self.lines.append(m)
 
-    def critical(self, m):
-        print("CRIT:", m, file=sys.stderr)
-        self.lines.append(m)
-
-    def dim(self, text):
-        return text
-
-    def link(self, url, text=None):
-        return text or url
-
 
 def _secrets_setup(monkeypatch, minimal_config, tmp_path, **kwargs):
     """Deploy harness with a sentinel secret resolved by the (faked) adapter.
@@ -1508,17 +1488,17 @@ def test_unresolved_secret_ref_aborts_before_any_upload(
     assert not spies["events"]
     joined = "\n".join(printer.lines)
     assert "<$STRIPE_TOKEN>" in joined
+    assert "configured secret adapter did not resolve" in joined
     out, err = capsys.readouterr()
     all_out = "\n".join([joined, out, err])
     assert "STRIPE_TOKEN=$STRIPE_TOKEN" not in all_out
 
 
-def test_escaped_dollar_deploys_without_secret_adapter(
+def test_escaped_dollar_deploys_without_contacting_adapter(
     monkeypatch, minimal_config, tmp_path
 ):
-    """A `$$`-escaped value needs no adapter: it is unescaped into the staged
-    .env instead of aborting the deploy."""
-    minimal_config.secret_config = None
+    """A `$$`-escaped value is not a secret ref: it is unescaped into the
+    staged .env instead of being sent to the adapter or aborting the deploy."""
     minimal_config.hosts[0].env_content = "ESCAPED=$$REF\nDEBUG=1"
     cmd, _spies = setup_deploy(
         monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
@@ -1532,30 +1512,6 @@ def test_escaped_dollar_deploys_without_secret_adapter(
     monkeypatch.setattr(fujin.transfer, "rsync_to_staging", fake_rsync)
     assert invoke(cmd) == 0
     assert captured["env"] == b'ESCAPED="$REF"\nDEBUG=1'
-
-
-def test_ref_without_secret_adapter_aborts_with_adapter_less_message(
-    monkeypatch, minimal_config, tmp_path
-):
-    """No adapter configured: fail closed, and do not blame an adapter that
-    does not exist."""
-    minimal_config.secret_config = None
-    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN"
-    cmd, spies = setup_deploy(
-        monkeypatch, minimal_config, tmp_path, state=State(), prev_manifest=None
-    )
-    printer = _CapturingPrinter()
-    cmd.output = printer
-
-    code = invoke(cmd)
-    assert code != 0
-    spies["rsync"].assert_not_called()
-    spies["commit"].assert_not_called()
-    spies["swap"].assert_not_called()
-    joined = "\n".join(printer.lines)
-    assert "<$STRIPE_TOKEN>" in joined
-    assert "no secret adapter is configured" in joined
-    assert "configured secret adapter did not resolve" not in joined
 
 
 # ===========================================================================
@@ -3699,7 +3655,11 @@ def test_stale_units_installed_from_forces_install(
     spies["install_units"].assert_called_once()
 
 
-def test_unchanged_caddyfile_skips_install(monkeypatch, minimal_config, tmp_path):
+def test_unchanged_caddyfile_reports_skip(
+    monkeypatch, minimal_config, tmp_path, capsys
+):
+    """The installer always runs; an identical server file reports a skip
+    instead of a write+reload."""
     cmd, spies = setup_deploy(
         monkeypatch,
         minimal_config,
@@ -3708,14 +3668,11 @@ def test_unchanged_caddyfile_skips_install(monkeypatch, minimal_config, tmp_path
         state=_installed_units_state(),
         prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
     )
-    spies["conn"].append_response(
-        minimal_config.caddy_config_path,
-        f"{hashlib.sha256(CADDYFILE.encode()).hexdigest()}\nNOBAK\n",
-        True,
-    )
+    spies["install_caddyfile"].return_value = "unchanged"
     assert invoke(cmd) == 0
 
-    spies["install_caddyfile"].assert_not_called()
+    spies["install_caddyfile"].assert_called_once()
+    assert "Caddyfile unchanged and already installed" in capsys.readouterr().err
 
 
 def test_changed_caddyfile_installs(monkeypatch, minimal_config, tmp_path):
@@ -3729,7 +3686,6 @@ def test_changed_caddyfile_installs(monkeypatch, minimal_config, tmp_path):
         state=_installed_units_state(),
         prev_manifest=manifest_for(with_env=True, files=prev_files),
     )
-    spies["conn"].append_response(minimal_config.caddy_config_path, "", True)
     assert invoke(cmd) == 0
 
     spies["install_caddyfile"].assert_called_once()
@@ -3824,21 +3780,11 @@ def test_consistent_state_takes_noop_without_installs(
 
 
 # ===========================================================================
-# Caddy fast path: content hash + crash-recovery backup
+# Caddy install result messages
 # ===========================================================================
 
 
-def _fingerprint_response(spies, config, sha, backup=False):
-    spies["conn"].append_response(
-        config.caddy_config_path,
-        f"{sha}\n{'BAK' if backup else 'NOBAK'}\n",
-        True,
-    )
-
-
-def test_unchanged_caddyfile_reinstalled_after_external_edit(
-    monkeypatch, minimal_config, tmp_path
-):
+def test_caddyfile_install_failure_warns(monkeypatch, minimal_config, tmp_path, capsys):
     cmd, spies = setup_deploy(
         monkeypatch,
         minimal_config,
@@ -3847,31 +3793,8 @@ def test_unchanged_caddyfile_reinstalled_after_external_edit(
         state=_installed_units_state(),
         prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
     )
-    _fingerprint_response(
-        spies, minimal_config, hashlib.sha256(b"edited elsewhere").hexdigest()
-    )
+    spies["install_caddyfile"].return_value = "failed"
     assert invoke(cmd) == 0
 
     spies["install_caddyfile"].assert_called_once()
-
-
-def test_unchanged_caddyfile_reinstalled_when_backup_left_behind(
-    monkeypatch, minimal_config, tmp_path
-):
-    cmd, spies = setup_deploy(
-        monkeypatch,
-        minimal_config,
-        tmp_path,
-        files=CADDY_FILES,
-        state=_installed_units_state(),
-        prev_manifest=manifest_for(with_env=True, files=CADDY_FILES),
-    )
-    _fingerprint_response(
-        spies,
-        minimal_config,
-        hashlib.sha256(CADDYFILE.encode()).hexdigest(),
-        backup=True,
-    )
-    assert invoke(cmd) == 0
-
-    spies["install_caddyfile"].assert_called_once()
+    assert "Failed to apply the new Caddyfile" in capsys.readouterr().err

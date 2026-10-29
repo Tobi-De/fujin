@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import shlex
@@ -324,8 +323,7 @@ class Deploy(BaseCommand):
         # key excludes secret values), so they run concurrently below. The
         # info lines are printed here, before submitting, so the two phases
         # never interleave their output.
-        if config.effective_secrets(host):
-            self.output.info("Resolving secrets from configuration...")
+        self.output.info("Resolving secrets from configuration...")
         self.output.info("Building application ...")
 
         # Set by the resolution path once values are registered for
@@ -729,33 +727,22 @@ class Deploy(BaseCommand):
             # Refs come from the env *template*, not the rendered file: `$$REF`
             # renders a literal `$REF` and must not be treated as unresolved.
             secret_aliases = secret_refs(env_template)
-            if secret_config:
-                parsed_env = resolve_secrets(env_template, secret_config)
-                # Track every resolved secret value so all output paths render
-                # it as `<$REF>` instead of the raw value (never registered in
-                # the build cache; #77).
-                # Register only values that really are secret references;
-                # registering every env value would make unrelated output
-                # (DEBUG=1, etc.) redact as a false positive.
-                resolved_values = env_values(parsed_env)
-                register_secrets(
-                    {
-                        k: resolved_values[k]
-                        for k in secret_aliases
-                        if k in resolved_values
-                    },
-                    secret_aliases,
-                )
-            else:
-                parsed_env = render_template(env_template)
+            parsed_env = resolve_secrets(env_template, secret_config)
+            # Track every resolved secret value so all output paths render
+            # it as `<$REF>` instead of the raw value (never registered in
+            # the build cache; #77).
+            # Register only values that really are secret references;
+            # registering every env value would make unrelated output
+            # (DEBUG=1, etc.) redact as a false positive.
+            resolved_values = env_values(parsed_env)
+            register_secrets(
+                {k: resolved_values[k] for k in secret_aliases if k in resolved_values},
+                secret_aliases,
+            )
 
             context = build._interpolation_context(config, host)
             resolved_env = self._validate_env_placeholders(parsed_env, context)
-            self._fail_closed_on_unresolved_secrets(
-                resolved_env,
-                secret_aliases,
-                adapter_configured=secret_config is not None,
-            )
+            self._fail_closed_on_unresolved_secrets(resolved_env, secret_aliases)
             return resolved_env
         finally:
             if secrets_ready is not None:
@@ -1206,21 +1193,7 @@ class Deploy(BaseCommand):
 
             caddy_entry = final_manifest.entries.get(m.CADDYFILE_PATH)
             if caddy_entry is not None and caddy_entry.kind is m.EntryKind.CADDY:
-                caddy_unchanged = (
-                    not first_deploy
-                    and not self.force
-                    and prev_manifest is not None
-                    and prev_manifest.entries.get(m.CADDYFILE_PATH) == caddy_entry
-                    and (staging_dir / mfile).is_file()
-                    and self._caddyfile_current(conn, (staging_dir / mfile).read_text())
-                )
-                if caddy_unchanged:
-                    self.output.info(
-                        "Caddyfile unchanged and already installed; skipping"
-                        " write and reload."
-                    )
-                else:
-                    self._install_caddyfile(conn, staging_dir / mfile)
+                self._install_caddyfile(conn, staging_dir / mfile)
 
             # Post-install hooks: committed, NOT live yet; they see the new
             # release dir and its rendered .env.
@@ -1747,9 +1720,13 @@ class Deploy(BaseCommand):
                 installed = serverops.install_caddyfile(
                     conn, caddy_raw, self.config.caddy_config_path
                 )
-                if installed:
+                if installed == "installed":
                     self.output.info(
                         "Caddy reloaded with the previous release's Caddyfile."
+                    )
+                elif installed == "unchanged":
+                    self.output.info(
+                        "Previous release's Caddyfile is already installed."
                     )
                 else:
                     self.output.warning(
@@ -1803,22 +1780,6 @@ class Deploy(BaseCommand):
     # Caddy
     # =======================================================================================
 
-    def _caddyfile_current(self, conn, expected: str) -> bool:
-        """Whether the installed Caddy config already matches *expected*.
-
-        One round trip fetches the installed file's sha256 plus the presence
-        of a leftover ``.fujin-bak``: a backup means a previous install died
-        mid-way, so the installer must run (it reloads and cleans up).
-        """
-        sha, backup = serverops.caddyfile_fingerprint(
-            conn, self.config.caddy_config_path
-        )
-        return (
-            sha is not None
-            and not backup
-            and sha == hashlib.sha256(expected.encode()).hexdigest()
-        )
-
     def _install_caddyfile(self, conn, local_caddy: Path) -> None:
         if not local_caddy.is_file():
             self.output.warning(
@@ -1830,13 +1791,17 @@ class Deploy(BaseCommand):
         installed = serverops.install_caddyfile(
             conn, content, self.config.caddy_config_path
         )
-        if not installed:
+        if installed == "unchanged":
+            self.output.info(
+                "Caddyfile unchanged and already installed; skipping write and reload."
+            )
+        elif installed == "installed":
+            self.output.info("Caddy reloaded with the new configuration.")
+        else:
             self.output.warning(
                 "Failed to apply the new Caddyfile; the previous configuration"
                 " was restored."
             )
-        else:
-            self.output.info("Caddy reloaded with the new configuration.")
 
     # =======================================================================================
     # Hooks
@@ -1947,8 +1912,6 @@ class Deploy(BaseCommand):
         self,
         env: str,
         secret_aliases: dict[str, str],
-        *,
-        adapter_configured: bool,
     ) -> None:
         """Abort when a ``$REF`` secret line survived the adapters unresolved.
 
@@ -1961,40 +1924,22 @@ class Deploy(BaseCommand):
         removing it. This is fail-closed: any unresolved secret ref aborts
         the deploy before any server I/O, and only the key/ref name is
         reported (never the raw value).
-
-        ``adapter_configured`` distinguishes "the adapter left it unresolved"
-        from "this host has no secret adapter at all" so the message does not
-        blame a configuration that does not exist.
         """
         values = env_values(env)
         for key, ref in secret_aliases.items():
             value = values.get(key)
             if value is not None and not value.startswith("$"):
                 continue
-            if adapter_configured:
-                shown = (
-                    f"Unresolved secret reference '<${ref}>' for"
-                    f" '{key}': the configured secret adapter did"
-                    " not resolve it and deployment aborted (fail-closed)."
-                )
-                raised = (
-                    f"Unresolved secret reference in '{key}':"
-                    f" '<${ref}>' could not be resolved by the configured"
-                    " secret adapter. Deployment aborted (fail-closed)."
-                )
-            else:
-                shown = (
-                    f"Unresolved secret reference '<${ref}>' for"
-                    f" '{key}': no secret adapter is configured for this"
-                    " host, so a '$REF' value cannot be resolved (use '$$'"
-                    " for a literal '$'). Deployment aborted (fail-closed)."
-                )
-                raised = (
-                    f"Unresolved secret reference in '{key}':"
-                    f" '<${ref}>' cannot be resolved because no secret"
-                    " adapter is configured for this host (use '$$' for a"
-                    " literal '$'). Deployment aborted (fail-closed)."
-                )
+            shown = (
+                f"Unresolved secret reference '<${ref}>' for"
+                f" '{key}': the configured secret adapter did"
+                " not resolve it and deployment aborted (fail-closed)."
+            )
+            raised = (
+                f"Unresolved secret reference in '{key}':"
+                f" '<${ref}>' could not be resolved by the configured"
+                " secret adapter. Deployment aborted (fail-closed)."
+            )
             self.output.error(shown)
             raise DeploymentError(raised)
 

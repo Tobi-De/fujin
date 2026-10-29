@@ -103,68 +103,6 @@ class TestStateRoundTrip:
         assert rolled.previous == ["r2"]
         assert rolled.deploys[-1].result == "rollback"
 
-    def test_write_state_atomic_rename(self, tmp_path):
-        target = tmp_path / "state.json"
-        store.write_state(target, store.State(current="abc"))
-        assert json.loads(target.read_text()) == {
-            "current": "abc",
-            "previous": [],
-            "units_installed_from": None,
-            "deploys": [],
-            "client_digest": None,
-            "config_fingerprint": None,
-        }
-        assert not (tmp_path / "state.json.tmp").exists()
-
-    def test_write_state_stream_target(self):
-        chunks: list[bytes] = []
-
-        class Sink:
-            def write(self, data: bytes) -> int:
-                chunks.append(data)
-                return len(data)
-
-        store.write_state(Sink(), store.State(current="abc"))
-        assert b"abc" in chunks[0]
-
-
-class TestActivationSteps:
-    def test_pre_swap_steps_abort(self):
-        names = [s.name for s in store.activation_plan()]
-        assert names == [
-            "ensure",
-            "prepare",
-            "transfer",
-            "install",
-            "verify",
-            "commit",
-            "units",
-            "caddy",
-            "swap",
-            "restart",
-            "ready",
-            "confirm",
-        ]
-        swap_index = names.index("swap")
-        for step in store.ACTIVATION_STEPS[: swap_index + 1]:
-            assert step.on_failure == "abort", step
-
-    def test_post_swap_steps_rollback(self):
-        post = [s for s in store.ACTIVATION_STEPS if s.on_failure == "rollback"]
-        assert [s.name for s in post] == ["restart", "ready", "confirm"]
-
-    def test_noop_plan_skips_transfer_steps(self):
-        names = [
-            s.name
-            for s in store.activation_plan(
-                skip=("transfer", "install", "verify", "commit")
-            )
-        ]
-        assert "transfer" not in names and "restart" in names
-
-    def test_rollback_steps_never_recurse(self):
-        assert all(s.on_failure == "abort" for s in store.ROLLBACK_STEPS)
-
 
 class TestRestartSet:
     def test_unchanged_release_no_restart(self):

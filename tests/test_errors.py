@@ -28,7 +28,6 @@ from fujin.exit_codes import (
 )
 from fujin.transfer import (
     HostUnreachableError,
-    RsyncUnavailableError,
     TransferError,
 )
 
@@ -58,7 +57,6 @@ def test_user_error_classes_exit_1(error_class):
         UploadError,
         SecretResolutionError,
         TransferError,
-        RsyncUnavailableError,
     ],
 )
 def test_deployment_error_classes_exit_4(error_class):

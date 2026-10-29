@@ -5,7 +5,7 @@ import cappa
 from fujin.commands import BaseCommand
 from fujin.errors import FujinError
 from fujin.exit_codes import EXIT_USER_ABORTED
-from fujin.secrets import render_template, resolve_secrets
+from fujin.secrets import resolve_secrets
 
 
 @cappa.command(
@@ -18,10 +18,7 @@ class Showenv(BaseCommand):
         secret_config = self.config.effective_secrets(host)
         env_template = self.config.effective_env(host)
         try:
-            if secret_config:
-                parsed_env = resolve_secrets(env_template, secret_config)
-            else:
-                parsed_env = render_template(env_template)
+            parsed_env = resolve_secrets(env_template, secret_config)
         except FujinError as exc:
             # A missing/unresolvable secret is a local configuration error:
             # nothing was deployed, so this is a user abort (1), never the

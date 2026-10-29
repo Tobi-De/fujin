@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import configparser
+import hashlib
 import json
 import re
 import secrets
@@ -25,7 +26,7 @@ import cappa
 
 from fujin import manifest as m
 from fujin.audit import write_command as audit_write_command
-from fujin.errors import ConnectionError, ImproperlyConfiguredError
+from fujin.errors import ConnectionError, ImproperlyConfiguredError, UploadError
 from fujin.formatting import safe_format
 from fujin.redaction import redact
 from fujin.store import (
@@ -154,11 +155,21 @@ def read_remote_file(conn: Any, path: str, *, fatal: str | None = None) -> str |
     try:
         try:
             conn.get(path, tmp_path)
-        except (Exception, cappa.Exit):
-            # ``cappa.Exit`` derives from ``SystemExit``, not ``Exception``:
-            # the transport raises ``UploadError`` for a missing/unreadable
-            # file (a first deploy has no live manifest), which must mean
-            # "absent" here, not abort the deploy.
+        except ConnectionError:
+            # A dropped/wedged SSH session is a transport failure, not an
+            # absent file: let it surface (exit code 5) instead of reporting
+            # the manifest as missing and deploying over a live release.
+            raise
+        except UploadError:
+            # ``UploadError`` is the transport's failed-``cat`` signal: the
+            # file is missing or unreadable (a first deploy has no live
+            # manifest), which must mean "absent" here, not abort the deploy.
+            if fatal:
+                raise cappa.Exit(fatal, code=1) from None
+            return None
+        except FileNotFoundError:
+            # No local ``ssh``/``cat`` to run the download with: nothing was
+            # read, so report the file as absent (same as a failed cat).
             if fatal:
                 raise cappa.Exit(fatal, code=1) from None
             return None
@@ -674,18 +685,6 @@ def release_lock(conn: Any, app_dir: str, lock: str) -> None:
         warn=True,
         hide=True,
     )
-
-
-def parse_holder_pid(output: str) -> str | None:
-    """Parse the holder pid from an acquire_lock probe line, or None if free.
-
-    Probe lines are ``<STATUS>:<pid>-<token>``; ``FREE:`` and ``BUSY:?``
-    record no holder pid.
-    """
-    _, _, marker = output.strip().partition(":")
-    marker = "" if marker.strip() == "?" else marker.strip()
-    pid, _, _ = marker.partition("-")
-    return pid or None
 
 
 class LockProbe(msgspec.Struct, frozen=True):
@@ -1355,30 +1354,44 @@ def installed_unit_tree(conn: Any, app_name: str) -> dict[str, str | None]:
     parent = SYSTEMD_DIR
     pattern = f"{app_name}*"
     dropin_glob = f"./{app_name}*.d/*"
-    # Two scans on purpose: a depth-2 `-name '<app>*'` would also match
-    # `multi-user.target.wants/<app>-web.service` (enablement symlinks are not
-    # unit files and must never be reported as stray or removed).
+    # One script on purpose: N entries are resolved in a single round trip.
+    # Each record starts with RS (0x1e) and a type letter:
+    #   \x1eD<path>\n                directory
+    #   \x1eF<path>\n<content>\x1e   file (content verbatim, RS-terminated)
+    #   \x1eE<path>\n                unreadable entry
+    # The trailing RS after file content makes the framing unambiguous even
+    # for multi-line units (unit files never contain 0x1e).
+    # Two scans *inside* the script: a depth-2 `-name '<app>*'` would also
+    # match `multi-user.target.wants/<app>-web.service` (enablement symlinks
+    # are not unit files and must never be reported as stray or removed).
     cmd = (
-        f"cd {shlex.quote(parent)} 2>/dev/null && "
+        f"cd {shlex.quote(parent)} 2>/dev/null || exit 0\n"
         f"{{ find . -maxdepth 1 -name {shlex.quote(pattern)} -print; "
         f"find . -maxdepth 2 -path {shlex.quote(dropin_glob)} -print; }}"
-        f" 2>/dev/null | sort"
+        " 2>/dev/null | sort | while IFS= read -r entry; do\n"
+        "  rel=${entry#./}\n"
+        '  [ -n "$rel" ] && [ "$rel" != "." ] || continue\n'
+        '  if [ -d "$rel" ]; then\n'
+        "    printf '\\036D%s\\n' \"$rel\"\n"
+        '  elif [ -r "$rel" ]; then\n'
+        "    printf '\\036F%s\\n' \"$rel\"\n"
+        '    cat "$rel" 2>/dev/null\n'
+        "    printf '\\036'\n"
+        "  else\n"
+        "    printf '\\036E%s\\n' \"$rel\"\n"
+        "  fi\n"
+        "done"
     )
     out, _ok = conn.run(cmd, warn=True, hide=True)
-    entries = [
-        line.strip().removeprefix("./")
-        for line in out.splitlines()
-        if line.strip() and line.strip() != "."
-    ]
     tree: dict[str, str | None] = {}
-    for rel in entries:
-        if rel.endswith(".d"):
-            tree[rel] = None
+    for record in out.split("\x1e")[1:]:
+        if not record:
             continue
-        content, ok = conn.run(
-            f"cat {shlex.quote(f'{parent}/{rel}')}", warn=True, hide=True
-        )
-        tree[rel] = content if ok else None
+        header, _, rest = record.partition("\n")
+        kind, rel = header[:1], header[1:].strip().removeprefix("./")
+        if kind not in "DEF" or not rel:
+            continue
+        tree[rel] = rest if kind == "F" else None
     return tree
 
 
@@ -1387,63 +1400,53 @@ def installed_unit_tree(conn: Any, app_name: str) -> dict[str, str | None]:
 # =============================================================================
 
 
-def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
+def install_caddyfile(
+    conn: Any,
+    content: str,
+    caddy_config_path: str,
+    *,
+    probe: tuple[str | None, bool] | None = None,
+) -> str:
     """Install a Caddy config, reload Caddy, restore the previous config on
     failure.
 
     The previous config is also kept in a sibling ``<path>.fujin-bak`` file
     before the new one is written, so a crash mid-write never leaves a broken
-    main config without a recovery path: a later call restores it.
+    main config without a recovery path.
 
-    When the installed config is already byte-identical to *content* and no
-    backup is left behind, the function is a no-op (no backup write, no
-    rewrite, no reload) and True is returned immediately.
+    *probe* is the already-obtained ``(sha256, backup_exists)`` pair from
+    :func:`caddyfile_fingerprint`; when omitted the probe is done here (one
+    round trip). This keeps a caller that needs the fingerprint from paying
+    for it twice.
+
+    Returns ``"unchanged"`` when the installed config is byte-identical to
+    *content* and no backup is left behind (no commands beyond the probe),
+    ``"installed"`` after a successful reload, and ``"failed"`` when the
+    reload failed (the previous config is restored on disk, without a reload,
+    since Caddy never loaded the new one).
 
     A leftover ``.fujin-bak`` means a previous run died mid-install. If the
     main file already matches *content* the install itself is complete, but
     Caddy's loaded state is unknown: Caddy is reloaded and, on success, only
     the stale backup is removed (the main file is not rewritten). A reload
-    failure keeps both files and returns False.
+    failure keeps both files and returns ``"failed"``.
 
-    A config restored from a leftover ``.fujin-bak`` is *not* a no-op even
-    when it matches *content*: the restore then takes the normal success
-    path (write, reload) and clears the stale backup.
-
-    Returns True on successful reload. On failure the previous config (if
-    any) is restored to disk without reloading (Caddy never loaded the new
-    config) and False is returned.
+    With a missing main file and a leftover backup, the backup is kept as the
+    recovery copy (it is not rewritten) while the new main is written.
     """
+    if probe is None:
+        probe = caddyfile_fingerprint(conn, caddy_config_path)
+    installed_sha, backup_exists = probe
     path_q = shlex.quote(caddy_config_path)
     bak_path = f"{caddy_config_path}.fujin-bak"
     bak_q = shlex.quote(bak_path)
 
-    _, main_exists = conn.run(f"test -f {path_q}", warn=True, hide=True)
-    _, bak_exists = conn.run(f"test -f {bak_q}", warn=True, hide=True)
-
-    # Crash recovery sweep: a previous run died between the backup and the
-    # main write. Restore the backup before touching anything else; the
-    # restore forces the reload path below.
-    restored = False
-    if bak_exists and not main_exists:
-        conn.run(
-            f"sudo cp {bak_q} {path_q} && sudo chown caddy:caddy {path_q}",
-            warn=True,
-            hide=True,
-        )
-        main_exists = True
-        restored = True
-
-    old_content: str | None = None
-    if main_exists:
-        out, ok = conn.run(f"cat {path_q}", warn=True, hide=True)
-        old_content = out if ok else None
-
-    if old_content == content and not restored:
-        if not bak_exists:
+    if installed_sha == hashlib.sha256(content.encode()).hexdigest():
+        if not backup_exists:
             # The server already serves byte-identical content: no backup,
             # no rewrite, no reload (a reload would restart Caddy for nothing).
             logger.info("Caddy config at %s is already current; skipping", path_q)
-            return True
+            return "unchanged"
         # Crash recovery: the main file was fully written but the run died
         # before the reload/cleanup. Do not rewrite the main file; reload so
         # Caddy's loaded state matches the disk, then drop the stale backup.
@@ -1454,33 +1457,41 @@ def install_caddyfile(conn: Any, content: str, caddy_config_path: str) -> bool:
         _, ok = conn.run("sudo systemctl reload caddy", warn=True)
         if ok:
             conn.run(f"sudo rm -f {bak_q}", warn=True, hide=True)
-            return True
+            return "installed"
         logger.warning(
             "Caddy reload failed; keeping %s and its recovery backup", path_q
         )
-        return False
+        return "failed"
 
+    old_content: str | None = None
+    if installed_sha is not None:
+        # The main file exists and must be preserved as the backup copy.
+        out, ok = conn.run(f"cat {path_q}", warn=True, hide=True)
+        old_content = out if ok else None
+
+    # Backup + new main in ONE round trip: the backup is written first so a
+    # crash between the two files always leaves a recovery copy.
+    writes = []
     if old_content is not None:
-        _sudo_write(conn, bak_path, old_content, chown="caddy:caddy")
-
-    _sudo_write(conn, caddy_config_path, content, chown="caddy:caddy")
+        writes.append(_sudo_write_command(bak_path, old_content, chown="caddy:caddy"))
+    writes.append(_sudo_write_command(caddy_config_path, content, chown="caddy:caddy"))
+    _, written = conn.run(" && ".join(writes), warn=True, hide=True)
+    if not written:
+        raise ServerOpsError(f"Failed to write {caddy_config_path} on server")
 
     _, ok = conn.run("sudo systemctl reload caddy", warn=True)
     if ok:
-        if restored:
-            # The restored config is now written and loaded; the leftover
-            # backup from the crashed run is no longer a recovery candidate.
-            conn.run(f"sudo rm -f {bak_q}", warn=True, hide=True)
-        return True
+        return "installed"
 
     logger.warning("Caddy reload failed; restoring previous configuration")
     if old_content is not None:
         _sudo_write(conn, caddy_config_path, old_content, chown="caddy:caddy")
-    elif bak_exists:
+    elif backup_exists:
+        # A missing main with a leftover backup: keep the backup, restore it.
         conn.run(f"sudo cp {bak_q} {path_q}", warn=True, hide=True)
     else:
         conn.run(f"sudo rm -f {path_q}", warn=True, hide=True)
-    return False
+    return "failed"
 
 
 def caddyfile_fingerprint(conn: Any, caddy_config_path: str) -> tuple[str | None, bool]:

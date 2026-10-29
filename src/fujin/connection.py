@@ -15,9 +15,9 @@ from fujin.errors import UploadError
 import sys
 import termios
 import tty
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
 
 from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
 from ssh2.exceptions import SCPProtocolError, SSH2Error
@@ -171,38 +171,6 @@ class SSH2Connection:
 
         return self._execute(full_command, command, warn, pty, hide, idle_timeout)
 
-    def run_script(
-        self,
-        script: str,
-        *,
-        interpreter: str = "bash",
-        warn: bool = False,
-        hide: bool = False,
-        idle_timeout: float = 300,
-    ) -> tuple[str, bool]:
-        """Run a (possibly large) shell script without a PTY.
-
-        The script is spooled to a private remote temp file and executed as
-        ``<interpreter> <file>``. Use this for **unprivileged** scripts that
-        must not travel through the exec channel as one big string (they can
-        wedge libssh2).
-
-        .. warning::
-            Never use this for a ``sudo``/admin transaction. Spooling stages
-            the script in ``/tmp`` and runs without a terminal, which breaks
-            operators whose sudo needs a password or enforces
-            ``requiretty``. Privileged scripts must go inline through
-            ``run(f"sudo bash -c {shlex.quote(script)}", pty=True)``.
-        """
-        return self._run_spooled(
-            script,
-            script,
-            warn,
-            hide,
-            idle_timeout,
-            interpreter=interpreter,
-        )
-
     def _run_spooled(
         self,
         full_command: str,
@@ -210,8 +178,6 @@ class SSH2Connection:
         warn: bool,
         hide: bool,
         idle_timeout: float | None,
-        *,
-        interpreter: str = "sh",
     ) -> tuple[str, bool]:
         """Upload *full_command* to a private remote temp file and run it."""
         remote = f"/tmp/fujin-cmd-{os.getpid()}-{secrets.token_hex(8)}.sh"
@@ -232,7 +198,7 @@ class SSH2Connection:
                     f" script: {command[:120]!r}: {exc}"
                 ) from exc
             return self._execute(
-                f"{interpreter} {shlex.quote(remote)}",
+                f"sh {shlex.quote(remote)}",
                 command,
                 warn,
                 False,
@@ -609,31 +575,6 @@ class SSH2Connection:
                     f" Remote: {out.strip()}"
                 )
 
-    def rsync_upload(self, local: str, remote: str) -> None:
-        local_path = Path(local)
-
-        # Build rsync command with SSH options
-        ssh_opts = ["-p", str(self.host.port)]
-        if self.host.key_filename:
-            key_path = Path(self.host.key_filename).expanduser().resolve()
-            ssh_opts.extend(["-i", str(key_path)])
-
-        rsync_cmd = [
-            "rsync",
-            "-az",  # archive mode, compress
-            "--progress",
-            "-e",
-            "ssh " + " ".join(ssh_opts),
-            str(local_path),
-            f"{self.host.user}@{self.host.address}:{remote}",
-        ]
-
-        logger.info(f"Using rsync for delta upload to {remote}")
-        result = subprocess.run(rsync_cmd)
-
-        if result.returncode != 0:
-            raise UploadError(f"rsync failed with exit code {result.returncode}")
-
 
 @contextmanager
 def connection(
@@ -652,7 +593,7 @@ def connection(
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-    except socket.error as e:
+    except OSError as e:
         raise ConnectionError(f"Failed to connect to {host.address}:{host.port}") from e
 
     session = Session()

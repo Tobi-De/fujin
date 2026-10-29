@@ -41,21 +41,12 @@ class Prune(BaseCommand):
         app_dir = self.config.app_dir
         releases_dir = f"{app_dir}/releases"
         with connection.connection(host=self.selected_host) as conn:
-            _, store_exists = conn.run(
-                f"test -d {shlex.quote(f'{app_dir}/store')}", warn=True, hide=True
-            )
-            if not store_exists:
-                self.output.info(
-                    "No release store found (pre-release-tree app). Nothing to prune."
-                )
-                return
-
             state = serverops.read_state(conn, app_dir)
             if state is None:
                 self.output.info("No release store state found. Nothing to prune.")
                 return
 
-            releases = self._list_releases(conn, releases_dir)
+            releases = serverops.list_releases(conn, app_dir)
             if not releases:
                 self.output.info("No releases found to prune.")
                 return
@@ -82,16 +73,3 @@ class Prune(BaseCommand):
             for digest in kill:
                 conn.run(f"rm -rf {shlex.quote(f'{releases_dir}/{digest}')}", warn=True)
             self.output.success("Pruning completed successfully")
-
-    def _list_releases(self, conn, releases_dir: str) -> list[str]:
-        """Digests under releases/, newest (mtime) first; staging excluded."""
-        out, _ok = conn.run(
-            f"cd {shlex.quote(releases_dir)} && ls -1t 2>/dev/null || true",
-            warn=True,
-            hide=True,
-        )
-        return [
-            line.strip()
-            for line in out.splitlines()
-            if line.strip() and not line.strip().startswith(".staging-")
-        ]

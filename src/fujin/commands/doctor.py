@@ -873,8 +873,11 @@ class Doctor(BaseCommand):
                 )
             )
         elif self.fix:
-            for path in staging:
-                conn.run(f"rm -rf {_q(path)}", warn=True, hide=True)
+            conn.run(
+                f"rm -rf {' '.join(_q(path) for path in staging)}",
+                warn=True,
+                hide=True,
+            )
             checks.append(
                 Check(
                     OK,

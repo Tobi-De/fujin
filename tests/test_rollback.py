@@ -188,7 +188,7 @@ def setup_rollback(
     enable_and_start = MagicMock(return_value=True)
     monkeypatch.setattr(fujin.serverops, "enable_and_start", enable_and_start)
     monkeypatch.setattr(
-        fujin.serverops, "install_caddyfile", MagicMock(return_value=True)
+        fujin.serverops, "install_caddyfile", MagicMock(return_value="installed")
     )
     write_state = MagicMock()
     monkeypatch.setattr(fujin.serverops, "write_state", write_state)

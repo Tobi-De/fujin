@@ -29,10 +29,12 @@ import json
 import logging
 import re
 import shlex
+import shutil
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any
 
 from fujin.connection import ssh_client_opts
 from fujin.errors import DeploymentError
@@ -49,7 +51,6 @@ __all__ = [
     "VerifyResult",
     "TransferError",
     "HostUnreachableError",
-    "RsyncUnavailableError",
     "rsync_to_staging",
     "parse_itemize",
     "verify_staging",
@@ -69,10 +70,6 @@ class HostUnreachableError(TransferError):
 
     def __init__(self, message: str, code: int = EXIT_HOST_UNREACHABLE, **kwargs: Any):
         super().__init__(message, code=code, **kwargs)
-
-
-class RsyncUnavailableError(TransferError):
-    """rsync is not installed locally or on the remote host."""
 
 
 # rsync exit 255, or these stderr markers, mean the host itself was
@@ -173,13 +170,7 @@ def _ssh_transport_opts(host: Any) -> str:
 
 
 def _rsync_installed_locally() -> bool:
-    try:
-        subprocess.run(
-            ["rsync", "--version"], capture_output=True, check=False, timeout=10
-        )
-    except FileNotFoundError:
-        return False
-    return True
+    return shutil.which("rsync") is not None
 
 
 def _classify_rsync_failure(returncode: int, stderr: str) -> TransferError:
@@ -228,7 +219,7 @@ def rsync_to_staging(
         raise TransferError(f"Local bundle dir missing: {local_dir}")
 
     if not _rsync_installed_locally():
-        raise RsyncUnavailableError(
+        raise TransferError(
             "rsync is not installed locally. Install it, e.g. `sudo apt install rsync`."
         )
 
@@ -236,7 +227,7 @@ def rsync_to_staging(
     # actionable message before any file touches the wire.
     _, ok = conn.run("command -v rsync", warn=True, hide=True)
     if not ok:
-        raise RsyncUnavailableError(
+        raise TransferError(
             "rsync is not installed on the remote host.\n"
             "Install it with e.g. `sudo apt install rsync`, or use a "
             "key-authenticated host."
@@ -441,10 +432,9 @@ def commit_release(conn: SSH2Connection, staging_dir: str, digest: str) -> None:
     an existing destination directory instead of silently nesting.
     """
     # dest sits next to the staging dir:  <app>/releases/.staging-X ->
-    # <app>/releases/<digest>. Falls back to a plain relative path if
-    # staging_dir carries no directory component.
+    # <app>/releases/<digest>. Callers always pass an absolute staging path.
     parent, _, _ = staging_dir.rpartition("/")
-    dest = f"{parent}/{digest}" if parent else f"releases/{digest}"
+    dest = f"{parent}/{digest}"
     cmd = (
         f"if [ -e {dest} ]; then echo {_JSON_MARKER}EXISTS; exit 3; fi && "
         f"mv -T {_quote(staging_dir)} {dest}"
@@ -491,6 +481,8 @@ def sweep_stale_staging(conn: SSH2Connection, app_dir: str) -> list[str]:
     )
     out, _ = conn.run(cmd, warn=True, hide=True)
     found = [line.strip() for line in out.splitlines() if line.strip()]
-    for name in found:
-        conn.run(f"rm -rf {_quote(name)}", warn=True, hide=True)
+    if found:
+        conn.run(
+            f"rm -rf {' '.join(_quote(name) for name in found)}", warn=True, hide=True
+        )
     return found

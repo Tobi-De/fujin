@@ -16,7 +16,6 @@ from fujin.exit_codes import EXIT_HOST_UNREACHABLE
 from fujin.transfer import (
     HostUnreachableError,
     ItemizedChange,
-    RsyncUnavailableError,
     TransferError,
     commit_release,
     parse_itemize,
@@ -138,6 +137,28 @@ def test_parse_itemize_deleting_lines():
 
 def test_parse_itemize_empty():
     assert parse_itemize("") == []
+
+
+class TestLocalRsyncProbe:
+    def test_uses_which_without_spawning_subprocess(self, monkeypatch):
+        probed = []
+        monkeypatch.setattr(
+            transfer.shutil,
+            "which",
+            lambda name: probed.append(name) or "/usr/bin/rsync",
+        )
+
+        def no_spawn(*args, **kwargs):
+            pytest.fail("local rsync probe must not spawn a subprocess")
+
+        monkeypatch.setattr(transfer.subprocess, "run", no_spawn)
+
+        assert transfer._rsync_installed_locally() is True
+        assert probed == ["rsync"]
+
+    def test_missing_rsync(self, monkeypatch):
+        monkeypatch.setattr(transfer.shutil, "which", lambda name: None)
+        assert transfer._rsync_installed_locally() is False
 
 
 class TestRsyncToStaging:
@@ -276,7 +297,7 @@ class TestRsyncToStaging:
         monkeypatch.setattr(transfer.Path, "is_dir", lambda self: True)
         monkeypatch.setattr(transfer, "_rsync_installed_locally", lambda: False)
         conn = RecordingConn(host=make_host())
-        with pytest.raises(RsyncUnavailableError):
+        with pytest.raises(TransferError):
             rsync_to_staging(
                 conn, str(tmp_path), "/x/.staging-1", ignore_existing=False
             )
@@ -289,7 +310,7 @@ class TestRsyncToStaging:
             responses={"command -v rsync": ("", False)},
         )
         calls = fake_rsync_run(monkeypatch)
-        with pytest.raises(RsyncUnavailableError) as exc_info:
+        with pytest.raises(TransferError) as exc_info:
             rsync_to_staging(
                 conn, str(tmp_path), "/x/.staging-1", ignore_existing=False
             )
@@ -576,9 +597,12 @@ class TestSweepStaleStaging:
             "/opt/fujin/myapp/releases/.staging-11",
             "/opt/fujin/myapp/releases/.staging-12",
         ]
+        # every stale dir is swept in a single remote command
         rm_cmds = [c for c in conn.runs if c.startswith("rm -rf")]
-        assert len(rm_cmds) == 2
-        assert any(".staging-11" in c for c in rm_cmds)
+        assert len(rm_cmds) == 1
+        assert ".staging-11" in rm_cmds[0]
+        assert ".staging-12" in rm_cmds[0]
+        assert len(conn.runs) == 2  # find + one rm
 
     def test_nothing_stale(self, monkeypatch):
         conn = RecordingConn(host=make_host())

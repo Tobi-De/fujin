@@ -638,8 +638,15 @@ class Rollback(BaseCommand):
                 " unchanged."
             )
         else:
-            if installed:
+            if installed == "installed":
                 self.output.info("Caddy reloaded with the target release's Caddyfile.")
+            elif installed == "unchanged":
+                self.output.info("Target release's Caddyfile is already installed.")
+            else:
+                self.output.warning(
+                    "Failed to apply the target release's Caddyfile; the previous"
+                    " configuration was restored."
+                )
 
     # ------------------------------------------------------------------
     # GC

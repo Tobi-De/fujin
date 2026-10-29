@@ -1,7 +1,6 @@
 """Release-tree store: pure state machine for deploys, rollbacks, GC.
 
-No I/O here except the tiny ``write_state`` helper, which the command layer
-calls with either a path or an open file object. No SSH types, no subprocess.
+No I/O here. No SSH types, no subprocess.
 
 See the Tier-1 contract, fujin #77/#79 #76, and the bundle/store design
 notes in the linked issues.
@@ -9,34 +8,20 @@ notes in the linked issues.
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Iterable, Mapping
-from pathlib import Path
 from typing import Any, Protocol
 
 import msgspec
 
 
-class SupportsWrite(Protocol):
-    """Anything accepting ``write(bytes)`` (file objects, SSH streams)."""
-
-    def write(self, data: bytes) -> object: ...
-
-
 __all__ = [
-    "Step",
-    "ACTIVATION_STEPS",
-    "ROLLBACK_STEPS",
     "DeployRecord",
     "State",
     "parse_state",
     "serialize_state",
-    "write_state",
     "record_deploy",
     "record_rollback",
-    "activation_plan",
-    "rollback_plan",
     "restart_set",
     "unit_entry_name",
     "desired_instances",
@@ -131,22 +116,6 @@ def serialize_state(state: State) -> bytes:
     return msgspec.json.encode(state)
 
 
-def write_state(target: Path | SupportsWrite, state: State) -> None:
-    """Persist state, atomically for a path (``.tmp`` + rename).
-
-    Also accepts an open file object (anything with ``write(bytes)``) so the
-    SSH command layer can stream it without a local filesystem.
-    """
-    data = serialize_state(state)
-    if hasattr(target, "write"):
-        target.write(data)
-        return
-    path = Path(target)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-
-
 def record_deploy(
     state: State,
     digest: str,
@@ -219,69 +188,6 @@ def record_rollback(
             DeployRecord(manifest=target, at=at, result="rollback"),
         ],
     )
-
-
-# --------------------------------------------------------------------------
-# Activation step table
-# --------------------------------------------------------------------------
-
-
-class Step(msgspec.Struct, frozen=True):
-    """Ordered activation step with its failure semantics."""
-
-    name: str
-    on_failure: str  # "abort" (old release still live) | "rollback" (swap committed)
-
-
-#: Deploy steps in execution order. Steps 1–9 run before the swap commits, so
-#: failure aborts with the old release still live; after the swap the current
-#: symlink already points at the new tree, so failure triggers auto-rollback.
-ACTIVATION_STEPS: tuple[Step, ...] = (
-    Step("ensure", "abort"),  # idempotent root setup (runs on every deploy)
-    Step("prepare", "abort"),  # build/render/manifest/no-op decision
-    Step("transfer", "abort"),  # rsync staging tree
-    Step("install", "abort"),  # server-side code install into staging
-    Step("verify", "abort"),  # staging tree vs manifest
-    Step("commit", "abort"),  # mv staging -> releases/<digest>
-    Step("units", "abort"),  # install changed unit files + daemon-reload
-    Step("caddy", "abort"),  # install Caddyfile + caddy validate/reload in staging
-    Step("swap", "abort"),  # atomic current.next + rename - THE commit point
-    Step("restart", "rollback"),  # restart per diff + converge instances
-    Step("ready", "rollback"),  # readiness polling
-    Step("confirm", "rollback"),  # registry write + fallback prune
-)
-
-
-def activation_plan(
-    skip: Iterable[str] = (),
-) -> list[Step]:
-    """Ordered steps to run, minus the named-to-skips (e.g. no-op path)."""
-    skipped = set(skip)
-    return [step for step in ACTIVATION_STEPS if step.name not in skipped]
-
-
-def first_rollback_step() -> int:
-    """Index in ``ACTIVATION_STEPS`` of the first post-commit step."""
-    for i, step in enumerate(ACTIVATION_STEPS):
-        if step.on_failure == "rollback":
-            return i
-    raise AssertionError("no rollback step defined")
-
-
-#: Rollback steps (kaze 02-store §10) - single level, failures stop loudly.
-ROLLBACK_STEPS: tuple[Step, ...] = (
-    Step("resolve", "abort"),  # verify target tree exists (GC'd = hard error)
-    Step("units", "abort"),  # reinstall target's units if installations differ
-    Step("caddy", "abort"),
-    Step("swap", "abort"),
-    Step("restart", "abort"),  # stop-and-report; NO auto-recursion on rollback
-    Step("ready", "abort"),
-    Step("confirm", "abort"),
-)
-
-
-def rollback_plan() -> list[Step]:
-    return list(ROLLBACK_STEPS)
 
 
 # --------------------------------------------------------------------------
