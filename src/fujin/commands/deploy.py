@@ -25,7 +25,7 @@ from fujin import manifest as m
 from fujin import serverops, store, transfer
 from fujin.audit import format_operation
 from fujin.commands import BaseCommand
-from fujin.config import get_git_short_hash
+from fujin.config import InstallationMode, get_git_short_hash
 from fujin.errors import (
     CommandError,
     ConnectionError,
@@ -370,7 +370,11 @@ class Deploy(BaseCommand):
             with connection.connection(host=host, compress=False) as conn:
                 serverops.ensure_app_user(conn, config.app_user or config.app_name)
                 serverops.ensure_layout(
-                    conn, app_dir, config.app_user or config.app_name, host.user
+                    conn,
+                    app_dir,
+                    config.app_user or config.app_name,
+                    host.user,
+                    shared_dir=config.shared_dir,
                 )
                 lock = serverops.acquire_lock(conn, app_dir)
                 try:
@@ -1858,9 +1862,24 @@ class Deploy(BaseCommand):
         # absent: source it only when it exists instead of printing a shell
         # error before every hook.
         select_env = f"if [ -f {env_q} ]; then source {env_q}; fi"
+        # Hooks run as the app user in the release environment. The release's
+        # own bin directory and the shared tools prefix come first, so a
+        # prerequisite installed into ``{shared_dir}/bin`` is visible exactly
+        # like it is to a service.
+        release_bin = (
+            f"{release_dir}/venv/bin"
+            if self.config.installation_mode is InstallationMode.PY_PACKAGE
+            else f"{release_dir}/bin"
+        )
+        hook_path = (
+            f"{release_bin}:{self.config.shared_bin}:"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        )
+        app_user = self.config.app_user or self.config.app_name
         context = {
             **context,
             "app_dir": release_dir,
+            "shared_dir": self.config.shared_dir,
         }
 
         for raw in commands:
@@ -1878,7 +1897,10 @@ class Deploy(BaseCommand):
                     " aborted (fail-closed)."
                 )
             self.output.info(f"  [{label}] {cmd}")
-            full_cmd = f"set -a; {select_env}; set +a; "
+            full_cmd = (
+                f"export PATH={serverops.q(hook_path)}:$PATH; "
+                f"set -a; {select_env}; set +a; "
+            )
             if release_path is None:
                 # First deploy: the live-release directory does not exist
                 # yet, so run in the app directory (which always exists).
@@ -1889,8 +1911,11 @@ class Deploy(BaseCommand):
             else:
                 full_cmd += f"cd {serverops.q(release_dir)} && "
             full_cmd += cmd
+            # The app user is unprivileged; the scoped rule grants the deploy
+            # user exactly this ``sudo -u <app_user> bash -c`` entry.
+            wrapped = f"sudo -u {serverops.q(app_user)} bash -c {serverops.q(full_cmd)}"
             try:
-                _out, ok = conn.run(full_cmd, pty=True)
+                _out, ok = conn.run(wrapped, pty=True)
             except CommandError as exc:
                 if not fatal:
                     self.output.warning(

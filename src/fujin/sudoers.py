@@ -40,7 +40,10 @@ from __future__ import annotations
 import base64
 import re
 import shlex
+from collections.abc import Sequence
 from typing import Final
+
+from fujin.prerequisites import CORE_PACKAGES
 
 DROPIN_DIR: Final = "/etc/sudoers.d"
 SUDOERS_PATH: Final = "/etc/sudoers"
@@ -92,8 +95,34 @@ def _cmds(binary: str, *args: str) -> tuple[str, ...]:
     return tuple(f"{directory}/{binary}{suffix}" for directory in _bin_dirs(binary))
 
 
+def _apt_options() -> tuple[str, ...]:
+    """Dpkg options escaped for sudoers, which treats ``:`` and ``=`` specially."""
+    return (
+        "-o",
+        "Dpkg\\:\\:Options\\:\\=--force-confdef",
+        "-o",
+        "Dpkg\\:\\:Options\\:\\=--force-confold",
+    )
+
+
+def _package_commands(packages: Sequence[str]) -> tuple[str, ...]:
+    """One exact ``apt-get install`` command per package name."""
+    specs: list[str] = []
+    seen: set[str] = set()
+    for package in packages:
+        if package in seen:
+            continue
+        seen.add(package)
+        specs.extend(_cmds("apt-get", "-y", "-qq", *_apt_options(), "install", package))
+    return tuple(specs)
+
+
 def command_groups(
-    app_name: str, user: str, app_user: str
+    app_name: str,
+    user: str,
+    app_user: str,
+    *,
+    packages: Sequence[str] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Command groups rendered for one app/user pair.
 
@@ -101,10 +130,15 @@ def command_groups(
     ``/opt/fujin/<app>``, ``/etc/systemd/system/<app>``,
     ``/etc/caddy/conf.d/<app>.caddy`` or ``/run/<app>`` (the systemd runtime
     directory).
+
+    ``packages`` is the exact apt package list granted through the ``packages``
+    group; ``None`` keeps the core set fujin always needs.
     """
     _validate_app_name(app_name)
     _validate_user(user)
     _validate_app_name(app_user)
+    if packages is None:
+        packages = CORE_PACKAGES
     app = app_name
     app_dir = f"/opt/fujin/{app}"
     units = f"/etc/systemd/system/{app}"
@@ -197,35 +231,28 @@ def command_groups(
                 "apt-get",
                 "-y",
                 "-qq",
-                "-o",
-                "Dpkg\\:\\:Options\\:\\=--force-confdef",
-                "-o",
-                "Dpkg\\:\\:Options\\:\\=--force-confold",
+                *_apt_options(),
                 "upgrade",
             ),
-            *_cmds(
-                "apt-get",
-                "-y",
-                "-qq",
-                "-o",
-                "Dpkg\\:\\:Options\\:\\=--force-confdef",
-                "-o",
-                "Dpkg\\:\\:Options\\:\\=--force-confold",
-                "install",
-                "sqlite3",
-                "curl",
-                "rsync",
-            ),
+            *_package_commands(packages),
         ),
     }
     return groups
 
 
-def deploy_commands(app_name: str, user: str, app_user: str) -> list[str]:
+def deploy_commands(
+    app_name: str,
+    user: str,
+    app_user: str,
+    *,
+    packages: Sequence[str] | None = None,
+) -> list[str]:
     """Every command spec the deploy user may run as root."""
     return [
         spec
-        for group in command_groups(app_name, user, app_user).values()
+        for group in command_groups(
+            app_name, user, app_user, packages=packages
+        ).values()
         for spec in group
     ]
 
@@ -241,15 +268,24 @@ def DROPIN_PATH(user: str) -> str:
     return f"{DROPIN_DIR}/{SALT}-{user}"
 
 
-def render_rule(user: str, app_user: str, app_name: str) -> str:
+def render_rule(
+    user: str,
+    app_user: str,
+    app_name: str,
+    *,
+    packages: Sequence[str] | None = None,
+) -> str:
     """Render the complete sudoers drop-in for ``user``.
 
     Deterministic: the same inputs always produce byte-identical output, so
-    existing drop-ins can be diffed before being replaced.
+    existing drop-ins can be diffed before being replaced. ``packages`` names
+    the exact apt packages granted to the deploy user.
     """
     _validate_user(user)
     _validate_app_name(app_user)
     _validate_app_name(app_name)
+    if packages is None:
+        packages = CORE_PACKAGES
 
     lines = [
         f"# Managed by fujin. Scoped passwordless root commands for {user}.",
@@ -263,7 +299,9 @@ def render_rule(user: str, app_user: str, app_name: str) -> str:
         f'Defaults:{user} env_keep += "DEBIAN_FRONTEND"',
     ]
     alias_names: list[str] = []
-    for group, specs in command_groups(app_name, user, app_user).items():
+    for group, specs in command_groups(
+        app_name, user, app_user, packages=packages
+    ).items():
         alias = f"FUJIN_DEPLOY_{group.replace('-', '_').upper()}"
         alias_names.append(alias)
         lines.extend(

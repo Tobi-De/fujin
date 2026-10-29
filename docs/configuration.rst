@@ -344,7 +344,7 @@ Complete Example
 
     [hooks]
     pre_install = [
-        "sudo -u postgres createdb myapp",
+        "python manage.py check --deploy",
     ]
     post_install = [
         "python manage.py migrate --noinput",
@@ -353,6 +353,65 @@ Complete Example
         "python manage.py collectstatic --noinput",
         "python manage.py clearsessions",
     ]
+
+Hooks run as the app user in the release being deployed, with ``PATH``
+prefixed by the release ``venv/bin`` and the shared tools directory.
+Privileged host setup (system packages, database roles, host-wide tools)
+belongs in :ref:`host-prerequisites`, not in hooks.
+
+.. _host-prerequisites:
+
+Host prerequisites
+------------------
+
+``[prerequisites]`` declares host-level setup once for every host, and
+``[hosts.prerequisites]`` overrides it for one host. A host value **replaces**
+the app-wide section entirely: arrays keep the normal replace semantics, so a
+host that needs extra entries repeats the full list.
+
+.. code-block:: toml
+    :caption: fujin.toml
+
+    [prerequisites]
+    packages = ["postgresql-client"]
+
+    [[prerequisites.commands]]
+    id = "awscli"
+    check = "[ -x {shared_dir}/bin/aws ]"
+    run = "curl -sSfL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o {shared_dir}/aws.zip && unzip -oq {shared_dir}/aws.zip -d {shared_dir}/tools && {shared_dir}/tools/aws/install -i {shared_dir}/tools/aws-cli -b {shared_dir}/bin"
+
+    [[hosts]]
+    address = "example.com"
+    user = "deploy"
+
+    [hosts.prerequisites]
+    packages = ["postgresql-client", "libpq-dev"]
+
+``packages``
+    Apt package names, validated against ``^[a-z0-9][a-z0-9+.-]*$`` (no
+    whitespace, options, globs, ``=`` or ``:``). ``fujin server bootstrap``
+    (and therefore ``fujin up``) installs them and regenerates the scoped
+    sudoers rule from the same list, so changing packages needs no separate
+    ``server harden`` step. ``fujin server upgrade`` installs the same list but
+    never regenerates sudoers.
+
+``commands``
+    Idempotent setup steps executed in list order. ``check`` runs first and
+    ``run`` is skipped when it exits 0. Commands run as the deploy user
+    **without sudo** and may only write inside the app tree; install tools
+    into ``{shared_dir}/bin`` (which is prepended to hook and service
+    ``PATH``) or ``{shared_dir}/tools``. Both templates support the standard
+    placeholders, including ``{app_dir}`` and ``{shared_dir}``.
+
+``{shared_dir}`` defaults to ``{app_dir}/shared`` and can be changed with the
+top-level ``shared_dir`` key (an absolute path), following the normal config
+layering.
+
+``fujin server bootstrap`` writes a root-owned marker at
+``/etc/fujin/<app>/prerequisites.json`` after applying the list. ``fujin
+doctor`` compares it with the configured prerequisites and reports drift
+(report-only; the remedy is ``fujin up`` or ``fujin server bootstrap``).
+``fujin deploy`` never applies or verifies host prerequisites.
 
 Deploy-time readiness
 ---------------------

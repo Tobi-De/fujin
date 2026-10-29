@@ -866,3 +866,68 @@ def test_audit_legacy_records_without_digest_are_a_note(
 
     assert exit_code == 0
     assert "carry no release digest" in "\n".join(messages)
+
+
+# =============================================================================
+# Host prerequisites marker drift (#97)
+# =============================================================================
+
+
+def _prereq_config(minimal_config_dict):
+    data = dict(minimal_config_dict)
+    data["prerequisites"] = {"packages": ["postgresql-client"]}
+    return msgspec.convert(data, type=Config)
+
+
+def _doctor_for(config):
+    doctor = Doctor()
+    doctor.__dict__["config"] = config
+    doctor.__dict__["selected_host"] = config.hosts[0]
+    return doctor
+
+
+def _marker_conn(monkeypatch, payload=None):
+    from fujin import prerequisites
+
+    conn = MagicMock()
+    if payload is None:
+        conn.run.return_value = ("", False)
+    else:
+        conn.run.return_value = (json.dumps(payload), True)
+    monkeypatch.setattr(prerequisites, "read_marker", lambda _conn, _app: payload)
+    return conn
+
+
+def test_doctor_reports_missing_prerequisite_marker(minimal_config_dict, monkeypatch):
+    config = _prereq_config(minimal_config_dict)
+    check = _doctor_for(config)._check_prerequisites(_marker_conn(monkeypatch))
+    assert check.status == FAIL
+    assert "fujin up" in check.detail
+    assert "server bootstrap" in check.detail
+
+
+def test_doctor_reports_matching_prerequisite_marker(minimal_config_dict, monkeypatch):
+    from fujin import prerequisites
+
+    config = _prereq_config(minimal_config_dict)
+    marker = {"hash": prerequisites.fingerprint(config, config.hosts[0])}
+    check = _doctor_for(config)._check_prerequisites(_marker_conn(monkeypatch, marker))
+    assert check.status == OK
+
+
+def test_doctor_reports_prerequisite_drift(minimal_config_dict, monkeypatch):
+    config = _prereq_config(minimal_config_dict)
+    check = _doctor_for(config)._check_prerequisites(
+        _marker_conn(monkeypatch, {"hash": "0" * 64})
+    )
+    assert check.status == FAIL
+    assert "drifted" in check.detail
+    assert "fujin up" in check.detail
+
+
+def test_doctor_accepts_absent_marker_when_nothing_is_configured(
+    minimal_config_dict, monkeypatch
+):
+    config = make_config(minimal_config_dict)
+    check = _doctor_for(config)._check_prerequisites(_marker_conn(monkeypatch))
+    assert check.status == OK

@@ -597,3 +597,112 @@ def test_override_spillover_unnamed_entry_named_in_message(tmp_path, monkeypatch
     msg = exc_info.value.message
     assert "may not describe other hosts" in msg
     assert "(unnamed entry)" in msg
+
+
+# ============================================================================
+# Prerequisites (#97): app-level and host-level replacement semantics
+# ============================================================================
+
+
+def _prereq_raw(**host_extra):
+    raw = {
+        "app": "testapp",
+        "version": "1.0.0",
+        "build_command": "echo building",
+        "installation_mode": "python-package",
+        "python_version": "3.11",
+        "distfile": "dist/testapp-{version}-py3-none-any.whl",
+        "prerequisites": {
+            "packages": ["postgresql-client"],
+            "commands": [
+                {"id": "aws", "check": "[ -x {shared_dir}/bin/aws ]", "run": "install"}
+            ],
+        },
+        "hosts": [
+            {"name": "staging", "address": "staging.example.com", "user": "deploy"},
+            {
+                "name": "production",
+                "address": "example.com",
+                "user": "deploy",
+                **host_extra,
+            },
+        ],
+    }
+    return raw
+
+
+def test_prerequisites_app_default_is_used_when_host_has_none():
+    config = merge_host_layers(_prereq_raw(), {}, "staging")
+    host = config.select_host("staging")
+    effective = config.effective_prerequisites(host)
+    assert effective is not None
+    assert effective.packages == ["postgresql-client"]
+    assert [command.id for command in effective.commands] == ["aws"]
+
+
+def test_host_prerequisites_replace_app_values_entirely():
+    raw = _prereq_raw(prerequisites={"packages": ["libpq-dev"]})
+    config = merge_host_layers(raw, {}, "production")
+    host = config.select_host("production")
+    effective = config.effective_prerequisites(host)
+    assert effective is not None
+    assert effective.packages == ["libpq-dev"]
+    # Arrays replace: the app-level command list is not inherited.
+    assert effective.commands == []
+
+
+def test_hosts_prerequisites_table_is_not_an_unknown_field():
+    import tomllib
+
+    raw = tomllib.loads(
+        """
+app = "testapp"
+version = "1.0.0"
+build_command = "echo building"
+installation_mode = "python-package"
+python_version = "3.11"
+distfile = "dist/testapp-{version}-py3-none-any.whl"
+
+[[hosts]]
+name = "production"
+address = "example.com"
+user = "deploy"
+
+[hosts.prerequisites]
+packages = ["libpq-dev"]
+"""
+    )
+    config = merge_host_layers(raw, {}, "production")
+    assert config.hosts[0].prerequisites is not None
+    assert config.hosts[0].prerequisites.packages == ["libpq-dev"]
+
+
+def test_invalid_prerequisite_package_names_are_rejected():
+    for name in ("bad name", "--option", "pkg=1", "pkg:arch", "Pkg", "../x"):
+        raw = _prereq_raw(prerequisites={"packages": [name]})
+        with pytest.raises(ImproperlyConfiguredError):
+            merge_host_layers(raw, {}, "production")
+
+
+def test_duplicate_prerequisite_command_ids_are_rejected():
+    raw = _prereq_raw(
+        prerequisites={
+            "commands": [
+                {"id": "aws", "check": "true", "run": "true"},
+                {"id": "aws", "check": "true", "run": "true"},
+            ]
+        }
+    )
+    with pytest.raises(ImproperlyConfiguredError):
+        merge_host_layers(raw, {}, "production")
+
+
+def test_shared_dir_defaults_to_app_dir_and_is_configurable():
+    config = merge_host_layers(_prereq_raw(), {}, "staging")
+    assert config.shared_dir == "/opt/fujin/testapp/shared"
+    assert config.shared_bin == "/opt/fujin/testapp/shared/bin"
+
+    raw = _prereq_raw()
+    raw["shared_dir"] = "/srv/testapp-data"
+    config = merge_host_layers(raw, {}, "staging")
+    assert config.shared_dir == "/srv/testapp-data"

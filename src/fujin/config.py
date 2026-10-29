@@ -63,6 +63,64 @@ class HooksConfig(msgspec.Struct, forbid_unknown_fields=True):
     post_start: list[str] = msgspec.field(default_factory=list)
 
 
+_PACKAGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
+
+
+class PrerequisiteCommand(msgspec.Struct, forbid_unknown_fields=True):
+    """One idempotent, unprivileged host setup command.
+
+    ``check`` runs first; ``run`` is only executed when the check fails. Both
+    support the usual deploy template placeholders (``{app_dir}``,
+    ``{shared_dir}``, ...).
+    """
+
+    id: str
+    check: str
+    run: str
+
+    def __post_init__(self):
+        if not self.id.strip():
+            raise ImproperlyConfiguredError(
+                "Each [[prerequisites.commands]] entry needs a non-empty 'id'."
+            )
+        if not self.check.strip():
+            raise ImproperlyConfiguredError(
+                f"Prerequisite command '{self.id}' needs a non-empty 'check'."
+            )
+        if not self.run.strip():
+            raise ImproperlyConfiguredError(
+                f"Prerequisite command '{self.id}' needs a non-empty 'run'."
+            )
+
+
+class PrerequisitesConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Declarative host prerequisites (``[prerequisites]``).
+
+    Packages are apt package names installed by ``server bootstrap`` and
+    granted to the deploy user through the scoped sudoers rule. Commands are
+    unprivileged setup steps executed as the deploy user.
+    """
+
+    packages: list[str] = msgspec.field(default_factory=list)
+    commands: list[PrerequisiteCommand] = msgspec.field(default_factory=list)
+
+    def __post_init__(self):
+        for package in self.packages:
+            if not _PACKAGE_NAME_RE.match(package):
+                raise ImproperlyConfiguredError(
+                    f"Invalid prerequisite package name '{package}'. Package"
+                    " names must match ^[a-z0-9][a-z0-9+.-]*$ (no whitespace,"
+                    " options, globs, '=' or ':')."
+                )
+        seen: set[str] = set()
+        for command in self.commands:
+            if command.id in seen:
+                raise ImproperlyConfiguredError(
+                    f"Duplicate prerequisite command id '{command.id}'."
+                )
+            seen.add(command.id)
+
+
 class HealthCheckConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Post-start readiness probe (``[health_check]`` table).
 
@@ -111,6 +169,7 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
     local_config_dir: Path = Path(".fujin")
     apps_dir: str = "/opt/fujin"
     caddy_config_dir: str = "/etc/caddy/conf.d"
+    _shared_dir: str | None = msgspec.field(name="shared_dir", default=None)
 
     secret_config: SecretConfig | None = msgspec.field(
         name="secrets",
@@ -122,6 +181,11 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
         default=None,
     )
 
+    prerequisites: PrerequisitesConfig | None = msgspec.field(
+        name="prerequisites",
+        default=None,
+    )
+
     health_check: HealthCheckConfig | None = msgspec.field(
         name="health_check",
         default=None,
@@ -130,6 +194,9 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
     def __post_init__(self):
         if not self.app_user:
             self.app_user = self.app_name
+
+        if self._shared_dir is not None and not self._shared_dir.startswith("/"):
+            raise ImproperlyConfiguredError("'shared_dir' must be an absolute path.")
 
         if self._env_file and self.env_content:
             raise ImproperlyConfiguredError(
@@ -207,6 +274,24 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
     @property
     def app_dir(self) -> str:
         return f"{self.apps_dir}/{self.app_name}"
+
+    @property
+    def shared_dir(self) -> str:
+        """Durable per-app directory (env, releases' predecessors, tool bins)."""
+        return self._shared_dir or f"{self.app_dir}/shared"
+
+    @property
+    def shared_bin(self) -> str:
+        """Directory prereq tools install into and services put on ``PATH``."""
+        return f"{self.shared_dir}/bin"
+
+    def effective_prerequisites(self, host: HostConfig) -> PrerequisitesConfig | None:
+        """Prerequisites for *this* host: host values replace app values.
+
+        Replacement is whole-section, not additive: a host that declares
+        ``[hosts.prerequisites]`` replaces the app-wide section entirely.
+        """
+        return host.prerequisites or self.prerequisites
 
     def get_distfile_path(self, version: str | None = None) -> Path:
         version = version or self.version
@@ -575,6 +660,7 @@ _HOST_OVERRIDE_KEYS = frozenset(
         "key_passphrase_env",
         "native_ssh_auth",
         "secrets",
+        "prerequisites",
     }
 )
 
@@ -656,6 +742,9 @@ class HostConfig(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     #: Per-host secret adapter override (#75); None = use the global
     #: ``[secrets]`` / ``Config.secret_config``.
     secrets: SecretConfig | None = None
+    #: Per-host prerequisites override (#97); None = use the app-wide section.
+    #: Host values replace app values entirely (no additive merge).
+    prerequisites: PrerequisitesConfig | None = None
 
     def __post_init__(self):
         if self._env_file and self.env_content:

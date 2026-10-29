@@ -3823,3 +3823,32 @@ def test_caddyfile_install_failure_warns(monkeypatch, minimal_config, tmp_path, 
 
     spies["install_caddyfile"].assert_called_once()
     assert "Failed to apply the new Caddyfile" in capsys.readouterr().err
+
+
+def test_hooks_run_as_app_user_with_release_and_shared_path(
+    monkeypatch, minimal_config, tmp_path
+):
+    """#97: lifecycle hooks run as the app user with the release venv and
+    ``{shared_dir}/bin`` ahead of system paths so prereq tools are visible."""
+    from fujin.config import HooksConfig
+
+    hooks = HooksConfig(post_install=["migrate"])
+    cmd, spies = setup_deploy(
+        monkeypatch,
+        minimal_config,
+        tmp_path,
+        state=State(current="prev", client_digest="old"),
+        prev_manifest=manifest_for(),
+        hooks=hooks,
+    )
+
+    assert invoke(cmd) == 0
+
+    cmds = [c for c, _ in spies["conn"].calls if "migrate" in c]
+    assert len(cmds) == 1, cmds
+    command = cmds[0]
+    assert "sudo -u testapp bash -c " in command
+    assert "export PATH=" in command
+    release_dir = r"/opt/fujin/testapp/releases/[0-9a-f]{64}"
+    assert re.search(rf"{release_dir}/venv/bin:/opt/fujin/testapp/shared/bin:", command)
+    assert ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" in command

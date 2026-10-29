@@ -41,6 +41,7 @@ from fujin.config import Config, HostConfig, InstallationMode, get_git_short_has
 from fujin.errors import BuildError, DeploymentError
 from fujin.formatting import safe_format
 from fujin.manifest import InputFile, bundle_key, hash_bytes
+from fujin.prerequisites import ensure_service_path
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def _interpolation_context(config: Config, host: HostConfig) -> dict[str, object
         "version": config.version,
         "app_dir": config.app_dir,
         # Persistent app data, outside the immutable release tree (#74).
-        "shared_dir": f"{config.app_dir}/shared",
+        "shared_dir": config.shared_dir,
         "user": host.user,
     }
     # Add unit names to context for cross-service references (e.g., After={web_socket});
@@ -141,19 +142,30 @@ def _gather_sources(
         unresolved.update(found)
         return resolved
 
+    def resolve_unit(raw: str, unit_name: str) -> str:
+        """Resolve a unit source and make shared tools visible to services."""
+        resolved = resolve(raw)
+        if unit_name.endswith(".service"):
+            resolved = ensure_service_path(resolved, config.shared_bin)
+        return resolved
+
     for du in config.deployed_units:
         raw = du.service_file.read_text()
         unit_sources[f"service/{du.service_file.name}"] = raw
-        unit_tree[f"{SYSTEMD_DIR}/{du.template_service_name}"] = resolve(raw)
+        unit_tree[f"{SYSTEMD_DIR}/{du.template_service_name}"] = resolve_unit(
+            raw, du.template_service_name
+        )
         for unit_file, template_name in (
             (du.socket_file, du.template_socket_name),
             (du.timer_file, du.template_timer_name),
         ):
-            if unit_file is None:
+            if unit_file is None or template_name is None:
                 continue
             raw = unit_file.read_text()
             unit_sources[f"unit/{unit_file.name}"] = raw
-            unit_tree[f"{SYSTEMD_DIR}/{template_name}"] = resolve(raw)
+            unit_tree[f"{SYSTEMD_DIR}/{template_name}"] = resolve_unit(
+                raw, template_name
+            )
 
     local_systemd = config.local_config_dir / SYSTEMD_DIR
     common_dir = local_systemd / "common.d"

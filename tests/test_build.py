@@ -17,6 +17,7 @@ from fujin.build import (
 )
 from fujin.config import Config
 from fujin.errors import BuildError, DeploymentError
+from fujin.prerequisites import ensure_service_path
 
 
 def make_config(tmp_path: Path, **overrides) -> Config:
@@ -97,8 +98,9 @@ def test_build_produces_staging_tree(project):
     result = run_build(config)
 
     staging = result.staging_dir
+    source = (project / ".fujin" / "systemd" / "testapp.service").read_text()
     assert (staging / "systemd" / "testapp-testapp.service").read_text() == (
-        (project / ".fujin" / "systemd" / "testapp.service").read_text()
+        ensure_service_path(source, config.shared_bin)
     )
     dist_path = staging / "bin" / "testapp-1.0.0-py3-none-any.whl"
     assert dist_path.read_bytes() == b"wheel-bytes"
@@ -361,9 +363,10 @@ def test_run_build_uses_the_shared_prebuild(project):
 
     assert result.bundle_key == pre.bundle_key
     assert pre.unit_tree == {
-        "systemd/testapp-testapp.service": (
-            project / ".fujin/systemd/testapp.service"
-        ).read_text()
+        "systemd/testapp-testapp.service": ensure_service_path(
+            (project / ".fujin/systemd/testapp.service").read_text(),
+            config.shared_bin,
+        )
     }
 
 

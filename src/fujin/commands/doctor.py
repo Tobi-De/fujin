@@ -18,7 +18,7 @@ from typing import Annotated
 
 import cappa
 
-from fujin import connection, serverops, store
+from fujin import connection, prerequisites, serverops, store
 from fujin.audit import read_logs
 from fujin.commands import BaseCommand
 from fujin.config import InstallationMode
@@ -160,6 +160,7 @@ class Doctor(BaseCommand):
         checks.extend(self._check_permissions(conn))
         checks.append(self._check_caddy(conn))
         checks.append(self._check_uv(conn))
+        checks.append(self._check_prerequisites(conn))
         checks.extend(self._check_lock(conn, app_dir, probe))
         checks.append(self._check_audit(conn, releases))
         return checks
@@ -808,7 +809,48 @@ class Doctor(BaseCommand):
         )
 
     # ------------------------------------------------------------------
-    # 8. deploy lock + orphaned staging dirs
+    # 8. host prerequisites (report-only)
+    # ------------------------------------------------------------------
+
+    def _check_prerequisites(self, conn) -> Check:
+        """Compare configured prerequisites against bootstrap's marker.
+
+        Host prerequisites are applied by ``server bootstrap`` (and therefore
+        ``fujin up``); ``deploy`` deliberately never checks them. This check
+        is report-only: drift is repaired by re-running bootstrap, which needs
+        operator-level sudo, so ``--fix`` must not attempt it.
+        """
+        config = self.config
+        host = self.selected_host
+        expected = prerequisites.fingerprint(config, host)
+        marker = prerequisites.read_marker(conn, config.app_name)
+        configured = bool(prerequisites.configured_packages(config, host)) or bool(
+            prerequisites.configured_commands(config, host)
+        )
+        remedy = "re-run `fujin up` or `fujin server bootstrap`"
+
+        if marker is None:
+            if configured:
+                return Check(
+                    FAIL,
+                    "prerequisites",
+                    f"host prerequisites are configured but no marker exists; {remedy}",
+                )
+            return Check(OK, "prerequisites", "none configured")
+
+        if marker.get("hash") == expected:
+            return Check(OK, "prerequisites", "applied state matches the config")
+
+        return Check(
+            FAIL,
+            "prerequisites",
+            "host prerequisites drifted from the configuration"
+            f" (applied {str(marker.get('hash') or 'unknown')[:12]},"
+            f" configured {expected[:12]}); {remedy}",
+        )
+
+    # ------------------------------------------------------------------
+    # 9. deploy lock + orphaned staging dirs
     # ------------------------------------------------------------------
 
     def _check_lock(
@@ -896,7 +938,7 @@ class Doctor(BaseCommand):
         return checks
 
     # ------------------------------------------------------------------
-    # 9. audit log integrity
+    # 10. audit log integrity
     # ------------------------------------------------------------------
 
     def _check_audit(self, conn, releases: list[str]) -> Check:

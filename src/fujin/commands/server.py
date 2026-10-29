@@ -4,6 +4,7 @@ import secrets
 import shlex
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -15,6 +16,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from fujin import caddy
+from fujin import prerequisites
 from fujin import serverops
 from fujin import sudoers
 from fujin.commands import BaseCommand
@@ -50,7 +52,10 @@ class Server(BaseCommand):
         with connection.connection(host=self.selected_host) as conn:
             self.output.info("Bootstrapping server...")
 
-            self._upgrade_system(conn, packages="sqlite3 curl rsync")
+            self._upgrade_system(
+                conn,
+                packages=prerequisites.system_packages(self.config, self.selected_host),
+            )
             _, result_ok = conn.run("command -v uv", warn=True)
             if not result_ok:
                 self.output.info("Installing uv tool...")
@@ -87,7 +92,7 @@ class Server(BaseCommand):
             )
             self.output.info(f"Setting up {app_dir} directory...")
             conn.run(f"sudo mkdir -p {app_dir}", pty=True)
-            conn.run(f"sudo mkdir -p {app_dir}/shared", pty=True)
+            conn.run(f"sudo mkdir -p {self.config.shared_dir}", pty=True)
             conn.run(
                 f"sudo chown -R {self.selected_host.user}:{app_user} {app_dir}",
                 pty=True,
@@ -97,7 +102,44 @@ class Server(BaseCommand):
             self.output.info(
                 "Setting up release-tree layout (releases, store, shared)..."
             )
-            serverops.ensure_layout(conn, app_dir, app_user, self.selected_host.user)
+            serverops.ensure_layout(
+                conn,
+                app_dir,
+                app_user,
+                self.selected_host.user,
+                shared_dir=self.config.shared_dir,
+            )
+
+            self.output.info("Applying host prerequisites...")
+            try:
+                prerequisites.apply(conn, self.config, self.selected_host, self.output)
+                self.output.info("Recording applied host prerequisites...")
+                prerequisites.write_marker(conn, self.config, self.selected_host)
+            except RuntimeError as exc:
+                raise cappa.Exit(str(exc), code=1) from None
+
+            self.output.info("Installing scoped sudoers rule...")
+            rule = sudoers.render_rule(
+                self.selected_host.user,
+                app_user,
+                self.config.app_name,
+                packages=prerequisites.system_packages(self.config, self.selected_host),
+            )
+            script = sudoers.install_dropin_script(self.selected_host.user, rule)
+            output, installed = conn.run(
+                f"sudo bash -c {shlex.quote(script)}",
+                warn=True,
+                pty=True,
+            )
+            if not installed or sudoers.DROPIN_OK not in output:
+                raise cappa.Exit(
+                    "Server bootstrap completed, but the scoped sudoers rule "
+                    "could not be installed (visudo validation failed or "
+                    f"{sudoers.DROPIN_DIR} is not included). The root script "
+                    "restored the previous state; fix the reported error and "
+                    "run `fujin server bootstrap` again.",
+                    code=1,
+                )
 
             # Add caddy to app group and restart to pick up group membership
             self.output.info(f"Adding caddy to {app_user} group...")
@@ -132,7 +174,10 @@ class Server(BaseCommand):
         with connection.connection(host=self.selected_host) as conn:
             self.output.info("Upgrading server components...")
             all_success = True
-            self._upgrade_system(conn)
+            self._upgrade_system(
+                conn,
+                packages=prerequisites.system_packages(self.config, self.selected_host),
+            )
             _, caddy_installed = conn.run("command -v caddy", warn=True, hide=True)
 
             if caddy_installed:
@@ -218,7 +263,7 @@ class Server(BaseCommand):
                     "Server upgrade completed with some warnings. Check messages above."
                 )
 
-    def _upgrade_system(self, conn, packages: str | None = None):
+    def _upgrade_system(self, conn, packages: Sequence[str] | None = None):
         self.output.info("Upgrading system packages...")
         # DEBIAN_FRONTEND survives the sudo call because the scoped rule has
         # `Defaults:<user> env_keep += "DEBIAN_FRONTEND"`.  The Dpkg options
@@ -230,10 +275,12 @@ class Server(BaseCommand):
             "DEBIAN_FRONTEND=noninteractive sudo apt-get update -qq && "
             f"DEBIAN_FRONTEND=noninteractive sudo apt-get -y -qq {apt_opts} upgrade"
         )
-        if packages:
+        # The sudoers rule grants one exact `apt-get install <package>` per
+        # name, so install each package in its own matching command.
+        for package in packages or ():
             command += (
                 " && DEBIAN_FRONTEND=noninteractive "
-                f"sudo apt-get -y -qq {apt_opts} install {packages}"
+                f"sudo apt-get -y -qq {apt_opts} install {shlex.quote(package)}"
             )
         _, success = conn.run(command, warn=True)
         if success:
@@ -253,7 +300,12 @@ class Server(BaseCommand):
         ] = False,  # no short arg to force explicitness
     ):
         try:
-            rule = sudoers.render_rule(name, self.config.app_user, self.config.app_name)
+            rule = sudoers.render_rule(
+                name,
+                self.config.app_user,
+                self.config.app_name,
+                packages=prerequisites.system_packages(self.config, self.selected_host),
+            )
         except ValueError as exc:
             raise cappa.Exit(str(exc), code=1) from None
 
@@ -343,7 +395,12 @@ class Server(BaseCommand):
         user = self.selected_host.user
         app_user = self.config.app_user
         try:
-            rule = sudoers.render_rule(user, app_user, self.config.app_name)
+            rule = sudoers.render_rule(
+                user,
+                app_user,
+                self.config.app_name,
+                packages=prerequisites.system_packages(self.config, self.selected_host),
+            )
         except ValueError as exc:
             raise cappa.Exit(str(exc), code=1) from None
 

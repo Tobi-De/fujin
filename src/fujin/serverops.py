@@ -461,21 +461,33 @@ def _sudo_write(
 # =============================================================================
 
 
-def ensure_layout(conn: Any, app_dir: str, app_user: str, deploy_user: str) -> None:
+def ensure_layout(
+    conn: Any,
+    app_dir: str,
+    app_user: str,
+    deploy_user: str,
+    *,
+    shared_dir: str | None = None,
+) -> None:
     """Create the release-tree layout, idempotently.
 
     ``{app_dir}``, ``releases/``, ``store/`` are setgid ``2755``
     (``{deploy_user}:{app_user}``); ``shared/`` is group-writable ``2775``;
     ``store/lock`` is 0664. Directory modes are setgid so files created under
-    them inherit the ``app_user`` group.
+    them inherit the ``app_user`` group. ``shared_dir`` defaults to
+    ``{app_dir}/shared`` and may point outside the app tree; its ``bin/``
+    subdirectory holds tools installed by prerequisites.
     """
     app_q = shlex.quote(app_dir)
+    shared_dir = shared_dir or f"{app_dir}/shared"
+    shared_q = shlex.quote(shared_dir)
+    bin_q = shlex.quote(f"{shared_dir}/bin")
     script = (
-        f"sudo mkdir -p {app_q}/releases {app_q}/store {app_q}/shared"
+        f"sudo mkdir -p {app_q}/releases {app_q}/store {shared_q} {bin_q}"
         f" && sudo chown {deploy_user}:{app_user}"
-        f" {app_q} {app_q}/releases {app_q}/store {app_q}/shared"
+        f" {app_q} {app_q}/releases {app_q}/store {shared_q} {bin_q}"
         f" && sudo chmod 2755 {app_q} {app_q}/releases {app_q}/store"
-        f" && sudo chmod 2775 {app_q}/shared"
+        f" && sudo chmod 2775 {shared_q} {bin_q}"
         f" && sudo touch {app_q}/{LOCK_PATH}"
         f" && sudo chown {deploy_user}:{app_user} {app_q}/{LOCK_PATH}"
         f" && sudo chmod 0664 {app_q}/{LOCK_PATH}"

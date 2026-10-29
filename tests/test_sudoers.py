@@ -518,3 +518,41 @@ def test_has_includedir_variants():
     assert sudoers.has_includedir("#includedir /etc/sudoers.d/  # fujin\n")
     assert not sudoers.has_includedir("#includedir /etc/sudoers.d.bak\n")
     assert not sudoers.has_includedir("root ALL=(ALL:ALL) ALL\n")
+
+
+# ============================================================================
+# Configured packages (#97)
+# ============================================================================
+
+
+def test_configured_packages_are_granted_as_exact_install_commands():
+    rule = sudoers.render_rule(
+        DEPLOY_USER,
+        APP_USER,
+        APP_NAME,
+        packages=["postgresql-client", "libpq-dev"],
+    )
+    specs = sudoers.deploy_commands(
+        APP_NAME,
+        DEPLOY_USER,
+        APP_USER,
+        packages=["postgresql-client", "libpq-dev"],
+    )
+    for package in ("postgresql-client", "libpq-dev"):
+        install = next(spec for spec in specs if spec.split()[-1] == package)
+        assert "install" in install.split()
+        assert install in rule
+
+
+def test_explicit_package_list_is_exact_no_defaults_leak_in():
+    specs = sudoers.deploy_commands(
+        APP_NAME, DEPLOY_USER, APP_USER, packages=["libpq-dev"]
+    )
+    installs = {spec.split()[-1] for spec in specs if " install " in spec}
+    assert installs == {"libpq-dev"}
+
+
+def test_default_package_list_keeps_fujin_core_packages():
+    specs = sudoers.deploy_commands(APP_NAME, DEPLOY_USER, APP_USER)
+    installs = {spec.split()[-1] for spec in specs if " install " in spec}
+    assert installs == set(sudoers.CORE_PACKAGES)

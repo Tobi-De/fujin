@@ -467,6 +467,7 @@ def _fingerprint_data(config: Config, host: HostConfig) -> dict[str, Any]:
         "requirements": config.requirements,
         "apps_dir": config.apps_dir,
         "caddy_config_dir": config.caddy_config_dir,
+        "shared_dir": config.shared_dir,
         "host": _fingerprint_host(config, host),
     }
 
