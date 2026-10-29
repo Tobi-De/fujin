@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import subprocess
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
-from fujin.secrets import render_env, split_env_template
+from fujin.secrets import prompts_allowed, render_env, split_env_template
+
+#: Session returned by an interactive ``bw unlock`` in this process. The
+#: master password is asked at most once per run and never stored.
+_interactive_session: str | None = None
 
 
 def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
@@ -18,8 +24,10 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
     Retrieves secrets from Bitwarden vault using the `bw` CLI.
 
     Configuration:
-        - Requires BW_SESSION environment variable, OR
-        - Set password_env to unlock vault using environment variable
+        - Set BW_SESSION environment variable, OR
+        - Set password_env to unlock the vault from an environment variable, OR
+        - With neither, prompt for the master password once and unlock the
+          vault (disabled by ``fujin deploy --no-input``)
         - Optional folders: lookup order for folder-scoped resolution
 
     Example fujin.toml:
@@ -54,17 +62,7 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
     if not refs:
         return render_env(values)
 
-    # Authenticate with Bitwarden
-    session = os.getenv("BW_SESSION")
-    if not session:
-        password_env = secret_config.options.get("password_env")
-        if not password_env:
-            raise SecretResolutionError(
-                "You need to set options.password_env to use the bitwarden adapter "
-                "or set the BW_SESSION environment variable",
-                adapter="bitwarden",
-            )
-        session = _signin(password_env)
+    session = _session(secret_config)
 
     # ``bw list``/``bw get`` read the local cache, so refresh it once before
     # any lookup; a folder or item created server-side is otherwise invisible.
@@ -79,6 +77,57 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
     values.update(resolved)
 
     return render_env(values)
+
+
+def _session(secret_config: SecretConfig) -> str:
+    """Return a Bitwarden session token.
+
+    ``BW_SESSION`` wins, then a session from an earlier interactive unlock in
+    this process, then ``options.password_env``. Without any of those (or when
+    the configured ``password_env`` variable is unset) the master password is
+    asked for once, unless prompting is disabled (e.g. ``fujin deploy
+    --no-input``).
+    """
+    session = os.getenv("BW_SESSION") or _interactive_session
+    if session:
+        return session
+
+    password_env = secret_config.options.get("password_env")
+    if password_env and os.environ.get(password_env):
+        return _signin(password_env)
+
+    if not prompts_allowed():
+        if password_env:
+            raise SecretResolutionError(
+                f"Environment variable '{password_env}' (options.password_env) "
+                "is not set and prompting is disabled (--no-input): set it or "
+                "the BW_SESSION environment variable",
+                adapter="bitwarden",
+            )
+        raise SecretResolutionError(
+            "Bitwarden credentials are required but prompting is disabled "
+            "(--no-input): set the BW_SESSION environment variable or "
+            "options.password_env",
+            adapter="bitwarden",
+        )
+    return _unlock_interactively()
+
+
+def _unlock_interactively() -> str:
+    """Prompt once for the master password and unlock the vault."""
+    global _interactive_session
+    try:
+        password = getpass.getpass("Bitwarden master password: ")
+    except (EOFError, KeyboardInterrupt) as e:
+        raise SecretResolutionError(
+            "Bitwarden master password prompt was cancelled", adapter="bitwarden"
+        ) from e
+    if not password:
+        raise SecretResolutionError(
+            "Bitwarden master password cannot be empty", adapter="bitwarden"
+        )
+    _interactive_session = _signin("BW_PASSWORD", extra_env={"BW_PASSWORD": password})
+    return _interactive_session
 
 
 def _folders_option(secret_config: SecretConfig) -> list[str] | None:
@@ -356,11 +405,14 @@ def _read_secret(name: str, session: str) -> str:
     return result.stdout.strip()
 
 
-def _signin(password_env: str) -> str:
+def _signin(password_env: str, extra_env: Mapping[str, str] | None = None) -> str:
     """Unlock Bitwarden vault and return session token.
 
     Args:
         password_env: Name of environment variable containing vault password
+        extra_env: Additional child-process environment variables (used to
+            hand an interactively prompted password to ``bw`` without
+            touching the parent process environment)
 
     Returns:
         Bitwarden session token
@@ -379,6 +431,7 @@ def _signin(password_env: str) -> str:
         ],
         capture_output=True,
         text=True,
+        env={**os.environ, **extra_env} if extra_env is not None else None,
     )
 
     if unlock_result.returncode != 0:

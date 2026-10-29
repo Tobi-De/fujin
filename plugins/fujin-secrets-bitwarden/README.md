@@ -35,10 +35,17 @@ instance, point the CLI at your server first:
 bw config server https://vault.example.com
 ```
 
-Then log in and unlock the vault:
+Then log in. Fujin asks for the master password once per deploy run and
+unlocks the vault itself, so no session export is needed:
 
 ```bash
 bw login
+```
+
+For unattended runs (or `fujin deploy --no-input`), provide the session or
+password through the environment instead:
+
+```bash
 export BW_SESSION="$(bw unlock --raw)"
 ```
 
@@ -49,18 +56,23 @@ export BW_SESSION="$(bw unlock --raw)"
 adapter = "bitwarden"
 
 [secrets.options]
-password_env = "BW_PASSWORD"
+password_env = "BW_PASSWORD"  # optional; omit to be prompted
 folders = ["fujin/myapp/prod", "fujin/shared"]
 ```
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `password_env` | string | Name of the environment variable holding the vault password. Used to unlock the vault when `BW_SESSION` is not set. |
+| `password_env` | string | Name of the environment variable holding the vault password. Used to unlock the vault when `BW_SESSION` is not set. Optional: when the variable is unset (or the option is omitted) Fujin prompts for the master password. |
 | `folders` | string or list of strings | Bitwarden folder names to resolve refs from, in lookup order (first match wins). A single name is accepted as a one-element order. An empty list is rejected at config load; omit the option for whole-vault name lookup. |
 
 Alternatively, set the `BW_SESSION` environment variable (`export BW_SESSION="$(bw unlock --raw)"`).
 When `BW_SESSION` is present, Fujin uses it directly and `password_env` is not
-required.
+required. When neither is available (including a configured `password_env`
+whose variable is unset), Fujin prompts once for the master
+password, unlocks with `bw unlock --raw` and keeps the returned session in
+memory for the rest of the process (it is never written to disk or shell
+history). `fujin deploy --no-input` disables that prompt, so unattended
+deploys must set `BW_SESSION` or `password_env`.
 
 ### Folder layout
 
@@ -220,7 +232,7 @@ two-factor accounts, written by `fujin-secrets-bitwarden-login`.
 | | `bitwarden` (CLI) | `bitwarden-protocol` (HTTP) |
 | --- | --- | --- |
 | Requires the `bw` binary | yes | no |
-| Requires an unlocked session | yes (`BW_SESSION` or `password_env`) | no, only `password_env` |
+| Requires an unlocked session | yes (`BW_SESSION`, `password_env`, or an interactive prompt) | no, only `password_env` |
 | Performs the crypto | `bw` | this adapter |
 | Two-factor accounts | whatever `bw` supports | supported after a one-time seeding step |
 | Organizations/collections | via `bw` | not supported |

@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - *(cli)* Ignore the fujin build cache from init and migrate
 
+### 🐛 Bug Fixes
+
+- *(deploy)* Source the hook env only when it exists
+
 ## [0.28.0b5] - 2026-10-29
 
 ### 🚜 Refactor

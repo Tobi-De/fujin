@@ -53,7 +53,7 @@ The secret management service to use. The currently available options are *bitwa
 
 options.password_env
 ~~~~~~~~~~~~~~~~~~~~
-Environment variable containing the password for the service account, set in the ``[secrets.options]`` table. This is only required for certain adapters:
+Optional environment variable containing the password for the service account, set in the ``[secrets.options]`` table. Only some adapters use it; the Bitwarden adapter prompts for the master password when neither this nor ``BW_SESSION`` is set (except with ``fujin deploy --no-input``):
 
 .. code-block:: toml
 

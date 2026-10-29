@@ -8,7 +8,7 @@ installation_mode = "python-package"
 
 # [secrets]
 # adapter = "bitwarden"
-# password_env = "BW_PASSWORD"
+# password_env = "BW_PASSWORD"  # optional; prompts once when unset
 
 [aliases]
 console = "app exec shell"

@@ -617,10 +617,10 @@ Secrets not resolving
 
       # Bitwarden
       bw login
-      bw unlock
-      export BW_SESSION="..."
-
-      # Or use password env
+      # Then run the deploy: fujin prompts for the master password once.
+      # In CI (or with --no-input), set the session or password env instead:
+      export BW_SESSION="$(bw unlock --raw)"
+      # or
       export BW_PASSWORD="your-password"
 
 2. **Wrong secret name:**

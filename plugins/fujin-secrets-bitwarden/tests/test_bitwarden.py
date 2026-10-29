@@ -70,6 +70,13 @@ if argv[0] == "unlock":
         contract_violation(
             "unlock must be: unlock --nointeraction --passwordenv NAME --raw"
         )
+    expected_password = state.get("expected_password")
+    if (
+        expected_password is not None
+        and os.environ.get(argv[3]) != expected_password
+    ):
+        sys.stderr.write("fake bw: wrong password\\n")
+        raise SystemExit(1)
     print("unlocked-session")
     raise SystemExit(0)
 
@@ -143,10 +150,12 @@ class FakeBw:
         folders: list[dict] | None = None,
         items_by_folder: dict[str, list[dict]] | None = None,
         sync_fails: bool = False,
+        expected_password: str | None = None,
     ):
         self.folders = folders or []
         self.items_by_folder = items_by_folder or {}
         self.sync_fails = sync_fails
+        self.expected_password = expected_password
         self.log_path: Path | None = None
 
     @property
@@ -169,9 +178,28 @@ class FakeBw:
         return [c for c in self.calls if c[:2] == ["get", "password"]]
 
 
+@pytest.fixture(autouse=True)
+def reset_interactive_session(monkeypatch):
+    monkeypatch.setattr(adapter, "_interactive_session", None)
+
+
 @pytest.fixture
 def bw_session(monkeypatch):
     monkeypatch.setenv("BW_SESSION", "session-token")
+
+
+@pytest.fixture
+def prompts(monkeypatch):
+    """Prompting allowed, master password recorded instead of read."""
+    entries: list[str] = []
+
+    def fake_getpass(prompt: str = "") -> str:
+        entries.append(prompt)
+        return "master-password"
+
+    monkeypatch.setattr(adapter, "prompts_allowed", lambda: True)
+    monkeypatch.setattr(adapter.getpass, "getpass", fake_getpass)
+    return entries
 
 
 @pytest.fixture
@@ -195,6 +223,7 @@ def install_bw(tmp_path, monkeypatch):
                     "folders": fake.folders,
                     "items_by_folder": fake.items_by_folder,
                     "sync_fails": fake.sync_fails,
+                    "expected_password": fake.expected_password,
                 }
             ),
             encoding="utf-8",
@@ -532,6 +561,7 @@ def test_no_refs_with_session_never_syncs(bw_session, install_bw):
 
 def test_password_env_unlock_then_folder_resolution(monkeypatch, install_bw, vault):
     monkeypatch.delenv("BW_SESSION", raising=False)
+    monkeypatch.setenv("BW_PASSWORD", "password-from-env")
     fake = install_bw(vault)
 
     out = adapter.bitwarden(
@@ -562,6 +592,113 @@ def test_password_env_unlock_then_folder_resolution(monkeypatch, install_bw, vau
         "unlocked-session",
         "--nointeraction",
     ]
+
+
+def test_missing_password_config_prompts_once_and_unlocks(
+    monkeypatch, install_bw, prompts
+):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    fake = install_bw(
+        FakeBw(
+            folders=[folder(PROD, "id-prod")],
+            items_by_folder={PROD: [login("DB_PASSWORD", "db-secret")]},
+            expected_password="master-password",
+        )
+    )
+
+    out = adapter.bitwarden("DB_PASSWORD=$DB_PASSWORD", secret_config(folders=[PROD]))
+
+    assert out == "DB_PASSWORD=db-secret"
+    assert len(prompts) == 1
+    assert fake.calls[0] == [
+        "unlock",
+        "--nointeraction",
+        "--passwordenv",
+        "BW_PASSWORD",
+        "--raw",
+    ]
+    # Verify and lookup use the session returned by the interactive unlock.
+    assert fake.calls[1] == [
+        "sync",
+        "--session",
+        "unlocked-session",
+        "--nointeraction",
+    ]
+
+
+def test_prompted_session_is_reused_across_resolutions(
+    monkeypatch, install_bw, prompts
+):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    fake = install_bw(
+        FakeBw(
+            items_by_folder={PROD: [login("A", "va"), login("B", "vb")]},
+            expected_password="master-password",
+        )
+    )
+
+    assert adapter.bitwarden("A=$A", secret_config()) == "A=va"
+    assert adapter.bitwarden("B=$B", secret_config()) == "B=vb"
+
+    assert len(prompts) == 1
+    assert len([call for call in fake.calls if call[0] == "unlock"]) == 1
+
+
+def test_unset_password_env_falls_back_to_prompt(monkeypatch, install_bw, prompts):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    monkeypatch.delenv("BW_PASSWORD", raising=False)
+    install_bw(
+        FakeBw(
+            folders=[folder(PROD, "id-prod")],
+            items_by_folder={PROD: [login("DB_PASSWORD", "db-secret")]},
+            expected_password="master-password",
+        )
+    )
+
+    out = adapter.bitwarden(
+        "DB_PASSWORD=$DB_PASSWORD",
+        secret_config(folders=[PROD], password_env="BW_PASSWORD"),
+    )
+
+    assert out == "DB_PASSWORD=db-secret"
+    assert len(prompts) == 1
+
+
+def test_unset_password_env_with_prompting_disabled_names_the_variable(
+    monkeypatch, install_bw
+):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    monkeypatch.delenv("BW_PASSWORD", raising=False)
+    fake = install_bw(FakeBw(items_by_folder={PROD: [login("A", "va")]}))
+    monkeypatch.setattr(adapter, "prompts_allowed", lambda: False)
+
+    with pytest.raises(SecretResolutionError) as excinfo:
+        adapter.bitwarden("A=$A", secret_config(password_env="BW_PASSWORD"))
+
+    message = error_message(excinfo.value)
+    assert "BW_PASSWORD" in message
+    assert "--no-input" in message
+    assert fake.calls == []
+
+
+def test_prompting_disabled_fails_before_touching_bw(monkeypatch, install_bw):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    fake = install_bw(FakeBw(items_by_folder={PROD: [login("A", "va")]}))
+    monkeypatch.setattr(adapter, "prompts_allowed", lambda: False)
+
+    def unexpected_prompt(*args, **kwargs):
+        pytest.fail("prompted although prompting is disabled")
+
+    monkeypatch.setattr(adapter.getpass, "getpass", unexpected_prompt)
+
+    with pytest.raises(SecretResolutionError) as excinfo:
+        adapter.bitwarden("A=$A", secret_config())
+
+    message = error_message(excinfo.value)
+    assert "--no-input" in message
+    assert "BW_SESSION" in message
+    assert "password_env" in message
+    assert fake.calls == []
 
 
 def test_sync_runs_once_for_many_refs_and_folders(bw_session, install_bw, vault):

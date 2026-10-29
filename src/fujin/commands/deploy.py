@@ -44,6 +44,7 @@ from fujin.secrets import (
     render_template,
     resolve_secrets,
     secret_refs,
+    set_prompts_allowed,
 )
 from rich.prompt import Confirm
 
@@ -307,6 +308,11 @@ class Deploy(BaseCommand):
 
     def __call__(self):
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+
+        # Secret adapters (e.g. bitwarden) may ask for credentials; --no-input
+        # must reach them. Resolution happens in a worker thread, so this is
+        # process state rather than a per-call argument.
+        set_prompts_allowed(not self.no_input)
 
         if self.dry_run:
             self._dry_run()

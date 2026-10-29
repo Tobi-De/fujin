@@ -79,8 +79,16 @@ Configuration with folder-scoped resolution:
     adapter = "bitwarden"
 
     [secrets.options]
-    password_env = "BW_PASSWORD"
+    password_env = "BW_PASSWORD"  # Optional; omit to be prompted
     folders = ["fujin/myapp/prod", "fujin/shared"]
+
+If ``BW_SESSION`` is unset and no password is available through
+``password_env`` (unset or naming an unset variable), Fujin asks for the
+master password once per run and unlocks the vault with ``bw unlock``;
+the resulting session is kept in memory for the rest of the process and is
+never written to disk or shell history. ``fujin deploy --no-input`` disables
+the prompt (an unattended deploy never blocks), so CI must set ``BW_SESSION``
+or ``password_env``.
 
 .. list-table::
     :header-rows: 1
@@ -91,7 +99,8 @@ Configuration with folder-scoped resolution:
     * - ``password_env``
       - string
       - Environment variable holding the vault password, used to unlock when
-        ``BW_SESSION`` is not set.
+        ``BW_SESSION`` is not set. Optional: when the variable is unset (or
+        ``password_env`` is omitted) Fujin prompts for the master password.
     * - ``folders``
       - string or list of strings
       - Folder names to resolve refs from, in lookup order (first match wins).
@@ -141,6 +150,11 @@ Custom Adapters
 You can create your own secret adapter by implementing the adapter interface and registering it via Python entry points.
 
 See the `plugin packages source code <https://github.com/Tobi-De/fujin/tree/main/plugins>`_ for examples of how to implement custom adapters.
+
+Adapters that need to prompt for credentials (for example a vault master
+password) must check ``fujin.secrets.prompts_allowed()`` first. It is true by
+default and false for the whole process when ``fujin deploy --no-input`` is
+used, so an unattended deploy never blocks on a terminal.
 
 Redaction and Fail-Closed Resolution
 ------------------------------------

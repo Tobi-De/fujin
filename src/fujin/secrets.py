@@ -48,6 +48,26 @@ def get_adapter_registry() -> dict[str, secret_adapter]:
     return _adapter_registry
 
 
+#: Whether adapters may prompt for credentials (e.g. a vault master password).
+#: ``fujin deploy --no-input`` turns this off process-wide so an unattended
+#: deploy never blocks on a terminal. Adapters consult :func:`prompts_allowed`
+#: before prompting; resolution may run in a worker thread, so this is module
+#: state rather than a parameter on the adapter callable (which would break
+#: third-party adapters).
+_prompts_allowed = True
+
+
+def set_prompts_allowed(allowed: bool) -> None:
+    """Allow or forbid adapter credential prompts for this process."""
+    global _prompts_allowed
+    _prompts_allowed = allowed
+
+
+def prompts_allowed() -> bool:
+    """Return whether adapters may prompt the user for credentials."""
+    return _prompts_allowed
+
+
 # Placeholder that stands in for an escaped ``$$`` while dotenv interpolates.
 # It must contain no ``$`` so python-dotenv's ``${VAR}`` expansion cannot see
 # an escaped dollar, and ``\x00`` keeps it out of the way of real content.

@@ -1466,6 +1466,31 @@ def test_secrets_never_leak_during_auto_rollback(
     _assert_no_sentinel(printer, capsys)
 
 
+@pytest.mark.parametrize("no_input", [True, False])
+def test_deploy_propagates_prompting_policy_to_secret_adapters(
+    monkeypatch, minimal_config, tmp_path, no_input
+):
+    """--no-input must reach adapter-side credential prompts."""
+    import fujin.secrets as secrets_mod
+
+    seen: list[bool] = []
+
+    def fake_resolve(env, sc):
+        seen.append(secrets_mod.prompts_allowed())
+        return env
+
+    monkeypatch.setattr(secrets_mod, "_prompts_allowed", True)
+    monkeypatch.setattr(deploy_mod, "resolve_secrets", fake_resolve)
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    cmd, _spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    cmd.no_input = no_input
+
+    invoke(cmd)
+
+    assert seen == [not no_input]
+    assert secrets_mod.prompts_allowed() is (not no_input)
+
+
 def test_unresolved_secret_ref_aborts_before_any_upload(
     monkeypatch, minimal_config, tmp_path, capsys
 ):
