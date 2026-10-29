@@ -148,6 +148,11 @@ literal `$` and is never looked up (`PASSWORD=pa$$word` deploys `pa$word`).
 
 ## Resolution
 
+Each deploy runs `bw sync` once before any lookup (right after unlocking, and
+never for a template without `$REF`s), so folders and items created
+server-side are visible immediately; if that sync fails, the deploy aborts
+instead of reading the possibly stale local cache.
+
 ### With `folders`
 
 Fujin resolves folder names to ids once per deploy, then issues **one**
@@ -183,7 +188,9 @@ logins.
 This adapter talks to Bitwarden/Vaultwarden's HTTP API directly
 (`identity/accounts/prelogin`, `identity/connect/token` and `api/sync`) and
 performs the vault crypto locally. It is read-only and uses only the master
-password: no `bw` binary, no unlocked session, no token stored on disk.
+password: no `bw` binary, no unlocked session, no session token on disk. For
+two-factor accounts a trusted-device token can be seeded once (see
+[Two-factor accounts](#two-factor-accounts)).
 
 ```toml
 [secrets]
@@ -205,7 +212,8 @@ folders = ["fujin/myapp/prod", "fujin/shared"]    # optional
 
 `BW_SESSION` is deliberately **not** accepted: a session token cannot decrypt
 the vault, so the master password must always be available in the deploy
-environment. Nothing is persisted between deployments.
+environment. The only thing persisted is an optional trusted-device token for
+two-factor accounts, written by `fujin-secrets-bitwarden-login`.
 
 ### CLI vs protocol
 
@@ -214,9 +222,54 @@ environment. Nothing is persisted between deployments.
 | Requires the `bw` binary | yes | no |
 | Requires an unlocked session | yes (`BW_SESSION` or `password_env`) | no, only `password_env` |
 | Performs the crypto | `bw` | this adapter |
-| Two-factor accounts | whatever `bw` supports | not supported |
+| Two-factor accounts | whatever `bw` supports | supported after a one-time seeding step |
 | Organizations/collections | via `bw` | not supported |
 | Vault writes | none by Fujin | none; strictly read-only |
+
+### Two-factor accounts
+
+The adapter itself never prompts, so an account protected by two-factor
+authentication needs one interactive seeding step on the machine that runs
+deployments:
+
+```bash
+fujin-secrets-bitwarden-login --host prod
+```
+
+The command reads `email`, `server_url` and `password_env` from the selected
+host's `[secrets.options]` block (explicit flags win), prompts for the
+two-factor code (or takes `--code`) and the master password (or reads it from
+`password_env`), logs in with `twoFactorRemember=1`, and stores the remember
+token the server returns. It prints the state file path; secret values, codes
+and tokens are never echoed.
+
+Useful flags: `--email`, `--server-url`, `--provider` (provider id, default
+`0` = authenticator), `--password-env`, `--state-dir`, and `--clear` to remove
+the stored device.
+
+The state file lives at
+`${XDG_STATE_HOME:-~/.local/state}/fujin/bitwarden-protocol/bitwarden-protocol-<hash>.json`
+(or under `$FUJIN_BW_STATE_DIR` when set), one file per server/account, mode
+`0600`. It contains only:
+
+```json
+{
+  "server_url": "https://vault.example.com",
+  "email": "deploy@example.com",
+  "device_identifier": "…",
+  "two_factor_token": "…",
+  "obtained_at": "2026-10-29T12:00:00Z"
+}
+```
+
+No master password and no access/session token are stored. Later deploys send
+the token with `twoFactorProvider=5` and the same device identifier, so no code
+is needed. Remember tokens expire server-side (30 days by default); after 29
+days the adapter treats the device as expired and refuses to send it, asking
+for a re-seed. A missing, corrupt or rejected token likewise fails closed with
+an error naming `fujin-secrets-bitwarden-login` and the state file path. The
+adapter never deletes a token on its own: only `--clear` or a successful
+re-seed replaces it.
 
 ### Scope and limits
 
@@ -225,8 +278,10 @@ environment. Nothing is persisted between deployments.
   because their keys are not implemented.
 - KDFs: PBKDF2-SHA256 (`Kdf = 0`) and Argon2id (`Kdf = 1`), exactly as
   advertised by the server's prelogin endpoint. Unknown KDFs fail closed.
-- Accounts requiring two-factor authentication cannot log in; the 2FA challenge
-  is reported as a value-free error and the deploy stops.
+- Accounts requiring two-factor authentication need a one-time
+  `fujin-secrets-bitwarden-login` run; deploys then reuse the stored trusted
+  device. Without a usable token the deploy fails closed with a value-free
+  error naming that command.
 - HTTPS with the default certificate verification; there is no insecure
   override.
 - Errors never include vault values, response bodies or credential material.

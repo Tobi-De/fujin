@@ -6,8 +6,10 @@ the vault crypto itself, so deployments need neither the ``bw`` binary nor a
 pre-unlocked session.
 
 Scope is deliberately narrow: **read-only**, personal vault, login passwords.
-No item creation/update, no organizations/collections, no attachments, no
-two-factor authentication, and no persistence of the session token.
+No item creation/update, no organizations/collections, no attachments. Two-
+factor accounts are supported through a trusted device seeded once by
+``fujin-secrets-bitwarden-login``: the adapter itself never prompts and only
+reuses the remember token persisted for the account (see ``store``).
 
 Configuration (all under ``[secrets.options]``):
 
@@ -35,6 +37,8 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TypeGuard
 
 from argon2.exceptions import HashingError
@@ -46,9 +50,10 @@ from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
 from fujin.secrets import render_env, split_env_template
 
-from . import _folders_option, _split_ref
+from . import _folders_option, _split_ref, store
 
 _ADAPTER = "bitwarden-protocol"
+_SEED_COMMAND = "fujin-secrets-bitwarden-login"
 _DEFAULT_SERVER_URL = "https://vault.bitwarden.com"
 _TIMEOUT = 15
 _KEY_BYTES = 32
@@ -237,6 +242,28 @@ def _failure(message: str, key: str | None = None) -> SecretResolutionError:
     return SecretResolutionError(message, adapter=_ADAPTER, key=key)
 
 
+class TwoFactorRequired(SecretResolutionError):
+    """The password grant needs a second factor that was not accepted."""
+
+
+@dataclass(frozen=True)
+class TokenResult:
+    """Decoded identity token response."""
+
+    access_token: str
+    key: str
+    remember_token: str | None = None
+
+
+def _seed_hint(state_path: Path) -> str:
+    """Value-free instruction to seed a trusted device for this account."""
+    return (
+        "Bitwarden login requires two-factor authentication. Run "
+        f"`{_SEED_COMMAND}` to seed (or re-seed) a trusted device for this "
+        f"account (state file: {state_path}), then retry the deploy."
+    )
+
+
 def _is_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -331,24 +358,56 @@ class _Client:
             parallelism=parallelism if _is_int(parallelism) else 0,
         )
 
-    def login(self, email: str, password_hash: bytes) -> tuple[str, str]:
-        """Exchange credentials for an access token and the wrapped account key."""
-        form = urllib.parse.urlencode(
-            {
-                "grant_type": "password",
-                "username": email,
-                "password": base64.b64encode(password_hash).decode("ascii"),
-                "scope": "api offline_access",
-                "client_id": "cli",
-                "deviceType": "10",
-                "deviceIdentifier": str(uuid.uuid4()),
-                "deviceName": "fujin",
-            }
-        ).encode("utf-8")
+    def login(
+        self,
+        email: str,
+        password_hash: bytes,
+        *,
+        device_identifier: str,
+        two_factor_token: str | None = None,
+        two_factor_provider: int | None = None,
+        two_factor_code: str | None = None,
+        remember: bool = False,
+    ) -> TokenResult:
+        """Exchange credentials for a token, using a second factor if needed.
+
+        Three mutually exclusive shapes are supported:
+
+        - plain password grant (no second factor),
+        - a one-time code (``two_factor_code``) to enrol this device, with
+          ``twoFactorRemember`` set when ``remember`` is requested,
+        - an already trusted device (``two_factor_token``), sent with provider
+          5 (remember) so no code is needed.
+
+        The persisted ``device_identifier`` is always sent: remember tokens are
+        bound to it.
+        """
+        fields: dict[str, str] = {
+            "grant_type": "password",
+            "username": email,
+            "password": base64.b64encode(password_hash).decode("ascii"),
+            "scope": "api offline_access",
+            "client_id": "cli",
+            "deviceType": "10",
+            "deviceIdentifier": device_identifier,
+            "deviceName": "fujin",
+        }
+        if two_factor_code:
+            fields["twoFactorToken"] = two_factor_code
+            fields["twoFactorProvider"] = str(
+                0 if two_factor_provider is None else two_factor_provider
+            )
+            if remember:
+                fields["twoFactorRemember"] = "1"
+        elif two_factor_token:
+            fields["twoFactorToken"] = two_factor_token
+            fields["twoFactorProvider"] = "5"
+            fields["twoFactorRemember"] = "0"
+
         status, payload = self._request(
             "POST",
             "/identity/connect/token",
-            body=form,
+            body=urllib.parse.urlencode(fields).encode("utf-8"),
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
@@ -357,9 +416,8 @@ class _Client:
         )
         if not 200 <= status < 300:
             if _has_two_factor_hint(payload):
-                raise _failure(
-                    "Bitwarden login requires two-factor authentication, which "
-                    "the bitwarden-protocol adapter does not support"
+                raise TwoFactorRequired(
+                    "Bitwarden login requires two-factor authentication"
                 )
             raise _failure(f"Bitwarden login failed (HTTP {status})")
 
@@ -370,7 +428,14 @@ class _Client:
             raise _failure("Bitwarden login response did not include an access token")
         if not isinstance(key, str) or not key:
             raise _failure("Bitwarden login response did not include the account key")
-        return token, key
+        remember_token = data.get("TwoFactorToken")
+        return TokenResult(
+            access_token=token,
+            key=key,
+            remember_token=remember_token
+            if isinstance(remember_token, str) and remember_token
+            else None,
+        )
 
     def sync(self, token: str) -> dict:
         """Fetch the vault (folders and ciphers) for the authenticated user."""
@@ -596,6 +661,13 @@ def _server_url(secret_config: SecretConfig) -> str:
         return _DEFAULT_SERVER_URL
     if not isinstance(value, str) or not value.strip():
         raise _failure("options.server_url must be a non-empty URL")
+    return normalize_server_url(value)
+
+
+def normalize_server_url(value: str) -> str:
+    """Validate a server URL and strip its trailing slash."""
+    if not value.strip():
+        raise _failure("options.server_url must be a non-empty URL")
     url = value.strip().rstrip("/")
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -637,9 +709,43 @@ def bitwarden_protocol(env_content: str, secret_config: SecretConfig) -> str:
     kdf = client.prelogin(email)
     master_key = derive_master_key(password, email, kdf)
     enc_key, mac_key = stretch_keys(master_key)
-    token, wrapped_key = client.login(email, master_password_hash(master_key, password))
-    user_enc_key, user_mac_key = _unwrap_user_key(wrapped_key, enc_key, mac_key)
-    data = client.sync(token)
+
+    state_path = store.path_for(server_url, email)
+    device = store.load(server_url, email)
+    if device is not None and device.is_expired():
+        # Never send a stale token: the server would reject it anyway and the
+        # user needs to re-seed either way.
+        raise _failure(
+            "The stored Bitwarden trusted device is no longer valid. Re-seed "
+            f"it with `{_SEED_COMMAND}` (state file: {state_path}), then retry "
+            "the deploy."
+        )
+    device_identifier = (
+        device.device_identifier if device is not None else str(uuid.uuid4())
+    )
+    try:
+        result = client.login(
+            email,
+            master_password_hash(master_key, password),
+            device_identifier=device_identifier,
+            two_factor_token=device.two_factor_token if device is not None else None,
+        )
+    except TwoFactorRequired as exc:
+        raise _failure(_seed_hint(state_path)) from exc
+
+    if result.remember_token:
+        store.save(
+            store.RememberedDevice(
+                server_url=server_url,
+                email=email,
+                device_identifier=device_identifier,
+                two_factor_token=result.remember_token,
+                obtained_at=datetime.now(UTC),
+            )
+        )
+
+    user_enc_key, user_mac_key = _unwrap_user_key(result.key, enc_key, mac_key)
+    data = client.sync(result.access_token)
 
     vault = _Vault(
         _entries(data.get("folders"), "folders"),

@@ -50,6 +50,10 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
     # Ref placeholders keep their template position while being resolved.
     values, refs = split_env_template(env_content)
 
+    # A literal-only template never contacts Bitwarden: no unlock, no sync.
+    if not refs:
+        return render_env(values)
+
     # Authenticate with Bitwarden
     session = os.getenv("BW_SESSION")
     if not session:
@@ -62,8 +66,9 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
             )
         session = _signin(password_env)
 
-    if not refs:
-        return render_env(values)
+    # ``bw list``/``bw get`` read the local cache, so refresh it once before
+    # any lookup; a folder or item created server-side is otherwise invisible.
+    _sync(session)
 
     folders = _folders_option(secret_config)
     if folders is None:
@@ -263,6 +268,23 @@ class _FolderLoader:
 
         self._items[folder] = items
         return items
+
+
+def _sync(session: str) -> None:
+    """Refresh the local vault cache before the first lookup.
+
+    Called once per adapter invocation: ``bw list``/``bw get`` read the local
+    cache, so a folder or item created server-side stays invisible until a
+    sync. Failures are reported without echoing CLI output and never fall
+    back to the possibly stale cache.
+    """
+    result = subprocess.run(
+        ["bw", "sync", "--session", session, "--nointeraction"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SecretResolutionError("Bitwarden vault sync failed", adapter="bitwarden")
 
 
 def _run_bw(args: list[str], session: str, action: str) -> str:

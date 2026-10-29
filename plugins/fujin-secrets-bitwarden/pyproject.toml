@@ -28,6 +28,7 @@ dependencies = [
 urls.Homepage = "https://github.com/Tobi-De/fujin"
 urls.Issues = "https://github.com/Tobi-De/fujin/issues"
 urls.Source = "https://github.com/Tobi-De/fujin"
+scripts.fujin-secrets-bitwarden-login = "fujin_secrets_bitwarden.login:main"
 entry-points."fujin.secrets".bitwarden = "fujin_secrets_bitwarden:bitwarden"
 entry-points."fujin.secrets".bitwarden-protocol = "fujin_secrets_bitwarden.protocol:bitwarden_protocol"
 

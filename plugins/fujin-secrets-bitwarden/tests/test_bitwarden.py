@@ -79,6 +79,14 @@ session_index = argv.index("--session")
 if session_index + 1 >= len(argv) or not argv[session_index + 1]:
     contract_violation("--session needs a value")
 
+if argv[:1] == ["sync"]:
+    if len(argv) != 4 or argv[1] != "--session" or argv[3] != "--nointeraction":
+        contract_violation("sync must be: sync --session TOKEN --nointeraction")
+    if state.get("sync_fails"):
+        sys.stderr.write("fake bw: sync exploded\\n")
+        raise SystemExit(1)
+    raise SystemExit(0)
+
 if argv[:2] == ["list", "folders"]:
     print(json.dumps(state["folders"]))
     raise SystemExit(0)
@@ -134,9 +142,11 @@ class FakeBw:
         self,
         folders: list[dict] | None = None,
         items_by_folder: dict[str, list[dict]] | None = None,
+        sync_fails: bool = False,
     ):
         self.folders = folders or []
         self.items_by_folder = items_by_folder or {}
+        self.sync_fails = sync_fails
         self.log_path: Path | None = None
 
     @property
@@ -148,6 +158,9 @@ class FakeBw:
             for line in self.log_path.read_text(encoding="utf-8").splitlines()
             if line
         ]
+
+    def sync_calls(self) -> list[list[str]]:
+        return [c for c in self.calls if c[:1] == ["sync"]]
 
     def list_items_calls(self) -> list[list[str]]:
         return [c for c in self.calls if c[:2] == ["list", "items"]]
@@ -181,6 +194,7 @@ def install_bw(tmp_path, monkeypatch):
                 {
                     "folders": fake.folders,
                     "items_by_folder": fake.items_by_folder,
+                    "sync_fails": fake.sync_fails,
                 }
             ),
             encoding="utf-8",
@@ -232,6 +246,11 @@ def test_folder_path_lists_each_folder_once(bw_session, install_bw, vault):
     )
 
     assert out == ("DB_PASSWORD=db-secret\nSMTP_PASSWORD=smtp-secret\nDEBUG=False")
+    # The vault is synced exactly once, before the first lookup.
+    assert fake.sync_calls() == [
+        ["sync", "--session", "session-token", "--nointeraction"]
+    ]
+    assert fake.calls[0] == ["sync", "--session", "session-token", "--nointeraction"]
     items_calls = fake.list_items_calls()
     assert [folder_id(call) for call in items_calls] == ["id-prod", "id-shared"]
     assert fake.get_password_calls() == []
@@ -447,6 +466,11 @@ def test_without_folders_uses_one_get_password_per_ref(bw_session, install_bw):
     out = adapter.bitwarden("A=$A\nB=$B", secret_config())
 
     assert out == "A=va\nB=vb"
+    # One sync, before the first `get password`.
+    assert fake.sync_calls() == [
+        ["sync", "--session", "session-token", "--nointeraction"]
+    ]
+    assert fake.calls[0][:1] == ["sync"]
     assert sorted(call[2] for call in fake.get_password_calls()) == ["A", "B"]
     assert fake.list_items_calls() == []
     assert [c for c in fake.calls if c[0] == "list"] == []
@@ -484,7 +508,8 @@ def test_escaped_dollars_are_never_looked_up(bw_session, install_bw):
     assert fake.calls == []
 
 
-def test_password_env_unlocks_without_listing_when_no_refs(monkeypatch, install_bw):
+def test_no_refs_never_contacts_bw(monkeypatch, install_bw):
+    """A literal-only template is rendered without unlock, sync or lookup."""
     monkeypatch.delenv("BW_SESSION", raising=False)
     fake = install_bw(FakeBw(folders=[folder(PROD, "id-prod")]))
 
@@ -493,9 +518,16 @@ def test_password_env_unlocks_without_listing_when_no_refs(monkeypatch, install_
     )
 
     assert out == "LITERAL=plain"
-    assert fake.calls == [
-        ["unlock", "--nointeraction", "--passwordenv", "BW_PASSWORD", "--raw"]
-    ]
+    assert fake.calls == []
+
+
+def test_no_refs_with_session_never_syncs(bw_session, install_bw):
+    fake = install_bw(FakeBw(folders=[folder(PROD, "id-prod")]))
+
+    out = adapter.bitwarden("LITERAL=plain", secret_config(folders=[PROD]))
+
+    assert out == "LITERAL=plain"
+    assert fake.calls == []
 
 
 def test_password_env_unlock_then_folder_resolution(monkeypatch, install_bw, vault):
@@ -515,7 +547,14 @@ def test_password_env_unlock_then_folder_resolution(monkeypatch, install_bw, vau
         "BW_PASSWORD",
         "--raw",
     ]
+    # Sync follows authentication and precedes the first lookup.
     assert fake.calls[1] == [
+        "sync",
+        "--session",
+        "unlocked-session",
+        "--nointeraction",
+    ]
+    assert fake.calls[2] == [
         "list",
         "folders",
         "--raw",
@@ -523,6 +562,46 @@ def test_password_env_unlock_then_folder_resolution(monkeypatch, install_bw, vau
         "unlocked-session",
         "--nointeraction",
     ]
+
+
+def test_sync_runs_once_for_many_refs_and_folders(bw_session, install_bw, vault):
+    fake = install_bw(vault)
+
+    adapter.bitwarden(
+        "DB_PASSWORD=$DB_PASSWORD\nSMTP_PASSWORD=$SMTP_PASSWORD\nAGAIN=$SMTP_PASSWORD",
+        secret_config(folders=[PROD, SHARED]),
+    )
+
+    assert len(fake.sync_calls()) == 1
+    assert fake.calls[0][:1] == ["sync"]
+    lookup_start = min(
+        fake.calls.index(call) for call in fake.calls if call[:1] == ["list"]
+    )
+    assert lookup_start > 0
+
+
+def test_sync_failure_fails_closed_without_echoing_output(bw_session, install_bw):
+    fake = install_bw(
+        FakeBw(
+            folders=[folder(PROD, "id-prod"), folder(SHARED, "id-shared")],
+            items_by_folder={PROD: [login("DB_PASSWORD", "db-secret")]},
+            sync_fails=True,
+        )
+    )
+
+    with pytest.raises(SecretResolutionError) as excinfo:
+        adapter.bitwarden(
+            "DB_PASSWORD=$DB_PASSWORD", secret_config(folders=[PROD, SHARED])
+        )
+
+    message = error_message(excinfo.value)
+    assert message == "Bitwarden vault sync failed"
+    assert "exploded" not in message
+    assert "db-secret" not in message
+    # No stale-cache fallback: nothing is listed or fetched after the failure.
+    assert fake.list_items_calls() == []
+    assert fake.get_password_calls() == []
+    assert len(fake.sync_calls()) == 1
 
 
 def test_bw_output_is_text(bw_session, install_bw, vault):
