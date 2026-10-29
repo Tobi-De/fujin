@@ -43,10 +43,12 @@ dependencies = [
 
 # Secret adapters: `pip install "fujin-cli[bw,env]"`.
 # The `system` adapter is built in; these pull in the plugin distributions.
-optional-dependencies.bw = [ "fujin-secrets-bitwarden>=0.28.0b2" ]
-optional-dependencies.doppler = [ "fujin-secrets-doppler>=0.28.0b2" ]
-optional-dependencies.env = [ "fujin-secrets-env>=0.28.0b2" ]
-optional-dependencies.onepassword = [ "fujin-secrets-1password>=0.28.0b2" ]
+# Keep the floors in lockstep: a stale plugin silently loses adapter features
+# (e.g. the b3 Bitwarden adapter never prompted for a master password).
+optional-dependencies.bw = [ "fujin-secrets-bitwarden>=0.28.0b6" ]
+optional-dependencies.doppler = [ "fujin-secrets-doppler>=0.28.0b6" ]
+optional-dependencies.env = [ "fujin-secrets-env>=0.28.0b6" ]
+optional-dependencies.onepassword = [ "fujin-secrets-1password>=0.28.0b6" ]
 urls.Documentation = "https://github.com/Tobi-De/fujin#readme"
 urls.Issues = "https://github.com/Tobi-De/fujin/issues"
 urls.Source = "https://github.com/Tobi-De/fujin"
