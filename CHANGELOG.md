@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.28.0b4] - 2026-10-29
 
 ### 🚀 Features
 
@@ -13,6 +13,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### 🐛 Bug Fixes
 
 - *(deploy)* Verify no-op state against current; content-check the Caddyfile
+
+### 🚜 Refactor
+
+- *(deploy)* Require flock and drop the noclobber lock fallback
 
 ### ⚡ Performance
 
