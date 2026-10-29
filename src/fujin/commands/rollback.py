@@ -75,27 +75,17 @@ class Rollback(BaseCommand):
     # ------------------------------------------------------------------
 
     def _ensure_new_layout(self, conn) -> None:
-        """Old-layout detection: ``store/`` missing -> user must deploy once."""
+        """Require the release-tree state before rollback can pick a target."""
         app_dir = self.config.app_dir
         _, ok = conn.run(
             f"test -d {serverops.q(f'{app_dir}/store')}", warn=True, hide=True
         )
         if ok:
             return
-        _, has_old = conn.run(
-            f"test -d {serverops.q(self.config.install_dir)}", warn=True, hide=True
-        )
-        old_note = (
-            " Your application still uses the old .install/ layout - it is kept"
-            " in place and is cleaned up by `fujin down`."
-            if has_old
-            else ""
-        )
         raise cappa.Exit(
             "This application was not yet deployed with the release-tree layout.\n"
-            "Deploy once with this version of fujin to migrate"
-            " (the migration is non-destructive).\n"
-            f"Then `fujin rollback` becomes available.{old_note}",
+            "Deploy once with this version of fujin, then"
+            " `fujin rollback` becomes available.",
             code=EXIT_USER_ABORTED,
         )
 

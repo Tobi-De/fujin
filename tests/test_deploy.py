@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 from unittest.mock import MagicMock
 
 import cappa
@@ -31,6 +32,7 @@ from fujin.errors import (
     ConnectionError,
     DeploymentError,
     ImproperlyConfiguredError,
+    SecretResolutionError,
 )
 from fujin.exit_codes import (
     EXIT_DEPLOY_FAILED,
@@ -938,56 +940,6 @@ def test_noop_post_start_hook_runs_in_live_release(
     assert len(cmds) == 1, cmds
     assert "cd /opt/fujin/testapp/current 2>/dev/null" in cmds[0]
     assert "/opt/fujin/testapp/current/bin/notify" in cmds[0]
-
-
-def test_deploy_warns_once_about_rewritten_legacy_units(
-    monkeypatch, minimal_config, tmp_path, capsys
-):
-    """The build result names the rewritten files; deploy prints one warning
-    line before any transfer."""
-    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
-    _staging, result = build_result_for(tmp_path)
-    rewritten = BuildResult(
-        staging_dir=result.staging_dir,
-        bundle_key=result.bundle_key,
-        files=result.files,
-        dist_path=result.dist_path,
-        dist_sha256=result.dist_sha256,
-        legacy_rewrites=(".fujin/systemd/web.service",),
-    )
-    monkeypatch.setattr(deploy_mod.build, "run_build", lambda *a, **k: rewritten)
-
-    cmd._build("")
-
-    err = capsys.readouterr().err
-    assert err.count("legacy .install references") == 1
-    assert ".fujin/systemd/web.service" in err
-
-
-def test_legacy_install_reference_aborts_before_ssh(
-    monkeypatch, minimal_config, tmp_path
-):
-    """An unmappable .install reference fails in the local build, before the
-    SSH connection (and therefore before any server state is touched)."""
-    systemd = minimal_config.local_config_dir / "systemd"
-    systemd.mkdir(parents=True)
-    (systemd / "web.service").write_text(
-        "[Service]\nExecStart={install_dir}/data/tool run\n"
-    )
-    conn_ctx = MagicMock()
-    monkeypatch.setattr(fujin.connection, "connection", conn_ctx)
-
-    cmd = Deploy(no_input=True)
-    cmd.config = minimal_config
-
-    # Deploy re-wraps build failures as a plain cappa.Exit while preserving
-    # the taxonomy code; the message still names the offending file.
-    with pytest.raises(cappa.Exit) as exc_info:
-        cmd()
-    assert exc_info.value.code == EXIT_USER_ABORTED
-    assert "web.service" in str(exc_info.value.message)
-    assert "{shared_dir}" in str(exc_info.value.message)
-    conn_ctx.assert_not_called()
 
 
 # ===========================================================================
@@ -2181,6 +2133,170 @@ def test_noop_still_builds_then_short_circuits(monkeypatch, minimal_config, tmp_
     spies["rsync"].assert_not_called()
     spies["commit"].assert_not_called()
     spies["swap"].assert_not_called()
+
+
+# ===========================================================================
+# Secret resolution and the local build run concurrently
+# ===========================================================================
+
+
+def test_secrets_resolve_concurrently_with_build(monkeypatch, minimal_config, tmp_path):
+    """Resolution and the build rendezvous on a barrier: a sequential
+    implementation would time out there, so passing proves real overlap."""
+    barrier = threading.Barrier(2, timeout=5)
+    threads: dict[str, int] = {}
+
+    def _resolve(env, sc):
+        threads["resolve"] = threading.get_ident()
+        barrier.wait()
+        return env.replace("$STRIPE_TOKEN", SENTINEL)
+
+    monkeypatch.setattr(deploy_mod, "resolve_secrets", _resolve)
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN\nDEBUG=1"
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=State())
+    _staging, result = build_result_for(tmp_path)
+
+    def _run_build(*a, **k):
+        threads["build"] = threading.get_ident()
+        barrier.wait()
+        return result
+
+    monkeypatch.setattr(deploy_mod.build, "run_build", _run_build)
+
+    assert invoke(cmd) == 0
+    # Both phases reached the barrier (neither raised BrokenBarrierError) and
+    # ran on distinct worker threads; the deploy then proceeded over SSH.
+    assert not barrier.broken
+    assert threads["resolve"] != threads["build"]
+    assert threads["resolve"] != threading.get_ident()
+    spies["conn_ctx"].assert_called()
+    spies["commit"].assert_called()
+
+
+def test_secret_failure_while_build_runs_aborts_before_ssh(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A resolution failure aborts with exit 4 while the build is still
+    running; the executor joins the build thread before the lock is released
+    and no SSH connection is opened."""
+    build_started = threading.Event()
+    release_build = threading.Event()
+    threads: dict[str, threading.Thread] = {}
+
+    def _resolve(env, sc):
+        assert build_started.wait(timeout=5)
+        try:
+            raise SecretResolutionError("vault unavailable")
+        finally:
+            # Let the still-running build finish; the deploy already failed.
+            release_build.set()
+
+    monkeypatch.setattr(deploy_mod, "resolve_secrets", _resolve)
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN"
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    _staging, result = build_result_for(tmp_path)
+
+    def _run_build(*a, **k):
+        threads["build"] = threading.current_thread()
+        build_started.set()
+        assert release_build.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(deploy_mod.build, "run_build", _run_build)
+
+    with pytest.raises(SecretResolutionError) as excinfo:
+        cmd()
+    assert excinfo.value.code == EXIT_DEPLOY_FAILED
+    assert "vault unavailable" in str(excinfo.value.message)
+    spies["conn_ctx"].assert_not_called()
+    spies["rsync"].assert_not_called()
+    # The executor shut down and joined the build thread: no dangling worker.
+    assert not threads["build"].is_alive()
+
+
+def test_build_failure_while_secrets_resolve_is_redacted(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A build failure racing a successful resolution keeps its exit code and
+    still redacts the resolved secret (the build waits for registration)."""
+    build_started = threading.Event()
+
+    def _resolve(env, sc):
+        assert build_started.wait(timeout=5)
+        return env.replace("$STRIPE_TOKEN", SENTINEL)
+
+    monkeypatch.setattr(deploy_mod, "resolve_secrets", _resolve)
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN"
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+
+    def _run_build(*a, **k):
+        build_started.set()
+        raise BuildError(f"build blew up with {SENTINEL} everywhere")
+
+    monkeypatch.setattr(deploy_mod.build, "run_build", _run_build)
+
+    with pytest.raises(DeploymentError) as excinfo:
+        cmd()
+    assert excinfo.value.code == EXIT_DEPLOY_FAILED
+    assert SENTINEL not in str(excinfo.value.message)
+    assert "<$STRIPE_TOKEN>" in str(excinfo.value.message)
+    spies["conn_ctx"].assert_not_called()
+    spies["rsync"].assert_not_called()
+
+
+def test_manifest_env_and_digest_match_sequential_inputs(
+    monkeypatch, minimal_config, tmp_path
+):
+    """The concurrent path still builds the same manifest: ``.env`` carries the
+    resolved text and the digest equals the sequential computation."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        deploy_mod,
+        "resolve_secrets",
+        lambda env, sc: env.replace("$STRIPE_TOKEN", SENTINEL),
+    )
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN\nDEBUG=1"
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=State())
+    _staging, result = build_result_for(tmp_path)
+    monkeypatch.setattr(deploy_mod.build, "run_build", lambda *a, **k: result)
+
+    real_build_manifest = deploy_mod.m.build_manifest
+
+    def _spy(**kwargs):
+        manifest = real_build_manifest(**kwargs)
+        captured["manifest"] = manifest
+        return manifest
+
+    monkeypatch.setattr(deploy_mod.m, "build_manifest", _spy)
+
+    assert invoke(cmd) == 0
+
+    manifest = captured["manifest"]
+    host = minimal_config.hosts[0]
+    resolved = f"STRIPE_TOKEN={SENTINEL}\nDEBUG=1"
+    env_entry = manifest.entries[deploy_mod.m.ENV_PATH]
+    assert env_entry.sha256 == deploy_mod.m.hash_bytes(resolved)
+
+    expected = deploy_mod.m.build_manifest(
+        app_name=minimal_config.app_name,
+        version=minimal_config.local_version,
+        config_fingerprint=deploy_mod.m.config_fingerprint(minimal_config, host),
+        dist_sha256=result.dist_sha256,
+        files={
+            **result.files,
+            deploy_mod.m.ENV_PATH: InputFile(content=resolved.encode()),
+        },
+        host=host.name or host.address,
+        python_version=minimal_config.python_version or "",
+    )
+    assert deploy_mod.m.release_digest(manifest) == deploy_mod.m.release_digest(
+        expected
+    )
+    spies["commit"].assert_called()
 
 
 # ===========================================================================

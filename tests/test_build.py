@@ -64,13 +64,32 @@ def test_caddyfile_shared_dir_is_interpolated(project):
     )
     config = make_config(project)
 
-    _sources, _tree, caddyfile, _assets, unresolved, _rewrites = _gather_sources(
+    _sources, _tree, caddyfile, _assets, unresolved = _gather_sources(
         config, host=config.hosts[0], assets=None
     )
 
     assert unresolved == set()
     assert caddyfile is not None
     assert "root * /opt/fujin/testapp/shared" in caddyfile
+
+
+def test_caddy_placeholders_are_left_literal(project):
+    """Caddy's own ``{host}``/``{uri}`` tokens are not fujin variables.
+
+    They are reported as unresolved and deployed verbatim, exactly like before
+    the release-tree layout work: making them fatal would reject valid
+    Caddyfiles.
+    """
+    (project / ".fujin" / "Caddyfile").write_text(
+        "example.com {\n    redir https://{host}{uri}\n}\n"
+    )
+    config = make_config(project)
+
+    pre = prebuild(config, host=config.hosts[0])
+
+    assert pre.caddyfile is not None
+    assert "https://{host}{uri}" in pre.caddyfile
+    assert pre.unresolved == {"host", "uri"}
 
 
 def test_build_produces_staging_tree(project):

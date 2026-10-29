@@ -30,7 +30,6 @@ import contextlib
 import fcntl
 import logging
 import os
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -39,7 +38,7 @@ from pathlib import Path
 import msgspec
 
 from fujin.config import Config, HostConfig, InstallationMode, get_git_short_hash
-from fujin.errors import BuildError, DeploymentError, ImproperlyConfiguredError
+from fujin.errors import BuildError, DeploymentError
 from fujin.formatting import safe_format
 from fujin.manifest import InputFile, bundle_key, hash_bytes
 
@@ -68,9 +67,6 @@ class BuildResult(msgspec.Struct, frozen=True):
     dist_path: Path
     #: sha256 of the dist file
     dist_sha256: str
-    #: local unit/dropin files whose legacy ``.install`` references were
-    #: rewritten to the release tree (deploy prints one warning naming them)
-    legacy_rewrites: tuple[str, ...] = ()
 
 
 class _BuiltRecord(msgspec.Struct, kw_only=True):
@@ -95,7 +91,6 @@ def _interpolation_context(config: Config, host: HostConfig) -> dict[str, object
         "app_user": config.app_user,
         "version": config.version,
         "app_dir": config.app_dir,
-        "install_dir": config.install_dir,
         # Persistent app data, outside the immutable release tree (#74).
         "shared_dir": f"{config.app_dir}/shared",
         "user": host.user,
@@ -113,73 +108,6 @@ def _interpolation_context(config: Config, host: HostConfig) -> dict[str, object
     return context
 
 
-def _legacy_install_rewrites(config: Config) -> tuple[tuple[str, str], ...]:
-    """Legacy (0.27) ``.install`` references -> release-tree equivalents.
-
-    Both the raw template token (``{install_dir}``) and its already-resolved
-    literal form (``/opt/fujin/<app>/.install``) are rewritten, so a unit
-    copied verbatim from an upgraded host or hardcoded from the old layout
-    stops pointing at the preserved legacy directory. Only known references
-    are rewritten; anything else is rejected by
-    :func:`_reject_legacy_install_refs`.
-    """
-    app_dir = config.app_dir
-    legacy = f"{app_dir}/.install"
-    pairs = [
-        ("{install_dir}/.venv", "{app_dir}/current/venv"),
-        ("{install_dir}/.env", "{app_dir}/current/.env"),
-        (f"{legacy}/.venv", "{app_dir}/current/venv"),
-        (f"{legacy}/.env", "{app_dir}/current/.env"),
-    ]
-    if config.installation_mode is InstallationMode.BINARY:
-        # ``{install_dir}/{app_name}`` is the old binary launch path. The
-        # boundary check keeps ``myapp-worker`` from matching ``myapp``.
-        binary = "{app_dir}/current/bin/" + config.app_name
-        pairs += [
-            (f"{{install_dir}}/{config.app_name}", binary),
-            (f"{legacy}/{config.app_name}", binary),
-        ]
-    return tuple((re.escape(old) + r"(?![\w.-])", new) for old, new in pairs)
-
-
-def _rewrite_legacy_install_refs(text: str, config: Config) -> tuple[str, bool]:
-    """Rewrite known legacy ``.install`` references in *text*.
-
-    Returns ``(text, changed)``. Runs before template interpolation so the
-    replacement tokens resolve through the normal context.
-    """
-    rewritten = text
-    for pattern, new in _legacy_install_rewrites(config):
-        rewritten = re.sub(pattern, new, rewritten)
-    return rewritten, rewritten != text
-
-
-def _reject_legacy_install_refs(text: str, display: str, config: Config) -> None:
-    """Fail closed on any ``.install`` reference left after rendering.
-
-    Known references were rewritten before interpolation; what is left is a
-    path this fujin cannot map (e.g. bundled data under ``.install``). The
-    release tree is immutable, so code must come from
-    ``{app_dir}/current/...`` and mutable state from ``{shared_dir}``.
-    """
-    has_token = "{install_dir}" in text
-    has_path = "/.install/" in text or re.search(
-        r"(?<![\w.-])" + re.escape(config.install_dir) + r"(?![\w.-])", text
-    )
-    if not has_token and not has_path:
-        return
-    found = "{install_dir}" if has_token else ".install"
-    raise ImproperlyConfiguredError(
-        f"{display} still references the legacy .install layout ({found}).\n"
-        "  - Code and entry points: {app_dir}/current/venv/... or"
-        " {app_dir}/current/bin/<app>\n"
-        "  - Environment: {app_dir}/current/.env\n"
-        "  - Persistent data: {shared_dir}\n"
-        "The .install directory is preserved for backwards compatibility and"
-        " is not updated by deploys."
-    )
-
-
 def _gather_sources(
     config: Config,
     *,
@@ -191,15 +119,12 @@ def _gather_sources(
     str | None,  # interpolated Caddyfile
     dict[str, str],  # interpolated asset content: "assets/<name>" -> text
     set[str],  # unresolved template variables
-    tuple[str, ...],  # local unit/dropin files rewritten from legacy .install refs
 ]:
     """Collect and interpolate every client-known non-code input.
 
-    Unit/dropin/Caddyfile sources are checked before interpolation: known
-    legacy ``.install`` references are rewritten to the release tree, and any
-    remaining ``.install`` reference fails closed (before any SSH I/O). The
-    raw sources are what ``bundle_key`` hashes, so the rewrite is a pure
-    rendering step that never changes the cache key.
+    The raw sources are what ``bundle_key`` hashes; interpolation is a pure
+    rendering step that never changes the cache key. Unresolved variables are
+    reported for the caller to fail closed on.
     """
     context = _interpolation_context(config, host)
 
@@ -210,25 +135,16 @@ def _gather_sources(
     unit_sources: dict[str, str] = {}
     unit_tree: dict[str, str] = {}
     unresolved: set[str] = set()
-    rewritten: list[str] = []
 
-    def resolve(display: str, raw: str, *, legacy_check: bool = True) -> str:
-        if legacy_check:
-            raw, changed = _rewrite_legacy_install_refs(raw, config)
-            if changed:
-                rewritten.append(display)
+    def resolve(raw: str) -> str:
         resolved, found = safe_format(raw, **context)
         unresolved.update(found)
-        if legacy_check:
-            _reject_legacy_install_refs(resolved, display, config)
         return resolved
 
     for du in config.deployed_units:
         raw = du.service_file.read_text()
         unit_sources[f"service/{du.service_file.name}"] = raw
-        unit_tree[f"{SYSTEMD_DIR}/{du.template_service_name}"] = resolve(
-            str(du.service_file), raw
-        )
+        unit_tree[f"{SYSTEMD_DIR}/{du.template_service_name}"] = resolve(raw)
         for unit_file, template_name in (
             (du.socket_file, du.template_socket_name),
             (du.timer_file, du.template_timer_name),
@@ -237,7 +153,7 @@ def _gather_sources(
                 continue
             raw = unit_file.read_text()
             unit_sources[f"unit/{unit_file.name}"] = raw
-            unit_tree[f"{SYSTEMD_DIR}/{template_name}"] = resolve(str(unit_file), raw)
+            unit_tree[f"{SYSTEMD_DIR}/{template_name}"] = resolve(raw)
 
     local_systemd = config.local_config_dir / SYSTEMD_DIR
     common_dir = local_systemd / "common.d"
@@ -246,7 +162,7 @@ def _gather_sources(
             key = f"dropin/common.d/{dropin.name}"
             unit_sources[key] = dropin.read_text()
             unit_tree[f"{SYSTEMD_DIR}/common.d/{dropin.name}"] = resolve(
-                str(dropin), unit_sources[key]
+                unit_sources[key]
             )
 
     # Per-service dropin dirs are named after the LOCAL unit file
@@ -259,23 +175,19 @@ def _gather_sources(
             key = f"dropin/{du.name}.service.d/{dropin.name}"
             unit_sources[key] = dropin.read_text()
             unit_tree[f"{SYSTEMD_DIR}/{du.template_service_name}.d/{dropin.name}"] = (
-                resolve(str(dropin), unit_sources[key])
+                resolve(unit_sources[key])
             )
 
     caddyfile: str | None = None
     if config.caddyfile_exists:
-        caddyfile = resolve(
-            str(config.caddyfile_path), config.caddyfile_path.read_text()
-        )
+        caddyfile = resolve(config.caddyfile_path.read_text())
 
     asset_tree: dict[str, str] = {}
     for name, content in (assets or {}).items():
         text = content.decode("utf-8") if isinstance(content, bytes) else content
-        asset_tree[f"{ASSETS_DIR}/{name}"] = resolve(
-            f"asset/{name}", text, legacy_check=False
-        )
+        asset_tree[f"{ASSETS_DIR}/{name}"] = resolve(text)
 
-    return unit_sources, unit_tree, caddyfile, asset_tree, unresolved, tuple(rewritten)
+    return unit_sources, unit_tree, caddyfile, asset_tree, unresolved
 
 
 def _requirements_content(config: Config, *, after_build: bool) -> str:
@@ -496,7 +408,6 @@ class Prebuild:
     requirements: str
     pyproject_text: str | None
     unresolved: set[str]
-    legacy_rewrites: tuple[str, ...] = ()
 
     def key_with_requirements(self, config: Config, requirements: str) -> str:
         """Recompute the key with the post-build requirements content."""
@@ -553,7 +464,6 @@ def prebuild(
         caddyfile,
         asset_tree,
         unresolved,
-        legacy_rewrites,
     ) = _gather_sources(config, host=host, assets=assets)
     if unresolved:
         logger.warning(
@@ -588,7 +498,6 @@ def prebuild(
         requirements=requirements,
         pyproject_text=pyproject_text,
         unresolved=set(unresolved),
-        legacy_rewrites=legacy_rewrites,
     )
 
 
@@ -696,7 +605,6 @@ def _run_build_locked(
                 files=files,
                 dist_path=dist_path,
                 dist_sha256=dist_sha256,
-                legacy_rewrites=pre.legacy_rewrites,
             )
         if record is not None:
             logger.warning("Build cache verification failed; rebuilding")
@@ -731,7 +639,6 @@ def _run_build_locked(
         files=files,
         dist_path=dist_path,
         dist_sha256=dist_sha256,
-        legacy_rewrites=pre.legacy_rewrites,
     )
 
 

@@ -74,7 +74,6 @@ def test_migrate_generated_files_use_deploy_placeholders(legacy_project):
     generated = _all_generated_text(legacy_project)
     assert "fujin.toml" in generated
     for relpath, text in generated.items():
-        assert "{install_dir}" not in text, relpath
         assert ".venv/" not in text.replace("{app_dir}/current/venv/", ""), relpath
 
 

@@ -2,9 +2,6 @@
 
 Error handling, release selection logic, single-level failure semantics and
 pure state updates - all without live SSH integration.
-
-Tests pinning the obsolete ``.versions/*.pyz`` uninstall/install flow were
-deleted along with that flow.
 """
 
 from __future__ import annotations
@@ -149,7 +146,6 @@ MANIFEST_RESPONSES = [
 
 LAYOUT_RESPONSES = [
     ("test -d /opt/fujin/testapp/store", ("", True)),
-    ("test -d /opt/fujin/testapp/.install", ("", False)),
 ]
 
 DEFAULT_CONN_RESPONSES = [
@@ -450,12 +446,19 @@ def test_strict_no_targets_errors(monkeypatch, minimal_config):
 # ===========================================================================
 
 
-def test_old_layout_without_store_dir_errors(monkeypatch, minimal_config):
+def test_missing_store_dir_errors(monkeypatch, minimal_config):
     conn = FakeConn([("test -d /opt/fujin/testapp/store", ("", False))])
     cmd, *_ = setup_rollback(
         monkeypatch, minimal_config, conn, state=None, current_manifest=None
     )
-    assert exit_code_of(lambda: cmd()) == EXIT_USER_ABORTED
+    with pytest.raises(cappa.Exit) as exc_info:
+        cmd()
+    assert exc_info.value.code == EXIT_USER_ABORTED
+    message = str(exc_info.value.message)
+    assert "not yet deployed with the release-tree layout" in message
+    assert ".install" not in message
+    # The guard needs only the store probe; nothing else is inspected.
+    assert conn.calls[0] == "test -d /opt/fujin/testapp/store"
 
 
 def test_missing_state_errors(monkeypatch, minimal_config):

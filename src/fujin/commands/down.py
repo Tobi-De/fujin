@@ -54,9 +54,6 @@ class Down(BaseCommand):
             self.output.info("Tearing down project...")
 
             app_dir_q = shlex.quote(self.config.app_dir)
-            install_dir_q = shlex.quote(self.config.install_dir)
-            res, ok = conn.run(f"cat {install_dir_q}/.version", warn=True, hide=True)
-            version = res.strip() if ok else self.config.version
 
             errors = False
 
@@ -69,25 +66,6 @@ class Down(BaseCommand):
                     pty=True,
                 )
                 errors |= not stopped
-
-            # Legacy-layout apps shipped a Python uninstaller inside a .pyz.
-            # Running an interpreter as root is exactly the capability the
-            # scoped sudo rule refuses to grant, so that uninstaller is left
-            # to the administrator; the rest of the teardown still runs.
-            bundle_path = (
-                f"{install_dir_q}/.versions/{self.config.app_name}-{version}.pyz"
-            )
-            _, bundle_exists = conn.run(f"test -f {bundle_path}", warn=True, hide=True)
-            if bundle_exists:
-                self.output.warning(
-                    "This host still uses the legacy .pyz installation layout "
-                    f"({bundle_path}). Fujin no longer executes interpreters as "
-                    "root, so the legacy uninstaller was NOT run. As an "
-                    "administrator, run the interpreter on it yourself: "
-                    f"python3 {bundle_path} uninstall, then the "
-                    "release-tree teardown below removes the unit files and "
-                    "the app directory."
-                )
 
             # Release-tree teardown: remove this app's unit files (incl.
             # stray instances), their dropin dirs and wants-symlinks,
@@ -150,7 +128,7 @@ class Down(BaseCommand):
                 app_name=self.config.app_name,
                 operation="full-down" if self.full else "down",
                 host=self.selected_host.name or self.selected_host.address,
-                version=version,
+                version=self.config.version,
             )
 
         self.output.success("Project teardown completed successfully!")

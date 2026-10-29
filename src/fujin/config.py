@@ -220,11 +220,6 @@ class Config(msgspec.Struct, kw_only=True, dict=True, forbid_unknown_fields=True
     def app_dir(self) -> str:
         return f"{self.apps_dir}/{self.app_name}"
 
-    @property
-    def install_dir(self) -> str:
-        """Get .install subdirectory path (deployment infrastructure)."""
-        return f"{self.app_dir}/.install"
-
     def get_distfile_path(self, version: str | None = None) -> Path:
         version = version or self.version
         return Path(self.distfile.format(version=version))

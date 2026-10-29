@@ -457,8 +457,6 @@ def ensure_layout(conn: Any, app_dir: str, app_user: str, deploy_user: str) -> N
     (``{deploy_user}:{app_user}``); ``shared/`` is group-writable ``2775``;
     ``store/lock`` is 0664. Directory modes are setgid so files created under
     them inherit the ``app_user`` group.
-
-    Old ``.install/`` and ``.versions/`` directories are left untouched.
     """
     app_q = shlex.quote(app_dir)
     script = (

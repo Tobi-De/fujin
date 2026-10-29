@@ -41,10 +41,9 @@ def test_init_creates_fujin_toml_with_simple_profile(tmp_path, monkeypatch):
         assert (clean_dir / ".fujin/systemd/web.service").exists()
         assert (clean_dir / ".fujin/Caddyfile").exists()
 
-        # Service points into the release tree, not the deprecated install dir;
-        # the main command stays the framework-agnostic template placeholder.
+        # Service points into the release tree; the main command stays the
+        # framework-agnostic template placeholder.
         web_service = (clean_dir / ".fujin/systemd/web.service").read_text()
-        assert "{install_dir}" not in web_service
         assert "ExecStart={app_dir}/current/venv/bin/python -m myapp.web" in web_service
         assert "current/venv/bin/" in web_service
         assert "gunicorn" not in web_service
@@ -83,9 +82,7 @@ def test_init_with_profiles(tmp_path, monkeypatch, profile):
             line for line in web_service.splitlines() if line.startswith("ExecStart=")
         )
 
-        # Every profile references the release tree, never the deprecated
-        # install directory or a bare checkout path.
-        assert "{install_dir}" not in web_service
+        # Every profile references the release tree, never a bare checkout path.
         assert ".install" not in web_service
         assert "current/" in exec_start
         assert "{app_dir}/current/.env" in web_service
@@ -111,7 +108,6 @@ def test_init_with_profiles(tmp_path, monkeypatch, profile):
 
             caddyfile = (tmp_path / ".fujin/Caddyfile").read_text()
             assert "root * {app_dir}/current/staticfiles/" in caddyfile
-            assert "{install_dir}" not in caddyfile
         else:
             binary = f"{{app_dir}}/current/bin/{config['app']}"
             assert exec_start == f"ExecStart={binary} prodserver"
@@ -144,7 +140,7 @@ def test_init_skips_when_fujin_toml_exists(tmp_path, monkeypatch):
         )
 
 
-def test_init_skips_when_install_dir_exists(tmp_path, monkeypatch):
+def test_init_skips_when_config_dir_exists(tmp_path, monkeypatch):
     """init skips and shows warning when .fujin/ directory already exists."""
     monkeypatch.chdir(tmp_path)
     # Create existing directory

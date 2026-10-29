@@ -6,8 +6,10 @@ import shlex
 import signal
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +57,17 @@ HEALTH_CHECK_INTERVAL = serverops.HEALTH_CHECK_INTERVAL
 
 #: A ``[health_check]`` probe rendered once, before any server I/O.
 HealthProbe = serverops.HealthProbe
+
+
+def _wait_for_secrets(secrets_ready: threading.Event | None) -> None:
+    """Block until the concurrent resolution phase registered its secrets.
+
+    A build failure is redacted only against the resolved values; the deploy
+    is waiting on resolution first anyway, and a resolution failure wins over
+    a concurrent build failure.
+    """
+    if secrets_ready is not None:
+        secrets_ready.wait()
 
 
 def _comparable(manifest: m.Manifest) -> m.Manifest:
@@ -303,63 +316,53 @@ class Deploy(BaseCommand):
         host = self.selected_host
         app_dir = config.app_dir
 
-        # A fresh deploy starts with an empty redaction registry; resolved
-        # secrets are registered right after resolution below.
-        clear_secrets()
-
         logger.debug("Starting deployment for %s", config.app_name)
         logger.debug("Target host: %s", host.address)
 
-        secret_config = config.effective_secrets(host)
-        # The host env overlays the project template (#84); both are raw
-        # template text, so the merge precedes parsing/rendering.
-        env_template = config.effective_env(host)
-        # Refs come from the env *template*, not the rendered file: `$$REF`
-        # renders a literal `$REF` and must not be treated as unresolved.
-        secret_aliases = secret_refs(env_template)
-        if secret_config:
+        # Resolution and the build are independent local phases (the bundle
+        # key excludes secret values), so they run concurrently below. The
+        # info lines are printed here, before submitting, so the two phases
+        # never interleave their output.
+        if config.effective_secrets(host):
             self.output.info("Resolving secrets from configuration...")
-            parsed_env = resolve_secrets(env_template, secret_config)
-            # Track every resolved secret value so all output paths render it
-            # as `<$REF>` instead of the raw value (never registered in the
-            # build cache; #77).
-            # Register only values that really are secret references;
-            # registering every env value would make unrelated output
-            # (DEBUG=1, etc.) redact as a false positive.
-            resolved_values = env_values(parsed_env)
-            register_secrets(
-                {k: resolved_values[k] for k in secret_aliases if k in resolved_values},
-                secret_aliases,
-            )
-        else:
-            parsed_env = render_template(env_template)
+        self.output.info("Building application ...")
 
-        context = build._interpolation_context(config, host)
-        resolved_env = self._validate_env_placeholders(parsed_env, context)
-        self._fail_closed_on_unresolved_secrets(
-            resolved_env, secret_aliases, adapter_configured=secret_config is not None
-        )
+        # Set by the resolution path once values are registered for
+        # redaction. A concurrently failing build waits for it before
+        # redacting its message (and on resolution failure the deploy reports
+        # that error first, so the build error is never shown).
+        secrets_ready = threading.Event()
 
-        # The probe is configuration, not server state: validate/render it
-        # once here so a bad placeholder aborts before any SSH connection
-        # (fail-closed) and after activation there is nothing left to render.
-        probe = self._build_health_probe(context)
-
-        # The build is local and independent of the server (the bundle key
-        # excludes secret values), so it runs before any SSH I/O: a slow build
-        # no longer holds an idle connection and the remote deploy lock, and a
-        # build failure aborts before the server is touched.
+        # Both phases are local and independent of the server, so they run
+        # before any SSH I/O: a slow build no longer holds an idle connection
+        # and the remote deploy lock, and either failure aborts before the
+        # server is touched.
         #
         # The local build lock spans the build AND the whole transfer:
         # ``_deploy`` writes the rendered ``.env``/``manifest.json`` into the
         # cached staging tree and rsyncs it, so releasing after the build
         # would let a concurrent deploy observe those files or rmtree the
-        # tree mid-transfer. ``run_build`` therefore runs unlocked here.
+        # tree mid-transfer. ``run_build`` therefore runs unlocked here, and
+        # the executor is shut down (joining the build thread) before the
+        # lock is released.
         with build.build_lock(config):
-            result, client_manifest, client_digest = self._build(resolved_env)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                secrets_future = executor.submit(self._resolve_env, host, secrets_ready)
+                build_future = executor.submit(self._run_build, secrets_ready)
+                # Secrets first: a resolution failure takes precedence over a
+                # concurrent build failure.
+                resolved_env = secrets_future.result()
+                result = build_future.result()
+
+            context = build._interpolation_context(config, host)
+            # The probe is configuration, not server state: validate/render
+            # it once here so a bad placeholder aborts before any SSH
+            # connection (fail-closed) and after activation there is nothing
+            # left to render.
+            probe = self._build_health_probe(context)
+            client_manifest, client_digest = self._manifest(result, resolved_env)
 
             with connection.connection(host=host, compress=False) as conn:
-                self._notice_old_layout(conn)
                 serverops.ensure_app_user(conn, config.app_user or config.app_name)
                 serverops.ensure_layout(
                     conn, app_dir, config.app_user or config.app_name, host.user
@@ -704,16 +707,69 @@ class Deploy(BaseCommand):
     # Orchestration
     # =======================================================================================
 
-    def _build(self, resolved_env: str) -> tuple[build.BuildResult, m.Manifest, str]:
-        """Run the local build and derive the client manifest and digest.
+    def _resolve_env(self, host, secrets_ready: threading.Event | None = None) -> str:
+        """Resolve the host env file and register resolved secrets.
+
+        Runs concurrently with the local build (see :meth:`__call__`), before
+        any SSH I/O. ``secrets_ready`` is set once the values are registered
+        (also on failure, in ``finally``), so a concurrently failing build can
+        wait before redacting its message.
+        """
+        config = self.config
+        try:
+            # A fresh deploy starts with an empty redaction registry; resolved
+            # secrets are registered right after resolution.
+            clear_secrets()
+
+            secret_config = config.effective_secrets(host)
+            # The host env overlays the project template (#84); both are raw
+            # template text, so the merge precedes parsing/rendering.
+            env_template = config.effective_env(host)
+            # Refs come from the env *template*, not the rendered file: `$$REF`
+            # renders a literal `$REF` and must not be treated as unresolved.
+            secret_aliases = secret_refs(env_template)
+            if secret_config:
+                parsed_env = resolve_secrets(env_template, secret_config)
+                # Track every resolved secret value so all output paths render
+                # it as `<$REF>` instead of the raw value (never registered in
+                # the build cache; #77).
+                # Register only values that really are secret references;
+                # registering every env value would make unrelated output
+                # (DEBUG=1, etc.) redact as a false positive.
+                resolved_values = env_values(parsed_env)
+                register_secrets(
+                    {
+                        k: resolved_values[k]
+                        for k in secret_aliases
+                        if k in resolved_values
+                    },
+                    secret_aliases,
+                )
+            else:
+                parsed_env = render_template(env_template)
+
+            context = build._interpolation_context(config, host)
+            resolved_env = self._validate_env_placeholders(parsed_env, context)
+            self._fail_closed_on_unresolved_secrets(
+                resolved_env,
+                secret_aliases,
+                adapter_configured=secret_config is not None,
+            )
+            return resolved_env
+        finally:
+            if secrets_ready is not None:
+                secrets_ready.set()
+
+    def _run_build(
+        self, secrets_ready: threading.Event | None = None
+    ) -> build.BuildResult:
+        """Run the local build (unlocked: the deploy holds ``build_lock``).
 
         Runs before any SSH I/O (see :meth:`__call__`); build failures keep
         their exit-code taxonomy and never leak secret values through the
         message.
         """
         config = self.config
-
-        self.output.info("Building application ...")
         try:
             result = build.run_build(
                 config,
@@ -723,6 +779,10 @@ class Deploy(BaseCommand):
                 lock=False,
             )
         except DeploymentError as exc:
+            # Resolution runs concurrently: wait until resolved values are
+            # registered before redacting (the deploy reports a resolution
+            # failure first if both fail).
+            _wait_for_secrets(secrets_ready)
             raw = str(exc.message)
             wrapped = redact(raw)
             # Preserve the taxonomy code (e.g. 4 for build failures).
@@ -732,24 +792,25 @@ class Deploy(BaseCommand):
         except cappa.Exit as exc:
             # Build failures surface as cappa.Exit too (BuildError derives
             # from it): preserve the exit code, but never echo a secret
-            # through the message.
+            # through the message. ``cappa.Exit`` is a ``SystemExit``, so it
+            # needs its own handler.
+            _wait_for_secrets(secrets_ready)
             if exc.message:
                 raise cappa.Exit(redact(str(exc.message)), code=exc.code) from None
             raise
         except Exception as exc:
+            _wait_for_secrets(secrets_ready)
             raw = str(exc)
             wrapped = redact(raw)
             raise DeploymentError(wrapped) from (exc if wrapped == raw else None)
-        files = dict(result.files)
-        if result.legacy_rewrites:
-            # 0.27 units point at the preserved .install directory; the build
-            # already rewrote them to the release tree. Say so once, before any
-            # SCP/rsync, so a silent venv/user miss is explainable.
-            self.output.warning(
-                "Rewrote legacy .install references to {app_dir}/current/..."
-                " in: " + ", ".join(result.legacy_rewrites)
-            )
+        return result
 
+    def _manifest(
+        self, result: build.BuildResult, resolved_env: str
+    ) -> tuple[m.Manifest, str]:
+        """Derive the client manifest and release digest from the build."""
+        config = self.config
+        files = dict(result.files)
         # The rendered .env is deploy-time state (kind ``env``), never
         # build-cache content (#77): it is written into the staging tree for
         # the transfer only, and removed again afterwards so the cache stays
@@ -767,7 +828,7 @@ class Deploy(BaseCommand):
             host=self.selected_host.name or self.selected_host.address,
             python_version=config.python_version or "",
         )
-        return result, client_manifest, m.release_digest(client_manifest)
+        return client_manifest, m.release_digest(client_manifest)
 
     def _deploy(
         self,
@@ -1784,22 +1845,11 @@ class Deploy(BaseCommand):
         fatal = phase != "post_start"
         self.output.info(f"Running {label} hooks...")
 
-        if release_path is None:
-            release_dir = f"{self.config.app_dir}/current"
-            # Upgraded hosts may still only have the legacy .install/.env.
-            select_env = (
-                f"if [ -f {serverops.q(f'{release_dir}/.env')} ]; then "
-                f"source {serverops.q(f'{release_dir}/.env')}; else "
-                f"source {serverops.q(f'{self.config.install_dir}/.env')}"
-                " 2>/dev/null; fi"
-            )
-        else:
-            release_dir = release_path
-            select_env = f"source {serverops.q(f'{release_dir}/.env')}"
+        release_dir = release_path or f"{self.config.app_dir}/current"
+        select_env = f"source {serverops.q(f'{release_dir}/.env')}"
         context = {
             **context,
             "app_dir": release_dir,
-            "install_dir": release_dir,
         }
 
         for raw in commands:
@@ -1915,24 +1965,6 @@ class Deploy(BaseCommand):
     # =======================================================================================
     # Presentation
     # =======================================================================================
-
-    def _notice_old_layout(self, conn) -> None:
-        """Non-destructive old-layout notice: `.install/` present, `store/` absent."""
-        _, has_old = conn.run(
-            f"test -d {serverops.q(self.config.install_dir)}", warn=True, hide=True
-        )
-        _, has_store = conn.run(
-            f"test -d {serverops.q(f'{self.config.app_dir}/store')}",
-            warn=True,
-            hide=True,
-        )
-        if has_old and not has_store:
-            self.output.warning(
-                "This application uses the legacy `.install/` layout. It is kept"
-                " untouched; a fresh release tree (``current``, ``releases/``,"
-                " ``store/``) is created next. The old directories are removed"
-                " by `fujin down`."
-            )
 
     def _show_deployment_summary(self):
         console = Console()
