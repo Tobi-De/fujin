@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - *(secrets)* Bitwarden 2FA trusted devices and pre-resolve sync
 
+### 🐛 Bug Fixes
+
+- *(deploy)* Verify no-op state against current; content-check the Caddyfile
+
 ### ⚡ Performance
 
 - *(deploy)* Resolve secrets concurrently with the local build

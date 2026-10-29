@@ -50,7 +50,7 @@ LOCK_TTL = 7200
 LOCK_POLL_INTERVAL = 0.05
 LOCK_POLL_ATTEMPTS = 40
 LOCK_PATH = "store/lock"
-LEGACY_LOCK_PATH = ".deploy_lock"
+
 STATE_PATH = "store/state.json"
 MANIFEST_PATH = "manifest.json"
 ENV_PATH = ".env"
@@ -512,149 +512,147 @@ def ensure_app_user(conn: Any, app_user: str) -> None:
 def acquire_lock(conn: Any, app_dir: str, *, ttl: int = LOCK_TTL) -> str:
     """Take the deploy lock, failing loudly if another deployment holds it.
 
-    Two belts:
-
-    1. ``flock`` on ``store/lock`` held by a detached holder process for
-       ``ttl`` seconds (preferred, works across shells). The holder takes
-       the flock FIRST (``flock -n 9 || exit 1``) and writes
-       ``<pid>-<token>`` to ``store/lock.holder`` only afterwards, so a
-       holder that loses the race exits without touching the marker of
-       whoever holds the lock. Every acquisition attempt uses a fresh random
-       token and the parent accepts a probe line only when it names that
-       token AND the flock is still taken: a blocked or foreign holder can
-       never be mistaken for our success. A stale marker (dead pid, flock
-       free) is cleaned up and retried once.
-    2. The legacy noclobber ``.deploy_lock`` file (``set -C``) only when
-       ``flock`` is unavailable on the host.
-
-    A foreign *live* holder never causes a belt switch: we raise rather than
-    grab the noclobber file the flock holder knows nothing about.
+    One belt, ``flock`` (util-linux) required: the lock is held on
+    ``store/lock`` by a detached holder process for ``ttl`` seconds, which
+    works across shells. The holder first verifies ``flock`` exists (writing
+    ``NOFLOCK`` to ``store/lock.holder`` and exiting when it does not), then
+    takes the flock (``flock -n 9 || exit 1``) and writes
+    ``<pid>-<token>`` to the marker only afterwards, so a holder that loses
+    the race exits without touching the marker of whoever holds the lock.
+    Every acquisition attempt uses a fresh random token and the parent
+    accepts a probe line only when it names that token AND the flock is
+    still taken: a blocked or foreign holder can never be mistaken for our
+    success. A stale marker (dead pid, flock free) is cleaned up and retried
+    once. A holder that exits without a marker while the flock is free
+    (e.g. a filesystem without flock support) is a hard error.
 
     Returns an opaque lock token to pass to :func:`release_lock`.
     Raises :class:`ServerOpsError` when the lock is held elsewhere.
     """
-    app_q = shlex.quote(app_dir)
     lock_q = shlex.quote(f"{app_dir}/{LOCK_PATH}")
     holder_q = shlex.quote(f"{app_dir}/{LOCK_PATH}.holder")
 
-    _, has_flock = conn.run("command -v flock", warn=True, hide=True)
-
-    if has_flock:
-        for _ in range(2):  # one retry after clearing a stale holder
-            token = secrets.token_hex(8)
-            # Fully detached from the SSH exec session: setsid + nohup +
-            # </dev/null. A partially detached background child would keep
-            # the SSH channel from reaching EOF and make conn.run hang.
-            # The flock comes BEFORE the marker write: a blocked holder must
-            # not clobber the marker of the process that owns the lock.
-            holder_cmd = (
-                f'setsid nohup bash -c "exec 9>>{lock_q}; '
-                f"flock -n 9 || exit 1; "
-                f"echo \\$\\$-{token} > {holder_q}; "
-                f'sleep {ttl}" >/dev/null 2>&1 & echo $!'
-            )
-            out, ok = conn.run(holder_cmd, warn=True, hide=True)
-            holder_pid = out.strip() if ok else ""
-
-            # Poll for OUR token instead of sleeping a fixed 500ms: the
-            # marker appears only after the flock is owned, and it is only
-            # reported as OURS while ``flock -n`` still fails and the marker
-            # pid is alive (a dead holder can leave a stale marker while a
-            # foreign process holds the flock). After the deadline the flock
-            # is judged in the state it is in *then*: held (BUSY, with
-            # whatever marker exists, ``?`` when none), free with a live
-            # marker (ALIVE) or free with a dead one (DEAD).
-            probe, _ = conn.run(
-                f"tok={token}; hf={holder_q}; lk={lock_q}; i=0; "
-                f'while [ "$i" -lt {LOCK_POLL_ATTEMPTS} ]; do '
-                f'h=$(cat "$hf" 2>/dev/null || true); '
-                f'case "$h" in *-"$tok") '
-                f'if ! flock -n "$lk" true 2>/dev/null; '
-                f'then echo "OURS:$h"; exit 0; fi ;; esac; '
-                f"sleep {LOCK_POLL_INTERVAL}; i=$((i + 1)); done; "
-                f'h=$(cat "$hf" 2>/dev/null || true); '
-                f'case "$h" in *-"$tok") hp=${{h%%-*}}; '
-                f'if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null && '
-                f'! flock -n "$lk" true 2>/dev/null; '
-                f'then echo "OURS:$h"; exit 0; fi ;; esac; '
-                f'if ! flock -n "$lk" true 2>/dev/null; '
-                f'then echo "BUSY:${{h:-?}}"; '
-                f'elif [ -n "$h" ]; then hp=${{h%%-*}}; '
-                f'if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; '
-                f'then echo "ALIVE:$h"; else echo "DEAD:$h"; fi; '
-                f'else echo "FREE:"; fi',
-                warn=True,
-                hide=True,
-            )
-            first = (probe.strip().splitlines() or [""])[0]
-            status, _, marker = first.partition(":")
-            marker = "" if marker.strip() == "?" else marker.strip()
-            file_pid, _, file_token = marker.partition("-")
-
-            # Only our own token, confirmed while the flock is still taken,
-            # counts as ownership.
-            if status == "OURS" and file_pid and file_token == token:
-                return f"flock:{file_pid}"
-
-            if status == "BUSY":
-                # The flock is owned and no marker names our token: the
-                # holder we spawned lost the race and wrote nothing.
-                by = f" by pid {file_pid}" if file_pid else ""
-                raise ServerOpsError(
-                    "Another deployment is in progress on the server\n"
-                    f"({app_dir}/{LOCK_PATH} is flock'ed{by})."
-                    " Wait for it to finish."
-                )
-
-            if status == "ALIVE":
-                # Marker of a live process while the flock is free: it may
-                # be about to acquire, so never steal from it and never
-                # switch belts.
-                raise ServerOpsError(
-                    "Another deployment is in progress on the server\n"
-                    f"(flock holder pid {file_pid}). Wait for it to finish."
-                )
-
-            # DEAD: stale marker (dead pid, flock free) -> clean and retry.
-            # FREE: our holder never got the flock (unsupported filesystem,
-            # ...) -> the noclobber belt is safe.
-            conn.run(
-                f"kill {shlex.quote(holder_pid)} 2>/dev/null; "
-                f"kill {shlex.quote(file_pid)} 2>/dev/null; true",
-                warn=True,
-                hide=True,
-            )
-            # Compare-and-delete: never remove a marker another deployer
-            # wrote in the meantime.
-            conn.run(
-                f"h=$(cat {holder_q} 2>/dev/null || true); "
-                f'[ "$h" = {shlex.quote(marker)} ] && rm -f {holder_q}; true',
-                warn=True,
-                hide=True,
-            )
-            if status != "DEAD":
-                break
-        else:
-            raise ServerOpsError(
-                "Could not acquire the flock deploy lock (stale holder persisted).\n"
-                f"Remove {app_dir}/{LOCK_PATH}.holder manually if no deploy is running."
-            )
-
-    # Fallback: noclobber file, as in commands/deploy.py.
-    lock_file = f"{app_dir}/{LEGACY_LOCK_PATH}"
-    lock_q = shlex.quote(lock_file)
-    _, acquired = conn.run(
-        f"mkdir -p {app_q} && (set -C; echo $$ > {lock_q}) 2>/dev/null",
-        warn=True,
-        hide=True,
-    )
-    if not acquired:
-        raise ServerOpsError(
-            "Another deployment is in progress.\n"
-            "If you are sure no deploy is running, remove the lock manually:\n"
-            f"  ssh fujin@host rm {lock_file}"
+    for _ in range(2):  # one retry after clearing a stale holder
+        token = secrets.token_hex(8)
+        # Fully detached from the SSH exec session: setsid + nohup +
+        # </dev/null. A partially detached background child would keep
+        # the SSH channel from reaching EOF and make conn.run hang.
+        # The holder refuses to start when flock is missing (writes
+        # NOFLOCK and exits), so a host without util-linux is detected
+        # inside the holder itself - no extra round trip. The flock comes
+        # BEFORE the marker write: a blocked holder must not clobber the
+        # marker of the process that owns the lock.
+        holder_cmd = (
+            f'setsid nohup bash -c "'
+            f"command -v flock >/dev/null 2>&1 || {{ "
+            f"echo NOFLOCK > {holder_q}; exit 1; }}; "
+            f"exec 9>>{lock_q}; "
+            f"flock -n 9 || exit 1; "
+            f"echo \\$\\$-{token} > {holder_q}; "
+            f'sleep {ttl}" >/dev/null 2>&1 & echo $!'
         )
-    return f"file:{lock_file}"
+        out, ok = conn.run(holder_cmd, warn=True, hide=True)
+        holder_pid = out.strip() if ok else ""
+
+        # Poll for OUR token instead of sleeping a fixed 500ms: the
+        # marker appears only after the flock is owned, and it is only
+        # reported as OURS while ``flock -n`` still fails and the marker
+        # pid is alive (a dead holder can leave a stale marker while a
+        # foreign process holds the flock). After the deadline the flock
+        # is judged in the state it is in *then*: held (BUSY, with
+        # whatever marker exists, ``?`` when none), free with a live
+        # marker (ALIVE) or free with a dead one (DEAD). NOFLOCK is the
+        # holder reporting that the host lacks flock; it aborts at once.
+        probe, _ = conn.run(
+            f"tok={token}; hf={holder_q}; lk={lock_q}; i=0; "
+            f'while [ "$i" -lt {LOCK_POLL_ATTEMPTS} ]; do '
+            f'h=$(cat "$hf" 2>/dev/null || true); '
+            f'case "$h" in NOFLOCK) echo "NOFLOCK:"; exit 0 ;; esac; '
+            f'case "$h" in *-"$tok") '
+            f'if ! flock -n "$lk" true 2>/dev/null; '
+            f'then echo "OURS:$h"; exit 0; fi ;; esac; '
+            f"sleep {LOCK_POLL_INTERVAL}; i=$((i + 1)); done; "
+            f'h=$(cat "$hf" 2>/dev/null || true); '
+            f'case "$h" in NOFLOCK) echo "NOFLOCK:"; exit 0 ;; esac; '
+            f'case "$h" in *-"$tok") hp=${{h%%-*}}; '
+            f'if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null && '
+            f'! flock -n "$lk" true 2>/dev/null; '
+            f'then echo "OURS:$h"; exit 0; fi ;; esac; '
+            f'if ! flock -n "$lk" true 2>/dev/null; '
+            f'then echo "BUSY:${{h:-?}}"; '
+            f'elif [ -n "$h" ]; then hp=${{h%%-*}}; '
+            f'if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; '
+            f'then echo "ALIVE:$h"; else echo "DEAD:$h"; fi; '
+            f'else echo "FREE:"; fi',
+            warn=True,
+            hide=True,
+        )
+        first = (probe.strip().splitlines() or [""])[0]
+        status, _, marker = first.partition(":")
+        marker = "" if marker.strip() == "?" else marker.strip()
+        file_pid, _, file_token = marker.partition("-")
+
+        # Only our own token, confirmed while the flock is still taken,
+        # counts as ownership.
+        if status == "OURS" and file_pid and file_token == token:
+            return f"flock:{file_pid}"
+
+        if status == "NOFLOCK":
+            raise ServerOpsError(
+                "The deploy lock requires flock (util-linux), which is not"
+                " installed on the server.\n"
+                f"Cannot take {app_dir}/{LOCK_PATH}: install util-linux"
+                " (or the flock package) and retry."
+            )
+
+        if status == "BUSY":
+            # The flock is owned and no marker names our token: the
+            # holder we spawned lost the race and wrote nothing.
+            by = f" by pid {file_pid}" if file_pid else ""
+            raise ServerOpsError(
+                "Another deployment is in progress on the server\n"
+                f"({app_dir}/{LOCK_PATH} is flock'ed{by})."
+                " Wait for it to finish."
+            )
+
+        if status == "ALIVE":
+            # Marker of a live process while the flock is free: it may
+            # be about to acquire, so never steal from it.
+            raise ServerOpsError(
+                "Another deployment is in progress on the server\n"
+                f"(flock holder pid {file_pid}). Wait for it to finish."
+            )
+
+        # DEAD: stale marker (dead pid, flock free) -> clean and retry.
+        if status != "DEAD":
+            # FREE: the holder exited without writing a marker while the
+            # flock is free. The lock path is unusable (filesystem without
+            # flock support?), so never pretend the lock was taken.
+            raise ServerOpsError(
+                "Could not acquire the deploy lock: the holder exited without"
+                f" taking {app_dir}/{LOCK_PATH}.\n"
+                "The filesystem may not support flock; check that flock works"
+                " on the server."
+            )
+        conn.run(
+            f"kill {shlex.quote(holder_pid)} 2>/dev/null; "
+            f"kill {shlex.quote(file_pid)} 2>/dev/null; true",
+            warn=True,
+            hide=True,
+        )
+        # Compare-and-delete: never remove a marker another deployer
+        # wrote in the meantime.
+        conn.run(
+            f"h=$(cat {holder_q} 2>/dev/null || true); "
+            f'[ "$h" = {shlex.quote(marker)} ] && rm -f {holder_q}; true',
+            warn=True,
+            hide=True,
+        )
+    else:
+        raise ServerOpsError(
+            "Could not acquire the flock deploy lock (stale holder persisted).\n"
+            f"Remove {app_dir}/{LOCK_PATH}.holder manually if no deploy is running."
+        )
 
 
 def release_lock(conn: Any, app_dir: str, lock: str) -> None:
@@ -664,22 +662,18 @@ def release_lock(conn: Any, app_dir: str, lock: str) -> None:
     group leader and its ``flock`` child inherits nothing else — killing
     only the bash would orphan the flock holding the lock forever.
     """
-    if lock.startswith("flock:"):
-        pid = lock.removeprefix("flock:")
-        pid_q = shlex.quote(pid)
-        holder_q = shlex.quote(f"{app_dir}/{LOCK_PATH}.holder")
-        # One round trip: kill the group + holder, then drop the marker. The
-        # marker removal is unconditional (``;``, not ``&&``) so a stale
-        # holder file never survives a dead pid.
-        conn.run(
-            f"kill -- -{pid_q} 2>/dev/null; kill {pid_q} 2>/dev/null;"
-            f" rm -f {holder_q}; true",
-            warn=True,
-            hide=True,
-        )
-    else:
-        path = lock.removeprefix("file:")
-        conn.run(f"rm -f {shlex.quote(path)}", warn=True, hide=True)
+    pid = lock.removeprefix("flock:")
+    pid_q = shlex.quote(pid)
+    holder_q = shlex.quote(f"{app_dir}/{LOCK_PATH}.holder")
+    # One round trip: kill the group + holder, then drop the marker. The
+    # marker removal is unconditional (``;``, not ``&&``) so a stale
+    # holder file never survives a dead pid.
+    conn.run(
+        f"kill -- -{pid_q} 2>/dev/null; kill {pid_q} 2>/dev/null;"
+        f" rm -f {holder_q}; true",
+        warn=True,
+        hide=True,
+    )
 
 
 def parse_holder_pid(output: str) -> str | None:
@@ -698,9 +692,8 @@ class LockProbe(msgspec.Struct, frozen=True):
     """Read-only view of the deploy lock (``fujin doctor``).
 
     ``state`` is one of ``free`` (nobody holds it), ``live`` (holder pid
-    alive), ``held`` (flock held but no holder pid recorded), ``stale``
-    (holder file with a dead pid) or ``stale-legacy`` (noclobber lock file
-    with a dead pid).
+    alive), ``held`` (flock held but no holder pid recorded) or ``stale``
+    (holder file with a dead pid).
     """
 
     state: str
@@ -716,15 +709,11 @@ def probe_lock(conn: Any, app_dir: str) -> LockProbe:
     """
     lock_path = f"{app_dir}/{LOCK_PATH}"
     holder = f"{lock_path}.holder"
-    legacy = f"{app_dir}/{LEGACY_LOCK_PATH}"
     cmd = (
         f"lock={shlex.quote(lock_path)}; holder={shlex.quote(holder)}; "
-        f"legacy={shlex.quote(legacy)}; state=free; pid=; "
+        f"state=free; pid=; "
         f'if [ -f "$holder" ]; then pid=$(cut -d- -f1 "$holder" 2>/dev/null); fi; '
         f'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then state=live; '
-        f'elif [ -f "$legacy" ]; then pid=$(cat "$legacy" 2>/dev/null); '
-        f'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then state=live; '
-        f"else state=stale-legacy; fi; "
         f'elif [ -n "$pid" ]; then state=stale; '
         f'elif [ -e "$lock" ] && command -v flock >/dev/null 2>&1 '
         f'&& ! flock -n "$lock" true 2>/dev/null; then state=held; pid=; '

@@ -182,37 +182,45 @@ def test_ensure_app_user_fast_path_runs_no_sudo(tmp_path):
 # =============================================================================
 
 
-def test_acquire_lock_fallback_noclobber(conn):
-    conn.run.side_effect = [
-        ("/usr/bin/flock", False),  # command -v flock missing
-        ("", True),  # noclobber create
-    ]
-    token = serverops.acquire_lock(conn, "/opt/fujin/myapp")
-    assert token == "file:/opt/fujin/myapp/.deploy_lock"
-    create_cmd = conn.run.call_args_list[1][0][0]
-    assert "set -C" in create_cmd and "echo $$ >" in create_cmd
+HOLDER = "/opt/fujin/myapp/store/lock.holder"
 
 
-def test_acquire_lock_busy_fallback_raises(conn):
+def _assert_noflock_guard(cmd):
+    """The holder itself detects a host without flock, no extra round trip."""
+    assert "command -v flock >/dev/null 2>&1" in cmd
+    assert f"echo NOFLOCK > {HOLDER}" in cmd
+    assert cmd.index("command -v flock") < cmd.index("exec 9>>")
+
+
+def test_lock_holder_checks_flock_without_extra_round_trip(conn, monkeypatch):
+    """The first (and only pre-probe) round trip is the holder spawn."""
+    monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("", False),  # no flock
-        ("", False),  # noclobber fails -> busy
+        ("4242", True),  # holder spawn
+        ("OURS:4242-TOK1", True),  # probe: our holder owns the flock
     ]
-    with pytest.raises(serverops.ServerOpsError, match="Another deployment"):
-        serverops.acquire_lock(conn, "/opt/fujin/myapp")
+    serverops.acquire_lock(conn, "/opt/fujin/myapp", ttl=7200)
+
+    commands = [c[0][0] for c in conn.run.call_args_list]
+    assert conn.run.call_count == 2
+    # the FIRST round trip is the holder spawn, not a flock pre-check
+    assert "setsid nohup bash -c" in commands[0]
+    assert "tok=" not in commands[0]
+    _assert_noflock_guard(commands[0])
+    assert not any("command -v flock" == cmd.strip() for cmd in commands)
 
 
 def test_lock_holder_writes_marker_only_after_flock(conn, monkeypatch):
     """The flock is owned before the holder may write the marker."""
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("/usr/bin/flock", True),  # flock available
         ("4242", True),  # holder spawn
         ("OURS:4242-TOK1", True),  # probe: our holder owns the flock
     ]
     token = serverops.acquire_lock(conn, "/opt/fujin/myapp", ttl=7200)
     assert token == "flock:4242"
-    holder_cmd = conn.run.call_args_list[1][0][0]
+    holder_cmd = conn.run.call_args_list[0][0][0]
+    _assert_noflock_guard(holder_cmd)
     assert "flock -n 9 || exit 1" in holder_cmd
     # acquisition strictly precedes the marker write
     assert holder_cmd.index("flock -n 9") < holder_cmd.index("-TOK1")
@@ -224,37 +232,53 @@ def test_acquire_lock_polls_instead_of_fixed_sleep(conn, monkeypatch):
     """No unconditional 0.5s sleep: the probe polls for our own token."""
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("/usr/bin/flock", True),
         ("4242", True),
         ("OURS:4242-TOK1", True),
     ]
     serverops.acquire_lock(conn, "/opt/fujin/myapp")
 
-    probe = conn.run.call_args_list[2][0][0]
+    _assert_noflock_guard(conn.run.call_args_list[0][0][0])
+    probe = conn.run.call_args_list[1][0][0]
     assert "sleep 0.5" not in probe
     assert f"sleep {serverops.LOCK_POLL_INTERVAL}" in probe
     assert f'[ "$i" -lt {serverops.LOCK_POLL_ATTEMPTS} ]' in probe
     assert "flock -n" in probe
+    # a holder reporting a missing flock aborts the poll immediately
+    assert 'case "$h" in NOFLOCK) echo "NOFLOCK:"; exit 0' in probe
     # success is gated on the per-call token AND the flock still being held
     assert 'case "$h" in *-"$tok")' in probe
     assert '"OURS:$h"' in probe
 
 
+def test_acquire_lock_missing_flock_raises(conn, monkeypatch):
+    """NOFLOCK from the holder maps to an actionable error."""
+    monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
+    conn.run.side_effect = [
+        ("4242", True),  # holder spawn
+        ("NOFLOCK:", True),  # holder could not find flock
+    ]
+    with pytest.raises(serverops.ServerOpsError, match=r"flock \(util-linux\)"):
+        serverops.acquire_lock(conn, "/opt/fujin/myapp")
+
+    _assert_noflock_guard(conn.run.call_args_list[0][0][0])
+    # no cleanup, no retry, no fallback: the lock was never attempted
+    assert conn.run.call_count == 2
+
+
 def test_acquire_lock_foreign_live_holder_raises(conn, monkeypatch):
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("/usr/bin/flock", True),
         ("4242", True),  # our holder loses the race and writes nothing
         ("BUSY:999-TOK9", True),  # foreign live holder still owns the flock
     ]
     with pytest.raises(serverops.ServerOpsError, match="pid 999"):
         serverops.acquire_lock(conn, "/opt/fujin/myapp")
 
+    _assert_noflock_guard(conn.run.call_args_list[0][0][0])
     commands = [c[0][0] for c in conn.run.call_args_list]
-    # the foreign marker is neither removed nor overwritten; no belt switch
+    # the foreign marker is neither removed nor overwritten
     assert not any("rm -f" in c for c in commands)
-    assert not any("set -C" in c for c in commands)
-    assert conn.run.call_count == 3
+    assert conn.run.call_count == 2
 
 
 def test_acquire_lock_own_token_under_foreign_flock_never_wins(conn, monkeypatch):
@@ -262,7 +286,6 @@ def test_acquire_lock_own_token_under_foreign_flock_never_wins(conn, monkeypatch
     holds the flock must never be accepted as success."""
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("/usr/bin/flock", True),
         ("4242", True),
         ("BUSY:4242-TOK1", True),  # our token, but the flock is still taken
     ]
@@ -273,7 +296,6 @@ def test_acquire_lock_own_token_under_foreign_flock_never_wins(conn, monkeypatch
 def test_acquire_lock_live_holder_with_free_flock_raises(conn, monkeypatch):
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("/usr/bin/flock", True),
         ("4242", True),
         ("ALIVE:999-TOK9", True),  # holder alive but the flock is free
     ]
@@ -285,7 +307,6 @@ def test_acquire_lock_live_holder_with_free_flock_raises(conn, monkeypatch):
 def test_acquire_lock_stale_holder_is_stolen(conn, monkeypatch):
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("/usr/bin/flock", True),
         ("4242", True),  # holder spawn
         ("DEAD:999-TOK9", True),  # stale marker, flock free -> steal
         ("", True),  # cleanup kill
@@ -295,30 +316,32 @@ def test_acquire_lock_stale_holder_is_stolen(conn, monkeypatch):
     ]
     token = serverops.acquire_lock(conn, "/opt/fujin/myapp")
     assert token == "flock:222"
-    delete = conn.run.call_args_list[4][0][0]
+    _assert_noflock_guard(conn.run.call_args_list[0][0][0])
+    assert conn.run.call_count == 6
+    delete = conn.run.call_args_list[3][0][0]
     assert "rm -f /opt/fujin/myapp/store/lock.holder" in delete
     # only the marker we observed may be removed
     assert "999-TOK9" in delete
 
 
-def test_acquire_lock_flock_free_falls_back(conn, monkeypatch):
+def test_acquire_lock_free_without_marker_raises(conn, monkeypatch):
+    """FREE means the holder exited without the flock: never pretend we won."""
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("/usr/bin/flock", True),
         ("4242", True),  # holder spawn
         ("FREE:", True),  # our holder never acquired: no marker, flock free
-        ("", True),  # kill holder
-        ("", True),  # no marker to delete
-        ("", True),  # noclobber
     ]
-    token = serverops.acquire_lock(conn, "/opt/fujin/myapp")
-    assert token == "file:/opt/fujin/myapp/.deploy_lock"
+    with pytest.raises(serverops.ServerOpsError, match="filesystem may not support"):
+        serverops.acquire_lock(conn, "/opt/fujin/myapp")
+
+    _assert_noflock_guard(conn.run.call_args_list[0][0][0])
+    # no lock token is ever returned, no cleanup and no fallback is attempted
+    assert conn.run.call_count == 2
 
 
 def test_acquire_lock_stale_persists_raises(conn, monkeypatch):
     monkeypatch.setattr(serverops.secrets, "token_hex", lambda _n: "TOK1")
     conn.run.side_effect = [
-        ("/usr/bin/flock", True),
         ("4242", True),
         ("DEAD:999-TOK9", True),
         ("", True),
@@ -345,13 +368,6 @@ def test_release_lock_flock(conn):
     assert "kill -- -42" in cmds[0]
     assert "kill 42" in cmds[0]
     assert "rm -f /opt/fujin/myapp/store/lock.holder" in cmds[0]
-
-
-def test_release_lock_file(conn):
-    serverops.release_lock(
-        conn, "/opt/fujin/myapp", "file:/opt/fujin/myapp/.deploy_lock"
-    )
-    assert "rm -f /opt/fujin/myapp/.deploy_lock" in conn.run.call_args[0][0]
 
 
 # =============================================================================

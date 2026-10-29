@@ -36,8 +36,7 @@ _AUDIT_DIGEST_KEYS = ("digest", "release", "manifest")
 #: Lock states that mean "a deploy may be running". While any of them is
 #: observed, ``--fix`` must not rewrite state, remove releases, reinstall
 #: units, converge instances or delete staging trees: the running deploy owns
-#: them. ``stale-legacy`` is a noclobber file whose pid is dead, so it does
-#: not block repairs (the lock check removes it).
+#: them.
 _LOCK_PRESENT_STATES = frozenset({"live", "held", "stale"})
 
 _LOCK_NOTE = "deploy lock present; fixes skipped"
@@ -819,16 +818,10 @@ class Doctor(BaseCommand):
         live = probe.state == "live"
         checks: list[Check] = []
 
-        if probe.state in ("stale", "stale-legacy"):
-            kind = "holder file" if probe.state == "stale" else "legacy lock file"
+        if probe.state == "stale":
             if self.fix:
                 conn.run(
                     f"rm -f {_q(f'{app_dir}/{serverops.LOCK_PATH}.holder')}",
-                    warn=True,
-                    hide=True,
-                )
-                conn.run(
-                    f"rm -f {_q(f'{app_dir}/{serverops.LEGACY_LOCK_PATH}')}",
                     warn=True,
                     hide=True,
                 )
@@ -836,7 +829,7 @@ class Doctor(BaseCommand):
                     Check(
                         OK,
                         "lock",
-                        f"removed stale {kind}"
+                        "removed stale holder file"
                         + (f" (dead pid {probe.pid})" if probe.pid else ""),
                     )
                 )
@@ -845,7 +838,7 @@ class Doctor(BaseCommand):
                     Check(
                         FAIL,
                         "lock",
-                        f"stale {kind}"
+                        "stale holder file"
                         + (f" (pid {probe.pid} not running)" if probe.pid else ""),
                     )
                 )
