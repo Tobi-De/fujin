@@ -4,10 +4,11 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.28.0b6] - 2026-10-29
 
 ### 🚀 Features
 
+- *(secrets)* Prompt for the Bitwarden master password when no credential env is set
 - *(cli)* Ignore the fujin build cache from init and migrate
 
 ### 🐛 Bug Fixes
