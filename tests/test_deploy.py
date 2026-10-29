@@ -1049,7 +1049,11 @@ def test_service_failure_declined_rollback_exits_1(
         monkeypatch, minimal_config, tmp_path, no_rollback=False
     )
     cmd.no_input = False
-    monkeypatch.setattr(deploy_mod.Confirm, "ask", lambda *a, **k: False)
+    monkeypatch.setattr(
+        deploy_mod.Confirm,
+        "ask",
+        lambda prompt, *a, **k: "rollback" not in str(prompt).lower(),
+    )
 
     assert invoke(cmd) == EXIT_USER_ABORTED
     rollback_swaps = [
@@ -1484,11 +1488,61 @@ def test_deploy_propagates_prompting_policy_to_secret_adapters(
     minimal_config.secret_config = SecretConfig(adapter="test")
     cmd, _spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
     cmd.no_input = no_input
+    monkeypatch.setattr(deploy_mod.Confirm, "ask", lambda *a, **k: True)
 
     invoke(cmd)
 
     assert seen == [not no_input]
     assert secrets_mod.prompts_allowed() is (not no_input)
+
+
+def test_declining_confirmation_aborts_before_secrets_and_build(
+    monkeypatch, minimal_config, tmp_path
+):
+    """A declined deploy must not prompt adapters or run the build."""
+    resolved: list[str] = []
+    built: list[str] = []
+
+    def fake_resolve(env, _secret_config):
+        resolved.append("secrets")
+        return env
+
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    monkeypatch.setattr(deploy_mod, "resolve_secrets", fake_resolve)
+    real_run_build = deploy_mod.build.run_build
+    monkeypatch.setattr(
+        deploy_mod.build,
+        "run_build",
+        lambda *a, **k: built.append("build") or real_run_build(*a, **k),
+    )
+    cmd.no_input = False
+    prompts: list[str] = []
+
+    def decline(prompt, *_a, **_k):
+        prompts.append(str(prompt))
+        return False
+
+    monkeypatch.setattr(deploy_mod.Confirm, "ask", decline)
+
+    assert invoke(cmd) == 0
+    assert prompts and "Proceed with deployment" in prompts[0]
+    assert resolved == []
+    assert built == []
+    assert spies["conn"].calls == []
+
+
+def test_no_input_skips_deployment_confirmation(monkeypatch, minimal_config, tmp_path):
+    """--no-input proceeds without asking; the deploy reaches the server."""
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path)
+    cmd.no_input = True
+    asked: list[str] = []
+    monkeypatch.setattr(
+        deploy_mod.Confirm, "ask", lambda prompt, *a, **k: asked.append(prompt)
+    )
+
+    assert invoke(cmd) == 0
+    assert asked == []
+    assert spies["conn"].calls
 
 
 def test_unresolved_secret_ref_aborts_before_any_upload(

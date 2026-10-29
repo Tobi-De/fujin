@@ -24,6 +24,11 @@ How it works
 
 Here's a high-level overview of what happens when you run the ``deploy`` command:
 
+Before doing any work locally, Fujin prints a deployment summary (app,
+version, host, config fingerprint, services and installation mode) and asks
+for confirmation. Nothing is resolved, built or uploaded until you accept.
+``--no-input`` skips the prompt for unattended runs (CI).
+
 1. **Resolve Secrets**: If you have a ``secrets`` configuration, Fujin retrieves secrets defined in your environment file from the configured adapter (Bitwarden, 1Password, Doppler, etc.).
 
 2. **Build (with cache)**: Your application is built locally using the

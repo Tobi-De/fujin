@@ -325,6 +325,12 @@ class Deploy(BaseCommand):
         logger.debug("Starting deployment for %s", config.app_name)
         logger.debug("Target host: %s", host.address)
 
+        # Confirm before any credential prompt, build or SSH I/O: a declined
+        # deploy must not ask the vault for a password or waste a build.
+        # ``--no-input`` keeps unattended runs (CI) non-interactive.
+        self._show_deployment_summary()
+        self._confirm_deploy()
+
         # Resolution and the build are independent local phases (the bundle
         # key excludes secret values), so they run concurrently below. The
         # info lines are printed here, before submitting, so the two phases
@@ -887,7 +893,6 @@ class Deploy(BaseCommand):
             self.output.success("Deployment already up to date!")
             return
 
-        self._show_deployment_summary()
         staging_dir = result.staging_dir
         try:
             # The rendered .env is deploy-time state (kind ``env``), written
@@ -1956,6 +1961,22 @@ class Deploy(BaseCommand):
     # =======================================================================================
     # Presentation
     # =======================================================================================
+
+    def _confirm_deploy(self) -> None:
+        """Ask for confirmation unless ``--no-input`` is set.
+
+        Runs before secrets are resolved and before the build, so a declined
+        deploy never prompts for vault credentials and never runs the build.
+        A non-interactive stdin (EOF) is treated as a cancellation rather than
+        a crash; unattended runs should pass ``--no-input``.
+        """
+        if self.no_input:
+            return
+        try:
+            if not Confirm.ask("\n[bold]Proceed with deployment?[/bold]", default=True):
+                raise cappa.Exit("Deployment cancelled", code=0)
+        except (KeyboardInterrupt, EOFError):
+            raise cappa.Exit("\nDeployment cancelled", code=0) from None
 
     def _show_deployment_summary(self):
         console = Console()

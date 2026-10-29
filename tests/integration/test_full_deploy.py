@@ -293,7 +293,10 @@ def test_failed_service_rollback_modes(shared_vps, project, unit):
     broken2 = make(decline_app, "2.0.0", "#!/bin/bash\nexit 1\n")
     with (
         patch("fujin.config.Config.read", return_value=broken2),
-        patch("fujin.commands.deploy.Confirm.ask", return_value=False),
+        patch(
+            "fujin.commands.deploy.Confirm.ask",
+            side_effect=lambda prompt, *a, **k: "rollback" not in str(prompt).lower(),
+        ),
     ):
         with pytest.raises(cappa.Exit) as excinfo:
             deploy_app(broken2, no_input=False)
