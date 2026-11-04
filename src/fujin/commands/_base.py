@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Annotated
+from typing import Annotated, Protocol
 
 import cappa
 
@@ -73,6 +75,14 @@ class BaseCommand:
         return MessageFormatter(cappa.Output())
 
 
+class LiveStatus(Protocol):
+    """What a :meth:`MessageFormatter.status` block exposes to callers."""
+
+    def update(self, status: str) -> None: ...
+    def stop(self) -> None: ...
+    def start(self) -> None: ...
+
+
 class MessageFormatter:
     """Enhanced output with built-in color formatting for consistent CLI messaging."""
 
@@ -102,3 +112,19 @@ class MessageFormatter:
     def output(self, message: str):
         """Print plain message (for custom formatting)."""
         self._output.output(redact(message))
+
+    @contextmanager
+    def status(self, message: str) -> Iterator[LiveStatus | None]:
+        """Run a live spinner while a long local step runs.
+
+        Yields the Rich ``Status`` (``.update(text)`` changes the display) or
+        ``None`` when output is not a terminal: there the message is printed
+        once as a normal info line so piped/CI logs still show the step.
+        """
+        console = self._output.output_console
+        if not console.is_terminal:
+            self.info(message)
+            yield None
+            return
+        with console.status(f"[blue]{redact(message)}[/blue]", spinner="dots") as live:
+            yield live

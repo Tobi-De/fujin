@@ -10,6 +10,7 @@ that flow.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sys
@@ -358,6 +359,22 @@ def setup_deploy(
 
         def output(self, m):
             print("OUT:", m, file=_sys.stderr)
+
+        @contextlib.contextmanager
+        def status(self, m):
+            print("STATUS:", m, file=_sys.stderr)
+
+            class _Live:
+                def update(self, text):
+                    print("STATUS-UPDATE:", text, file=_sys.stderr)
+
+                def stop(self):
+                    print("STATUS-STOP", file=_sys.stderr)
+
+                def start(self):
+                    print("STATUS-START", file=_sys.stderr)
+
+            yield _Live()
 
     cmd.output = _Printer()
     for _n in ("ensure_layout",):
@@ -2222,6 +2239,44 @@ def test_secrets_resolve_concurrently_with_build(monkeypatch, minimal_config, tm
     assert threads["resolve"] != threads["build"]
     assert threads["resolve"] != threading.get_ident()
     spies["conn_ctx"].assert_called()
+    spies["commit"].assert_called()
+
+
+def test_interactive_deploy_resolves_before_building(
+    monkeypatch, minimal_config, tmp_path
+):
+    """With prompting allowed, resolution owns the terminal first: it runs on
+    the main thread and the build starts only after it finished. A credential
+    prompt must never race streaming build output."""
+    order: list[str] = []
+    threads: dict[str, int] = {}
+
+    def _resolve(env, sc):
+        assert "build" not in order
+        order.append("resolve")
+        threads["resolve"] = threading.get_ident()
+        return env.replace("$STRIPE_TOKEN", SENTINEL)
+
+    monkeypatch.setattr(deploy_mod, "resolve_secrets", _resolve)
+    minimal_config.secret_config = SecretConfig(adapter="test")
+    minimal_config.hosts[0].env_content = "STRIPE_TOKEN=$STRIPE_TOKEN"
+    cmd, spies = setup_deploy(monkeypatch, minimal_config, tmp_path, state=State())
+    cmd.no_input = False
+    monkeypatch.setattr(deploy_mod.Confirm, "ask", lambda *a, **k: True)
+    _staging, result = build_result_for(tmp_path)
+
+    def _run_build(*a, **k):
+        assert order == ["resolve"]
+        order.append("build")
+        threads["build"] = threading.get_ident()
+        return result
+
+    monkeypatch.setattr(deploy_mod.build, "run_build", _run_build)
+
+    assert invoke(cmd) == 0
+    assert order == ["resolve", "build"]
+    # Both phases ran on the main thread: nothing overlapped them.
+    assert threads["resolve"] == threads["build"] == threading.get_ident()
     spies["commit"].assert_called()
 
 

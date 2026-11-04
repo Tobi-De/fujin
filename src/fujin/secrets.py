@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
-from contextlib import closing
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from io import StringIO
-from typing import Callable
 
 from dotenv import dotenv_values
 
@@ -66,6 +65,53 @@ def set_prompts_allowed(allowed: bool) -> None:
 def prompts_allowed() -> bool:
     """Return whether adapters may prompt the user for credentials."""
     return _prompts_allowed
+
+
+#: Sink for adapter-reported progress ("Syncing the vault..."). Deploy installs
+#: one while a live spinner is running; without it (unattended runs, piped
+#: output, other commands) progress reports are dropped instead of scribbling
+#: over other output.
+_progress_sink: Callable[[str], None] | None = None
+
+
+def set_progress_sink(sink: Callable[[str], None] | None) -> None:
+    """Install (or clear) the sink receiving adapter progress messages."""
+    global _progress_sink
+    _progress_sink = sink
+
+
+def progress(message: str) -> None:
+    """Report a user-facing progress step to the running display, if any."""
+    if _progress_sink is not None:
+        _progress_sink(message)
+
+
+#: Callback that pauses/resumes a live display while a credential prompt owns
+#: the terminal: the spinner and the prompt must never render at the same time.
+_prompt_suspension: Callable[[bool], None] | None = None
+
+
+def set_prompt_suspension(suspend: Callable[[bool], None] | None) -> None:
+    """Install (or clear) the callback pausing the display around prompts."""
+    global _prompt_suspension
+    _prompt_suspension = suspend
+
+
+@contextmanager
+def credential_prompt() -> Iterator[None]:
+    """Own the terminal for an interactive credential prompt.
+
+    Adapters wrap ``getpass``/``input`` in this so a live progress display
+    pauses instead of animating under the prompt (two writers on one terminal
+    garble both, and the prompt becomes easy to miss).
+    """
+    if _prompt_suspension is not None:
+        _prompt_suspension(True)
+    try:
+        yield
+    finally:
+        if _prompt_suspension is not None:
+            _prompt_suspension(False)
 
 
 # Placeholder that stands in for an escaped ``$$`` while dotenv interpolates.

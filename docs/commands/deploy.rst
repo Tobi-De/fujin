@@ -29,10 +29,11 @@ version, host, config fingerprint, services and installation mode) and asks
 for confirmation. Nothing is resolved, built or uploaded until you accept.
 ``--no-input`` skips the prompt for unattended runs (CI).
 
-1. **Resolve Secrets**: If you have a ``secrets`` configuration, Fujin retrieves secrets defined in your environment file from the configured adapter (Bitwarden, 1Password, Doppler, etc.).
+1. **Resolve Secrets**: If you have a ``secrets`` configuration, Fujin retrieves secrets defined in your environment file from the configured adapter (Bitwarden, 1Password, Doppler, etc.). An adapter that needs credentials (e.g. the Bitwarden master password) prompts here, before the build starts, so the prompt owns the terminal; the deploy shows what the adapter is doing (unlocking, syncing the vault) while it waits. With ``--no-input`` no prompt is possible and resolution overlaps the build.
 
 2. **Build (with cache)**: Your application is built locally using the
-   ``build_command`` from the configuration. The result is stored under
+   ``build_command`` from the configuration. The build never reads your
+   terminal. The result is stored under
    ``.fujin/cache/bundles/<bundle_key>/``; a rebuild is skipped when the
    bundle key (build command, build env, requirements, unit/Caddyfile/asset
    sources, config fingerprint) is unchanged and the cached file hashes

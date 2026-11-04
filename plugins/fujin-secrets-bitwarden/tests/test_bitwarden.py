@@ -16,6 +16,7 @@ import msgspec
 import pytest
 
 import fujin_secrets_bitwarden as adapter
+import fujin.secrets as secrets_mod
 from fujin.config import SecretConfig
 from fujin.errors import ImproperlyConfiguredError, SecretResolutionError
 
@@ -799,3 +800,42 @@ def test_secret_config_rejects_non_string_list_entries():
     message = error_message(excinfo.value)
     assert "folders" in message
     assert "strings" in message
+
+
+def test_interactive_unlock_pauses_the_display_and_reports_progress(
+    monkeypatch, install_bw, capsys
+):
+    """The deploy's live display is paused while the password prompt owns the
+    terminal, then reports the adapter's steps (unlock, sync, read) so a slow
+    vault sync never looks stuck."""
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    install_bw(FakeBw(items_by_folder={PROD: [login("A", "va")]}))
+    monkeypatch.setattr(adapter, "prompts_allowed", lambda: True)
+
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        adapter.getpass,
+        "getpass",
+        lambda prompt="": (events.append(("prompt", prompt)), "master-password")[1],
+    )
+    monkeypatch.setattr(adapter, "progress", lambda msg: events.append(("step", msg)))
+    monkeypatch.setattr(
+        secrets_mod,
+        "_prompt_suspension",
+        lambda active: events.append(("display", active)),
+    )
+
+    assert adapter.bitwarden("A=$A", secret_config()) == "A=va"
+
+    assert events == [
+        ("display", True),
+        ("prompt", "Bitwarden master password: "),
+        ("display", False),
+        ("step", "Unlocking the Bitwarden vault..."),
+        ("step", "Syncing the Bitwarden vault..."),
+        ("step", "Reading secrets from the vault..."),
+    ]
+    # The prompt says what it wants and that input is hidden.
+    err = capsys.readouterr().err
+    assert "Bitwarden is locked" in err
+    assert "input is hidden" in err

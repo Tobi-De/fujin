@@ -111,6 +111,22 @@ def test_build_produces_staging_tree(project):
     assert result.files["bin/testapp-1.0.0-py3-none-any.whl"]
 
 
+def test_build_command_never_reads_the_deploy_terminal(project, monkeypatch):
+    """The build subprocess gets ``stdin=DEVNULL``: an unattended deploy runs
+    the build while secret resolution may still prompt, and a build that read
+    the terminal's stdin could swallow keystrokes or block on its own."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "fujin.build.subprocess.run",
+        lambda *a, **kw: calls.append(kw) or type("R", (), {"returncode": 0})(),
+    )
+
+    run_build(make_config(project))
+
+    assert calls
+    assert calls[0]["stdin"] is subprocess.DEVNULL
+
+
 def test_cache_hit_skips_build_command(project, monkeypatch):
     calls = []
     monkeypatch.setattr(

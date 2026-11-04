@@ -10,9 +10,13 @@ from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
 from fujin.formatting import safe_format
 from fujin.secrets import (
+    credential_prompt,
     env_values,
     parse_env_template,
+    progress,
     resolve_secrets,
+    set_prompt_suspension,
+    set_progress_sink,
     system,
 )
 
@@ -226,3 +230,39 @@ def test_literal_only_file_renders_exactly_as_before():
         "EMPTY=\n"
         "URL=http://example.com"
     )
+
+
+# ---------------------------------------------------------------------------
+# Adapter progress / credential-prompt hooks
+# ---------------------------------------------------------------------------
+
+
+def test_progress_and_prompt_hooks_are_no_ops_when_unset():
+    """Adapters can report progress and wrap prompts unconditionally: with no
+    display installed (unattended runs, piped output) both are silent."""
+    progress("Syncing the vault...")
+    with credential_prompt():
+        pass
+
+
+def test_progress_reaches_the_installed_sink():
+    seen: list[str] = []
+    set_progress_sink(seen.append)
+    try:
+        progress("Syncing the vault...")
+    finally:
+        set_progress_sink(None)
+
+    assert seen == ["Syncing the vault..."]
+
+
+def test_credential_prompt_suspends_and_resumes_the_display():
+    states: list[bool] = []
+    set_prompt_suspension(states.append)
+    try:
+        with credential_prompt():
+            states.append("prompted")  # type: ignore[arg-type]
+    finally:
+        set_prompt_suspension(None)
+
+    assert states == [True, "prompted", False]

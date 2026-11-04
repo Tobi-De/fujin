@@ -41,10 +41,13 @@ from fujin.formatting import safe_format
 from fujin.redaction import clear_secrets, redact, register_secrets
 from fujin.secrets import (
     env_values,
+    prompts_allowed,
     render_template,
     resolve_secrets,
     secret_refs,
+    set_prompt_suspension,
     set_prompts_allowed,
+    set_progress_sink,
 )
 from rich.prompt import Confirm
 
@@ -310,7 +313,7 @@ class Deploy(BaseCommand):
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
         # Secret adapters (e.g. bitwarden) may ask for credentials; --no-input
-        # must reach them. Resolution happens in a worker thread, so this is
+        # must reach them. Resolution may run in a worker thread, so this is
         # process state rather than a per-call argument.
         set_prompts_allowed(not self.no_input)
 
@@ -331,18 +334,18 @@ class Deploy(BaseCommand):
         self._show_deployment_summary()
         self._confirm_deploy()
 
-        # Resolution and the build are independent local phases (the bundle
-        # key excludes secret values), so they run concurrently below. The
-        # info lines are printed here, before submitting, so the two phases
-        # never interleave their output.
-        self.output.info("Resolving secrets from configuration...")
-        self.output.info("Building application ...")
-
-        # Set by the resolution path once values are registered for
-        # redaction. A concurrently failing build waits for it before
-        # redacting its message (and on resolution failure the deploy reports
-        # that error first, so the build error is never shown).
-        secrets_ready = threading.Event()
+        # Two local phases follow: secret resolution and the build.
+        #
+        # A credential prompt (vault master password, CLI sign-in) must own the
+        # terminal. When prompting is allowed, resolve alone first and only
+        # then start the build: with both running, the prompt was buried under
+        # streaming build output and the build (sharing the terminal) could
+        # consume the typed password, so the deploy looked hung. ``--no-input``
+        # forbids prompts, so unattended runs keep the original overlap (and
+        # its speed-up) below.
+        interactive = prompts_allowed()
+        if interactive:
+            resolved_env = self._resolve_secrets_interactively(host)
 
         # Both phases are local and independent of the server, so they run
         # before any SSH I/O: a slow build no longer holds an idle connection
@@ -357,13 +360,28 @@ class Deploy(BaseCommand):
         # the executor is shut down (joining the build thread) before the
         # lock is released.
         with build.build_lock(config):
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                secrets_future = executor.submit(self._resolve_env, host, secrets_ready)
-                build_future = executor.submit(self._run_build, secrets_ready)
-                # Secrets first: a resolution failure takes precedence over a
-                # concurrent build failure.
-                resolved_env = secrets_future.result()
-                result = build_future.result()
+            if interactive:
+                self.output.info("Building application ...")
+                result = self._run_build()
+            else:
+                # Set by the resolution path once values are registered for
+                # redaction. A concurrently failing build waits for it before
+                # redacting its message (and on resolution failure the deploy
+                # reports that error first, so the build error is never shown).
+                secrets_ready = threading.Event()
+                # The info lines are printed before submitting, so the two
+                # phases never interleave their output.
+                self.output.info("Resolving secrets from configuration...")
+                self.output.info("Building application ...")
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    secrets_future = executor.submit(
+                        self._resolve_env, host, secrets_ready
+                    )
+                    build_future = executor.submit(self._run_build, secrets_ready)
+                    # Secrets first: a resolution failure takes precedence over
+                    # a concurrent build failure.
+                    resolved_env = secrets_future.result()
+                    result = build_future.result()
 
             context = build._interpolation_context(config, host)
             # The probe is configuration, not server state: validate/render
@@ -718,13 +736,41 @@ class Deploy(BaseCommand):
     # Orchestration
     # =======================================================================================
 
+    def _resolve_secrets_interactively(self, host) -> str:
+        """Resolve secrets alone, with a live spinner, before the build.
+
+        Two things must not share the terminal: the build's streaming output
+        and an adapter's credential prompt. Resolution therefore runs first
+        and alone when prompting is allowed.
+
+        The spinner also answers "is anything happening?" while a vault sync
+        or sign-in is in flight: adapters report their steps through
+        :func:`fujin.secrets.progress`, and a credential prompt suspends the
+        display so the prompt renders on a clean line.
+        """
+        with self.output.status("Resolving secrets from configuration...") as live:
+            if live is None:
+                # Not a terminal: the step was printed as an info line and
+                # there is no display to update or suspend.
+                return self._resolve_env(host)
+            set_progress_sink(lambda text: live.update(redact(text)))
+            set_prompt_suspension(
+                lambda active: live.stop() if active else live.start()
+            )
+            try:
+                return self._resolve_env(host)
+            finally:
+                set_progress_sink(None)
+                set_prompt_suspension(None)
+
     def _resolve_env(self, host, secrets_ready: threading.Event | None = None) -> str:
         """Resolve the host env file and register resolved secrets.
 
-        Runs concurrently with the local build (see :meth:`__call__`), before
-        any SSH I/O. ``secrets_ready`` is set once the values are registered
-        (also on failure, in ``finally``), so a concurrently failing build can
-        wait before redacting its message.
+        Runs before any SSH I/O: alone on the main thread when adapters may
+        prompt (an interactive deploy), or in a worker overlapping the build
+        under ``--no-input`` (see :meth:`__call__`). ``secrets_ready`` is set
+        once the values are registered (also on failure, in ``finally``), so a
+        concurrently failing build can wait before redacting its message.
         """
         config = self.config
         try:

@@ -86,9 +86,12 @@ If ``BW_SESSION`` is unset and no password is available through
 ``password_env`` (unset or naming an unset variable), Fujin asks for the
 master password once per run and unlocks the vault with ``bw unlock``;
 the resulting session is kept in memory for the rest of the process and is
-never written to disk or shell history. ``fujin deploy --no-input`` disables
-the prompt (an unattended deploy never blocks), so CI must set ``BW_SESSION``
-or ``password_env``.
+never written to disk or shell history. The prompt appears after the deploy
+confirmation and before the build starts, so it owns the terminal; the deploy
+shows the adapter's progress (unlocking, syncing the vault, reading secrets)
+while it waits, so a slow sync never looks stuck. ``fujin deploy --no-input``
+disables the prompt (an unattended deploy never blocks), so CI must set
+``BW_SESSION`` or ``password_env``.
 
 .. list-table::
     :header-rows: 1
@@ -155,6 +158,14 @@ Adapters that need to prompt for credentials (for example a vault master
 password) must check ``fujin.secrets.prompts_allowed()`` first. It is true by
 default and false for the whole process when ``fujin deploy --no-input`` is
 used, so an unattended deploy never blocks on a terminal.
+
+When prompting is allowed, resolution runs alone *before* the build, so a
+prompt never shares the terminal with streaming build output. Adapters should
+wrap ``getpass``/``input`` in ``fujin.secrets.credential_prompt()``: the
+deploy's live progress display pauses for the prompt and resumes afterwards.
+Report long steps (vault sync, sign-in) with ``fujin.secrets.progress(msg)``;
+it updates that display and is a no-op when no display is running (piped
+output, unattended runs, other commands).
 
 Redaction and Fail-Closed Resolution
 ------------------------------------

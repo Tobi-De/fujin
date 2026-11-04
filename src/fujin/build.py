@@ -228,6 +228,12 @@ def _run_build_command(config: Config) -> None:
             shell=True,
             timeout=config.build_timeout,
             env=_build_command_env(config),
+            # The build must never read the deploy's terminal: in an
+            # unattended (``--no-input``) run it overlaps secret resolution,
+            # and a build that consumed stdin could swallow keystrokes or
+            # block on a prompt of its own. A build that truly needs stdin is
+            # not deployable anyway.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         raise BuildError("Build timed out", command=config.build_command) from None

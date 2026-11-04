@@ -71,8 +71,11 @@ required. When neither is available (including a configured `password_env`
 whose variable is unset), Fujin prompts once for the master
 password, unlocks with `bw unlock --raw` and keeps the returned session in
 memory for the rest of the process (it is never written to disk or shell
-history). `fujin deploy --no-input` disables that prompt, so unattended
-deploys must set `BW_SESSION` or `password_env`.
+history). The prompt runs before the build and pauses the deploy's progress
+display, so it appears on a clean line; while the vault syncs, the deploy
+keeps showing what it is doing instead of looking stuck. `fujin deploy
+--no-input` disables that prompt, so unattended deploys must set `BW_SESSION`
+or `password_env`.
 
 ### Folder layout
 

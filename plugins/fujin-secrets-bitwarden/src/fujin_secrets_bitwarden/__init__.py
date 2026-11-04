@@ -6,12 +6,19 @@ import getpass
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fujin.config import SecretConfig
 from fujin.errors import SecretResolutionError
-from fujin.secrets import prompts_allowed, render_env, split_env_template
+from fujin.secrets import (
+    credential_prompt,
+    progress,
+    prompts_allowed,
+    render_env,
+    split_env_template,
+)
 
 #: Session returned by an interactive ``bw unlock`` in this process. The
 #: master password is asked at most once per run and never stored.
@@ -116,12 +123,23 @@ def _session(secret_config: SecretConfig) -> str:
 def _unlock_interactively() -> str:
     """Prompt once for the master password and unlock the vault."""
     global _interactive_session
-    try:
-        password = getpass.getpass("Bitwarden master password: ")
-    except (EOFError, KeyboardInterrupt) as e:
-        raise SecretResolutionError(
-            "Bitwarden master password prompt was cancelled", adapter="bitwarden"
-        ) from e
+    # The deploy prints progress around this prompt, so say what is being
+    # asked and why. The terminating newline matters too: `getpass` echoes
+    # nothing, and without it the next output (the build) runs into the
+    # prompt on the same line, making the prompt easy to miss.
+    with credential_prompt():
+        print(
+            "\nBitwarden is locked. Enter the master password to unlock the "
+            "vault for this deploy (input is hidden):",
+            file=sys.stderr,
+        )
+        try:
+            password = getpass.getpass("Bitwarden master password: ")
+        except (EOFError, KeyboardInterrupt) as e:
+            raise SecretResolutionError(
+                "Bitwarden master password prompt was cancelled", adapter="bitwarden"
+            ) from e
+        print(file=sys.stderr)
     if not password:
         raise SecretResolutionError(
             "Bitwarden master password cannot be empty", adapter="bitwarden"
@@ -156,6 +174,7 @@ def _resolve_global(refs: dict[str, str], session: str) -> dict[str, str]:
     One ``bw get password`` per ref, run concurrently. This is the legacy
     path, unchanged for configurations without ``folders``.
     """
+    progress("Reading secrets from the vault...")
     resolved_secrets = {}
     with ThreadPoolExecutor() as executor:
         future_to_key = {
@@ -189,6 +208,7 @@ def _resolve_folders(
     """
     loader = _FolderLoader(session)
     # Eager: one API call per configured folder, regardless of ref count.
+    progress("Reading secrets from the vault...")
     for folder in folders:
         loader.items(folder)
 
@@ -327,6 +347,7 @@ def _sync(session: str) -> None:
     sync. Failures are reported without echoing CLI output and never fall
     back to the possibly stale cache.
     """
+    progress("Syncing the Bitwarden vault...")
     result = subprocess.run(
         ["bw", "sync", "--session", session, "--nointeraction"],
         capture_output=True,
@@ -420,6 +441,7 @@ def _signin(password_env: str, extra_env: Mapping[str, str] | None = None) -> st
     Raises:
         SecretResolutionError: If authentication fails
     """
+    progress("Unlocking the Bitwarden vault...")
     unlock_result = subprocess.run(
         [
             "bw",
