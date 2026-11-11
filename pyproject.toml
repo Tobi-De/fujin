@@ -47,11 +47,11 @@ dependencies = [
 # loses adapter features (e.g. the b3 Bitwarden adapter never prompted for a
 # master password). `just sync-plugin-versions` rewrites them on every bump.
 # `op` is a short alias for `onepassword`; both are kept for compatibility.
-optional-dependencies.bw = [ "fujin-secrets-bitwarden>=0.28.0b9" ]
-optional-dependencies.doppler = [ "fujin-secrets-doppler>=0.28.0b9" ]
-optional-dependencies.env = [ "fujin-secrets-env>=0.28.0b9" ]
-optional-dependencies.onepassword = [ "fujin-secrets-1password>=0.28.0b9" ]
-optional-dependencies.op = [ "fujin-secrets-1password>=0.28.0b9" ]
+optional-dependencies.bw = [ "fujin-secrets-bitwarden>=0.28.0b10" ]
+optional-dependencies.doppler = [ "fujin-secrets-doppler>=0.28.0b10" ]
+optional-dependencies.env = [ "fujin-secrets-env>=0.28.0b10" ]
+optional-dependencies.onepassword = [ "fujin-secrets-1password>=0.28.0b10" ]
+optional-dependencies.op = [ "fujin-secrets-1password>=0.28.0b10" ]
 urls.Documentation = "https://github.com/Tobi-De/fujin#readme"
 urls.Issues = "https://github.com/Tobi-De/fujin/issues"
 urls.Source = "https://github.com/Tobi-De/fujin"
