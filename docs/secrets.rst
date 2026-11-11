@@ -56,6 +56,28 @@ Additional secret adapters are available as separate plugin packages:
 - `fujin-secrets-bitwarden <https://pypi.org/project/fujin-secrets-bitwarden/>`_ - Bitwarden vault integration
 - `fujin-secrets-1password <https://pypi.org/project/fujin-secrets-1password/>`_ - 1Password CLI integration
 - `fujin-secrets-doppler <https://pypi.org/project/fujin-secrets-doppler/>`_ - Doppler secrets management
+- `fujin-secrets-env <https://pypi.org/project/fujin-secrets-env/>`_ - Environment variables from a local file
+
+Install them through the matching extras on the CLI, so the adapter always
+matches the installed fujin version:
+
+.. code-block:: shell
+
+    uv tool install "fujin-cli[bw,op,env,doppler]"
+
++----------+--------------------------+
+| Extra    | Adapter                  |
++==========+==========================+
+| ``bw``   | ``bitwarden``            |
++----------+--------------------------+
+| ``op``   | ``onepassword``          |
++----------+--------------------------+
+| ``env``  | ``env``                  |
++----------+--------------------------+
+| ``doppler`` | ``doppler``           |
++----------+--------------------------+
+
+``onepassword`` is accepted as an alias for ``op``.
 
 Bitwarden and Vaultwarden
 -------------------------

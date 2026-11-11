@@ -529,7 +529,7 @@ wheels = [
 
 [[package]]
 name = "fujin-cli"
-version = "0.28.0b7"
+version = "0.28.0b9"
 source = { editable = "." }
 dependencies = [
     { name = "cappa" },
@@ -550,6 +550,9 @@ env = [
     { name = "fujin-secrets-env" },
 ]
 onepassword = [
+    { name = "fujin-secrets-1password" },
+]
+op = [
     { name = "fujin-secrets-1password" },
 ]
 
@@ -575,6 +578,7 @@ docs = [
 requires-dist = [
     { name = "cappa", specifier = ">=0.31" },
     { name = "fujin-secrets-1password", marker = "extra == 'onepassword'", editable = "plugins/fujin-secrets-1password" },
+    { name = "fujin-secrets-1password", marker = "extra == 'op'", editable = "plugins/fujin-secrets-1password" },
     { name = "fujin-secrets-bitwarden", marker = "extra == 'bw'", editable = "plugins/fujin-secrets-bitwarden" },
     { name = "fujin-secrets-doppler", marker = "extra == 'doppler'", editable = "plugins/fujin-secrets-doppler" },
     { name = "fujin-secrets-env", marker = "extra == 'env'", editable = "plugins/fujin-secrets-env" },
@@ -583,7 +587,7 @@ requires-dist = [
     { name = "rich", specifier = ">=14.3.1" },
     { name = "ssh2-python", specifier = ">=1.2.0.post1" },
 ]
-provides-extras = ["bw", "doppler", "env", "onepassword"]
+provides-extras = ["bw", "doppler", "env", "op", "onepassword"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -605,7 +609,7 @@ docs = [
 
 [[package]]
 name = "fujin-secrets-1password"
-version = "0.28.0b7"
+version = "0.28.0b9"
 source = { editable = "plugins/fujin-secrets-1password" }
 dependencies = [
     { name = "fujin-cli" },
@@ -616,7 +620,7 @@ requires-dist = [{ name = "fujin-cli", editable = "." }]
 
 [[package]]
 name = "fujin-secrets-bitwarden"
-version = "0.28.0b7"
+version = "0.28.0b9"
 source = { editable = "plugins/fujin-secrets-bitwarden" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -633,7 +637,7 @@ requires-dist = [
 
 [[package]]
 name = "fujin-secrets-doppler"
-version = "0.28.0b7"
+version = "0.28.0b9"
 source = { editable = "plugins/fujin-secrets-doppler" }
 dependencies = [
     { name = "fujin-cli" },
@@ -644,7 +648,7 @@ requires-dist = [{ name = "fujin-cli", editable = "." }]
 
 [[package]]
 name = "fujin-secrets-env"
-version = "0.28.0b7"
+version = "0.28.0b9"
 source = { editable = "plugins/fujin-secrets-env" }
 dependencies = [
     { name = "fujin-cli" },

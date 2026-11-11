@@ -153,6 +153,9 @@ download-pocketbase:
         sed -i "s/^version = .*/version = \"$CORE_VERSION\"/" "$pyproject"
         sed -i "s/\"fujin-cli>=.*\"/\"fujin-cli>=$CORE_VERSION\"/" "$pyproject"
     done
+    # Keep the extras floors in the root project in lockstep too, otherwise
+    # `fujin-cli[bw]` keeps resolving an older adapter than the CLI.
+    sed -i -E "s/(\"fujin-secrets-[a-z0-9-]+)>=.*\"/\1>=$CORE_VERSION\"/" pyproject.toml
     echo "Done!"
 
 # Bump project version and update changelog

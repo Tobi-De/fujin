@@ -7,6 +7,38 @@ If you have `uv <https://docs.astral.sh/uv/getting-started/installation/>`_ inst
 
     uv tool install fujin-cli
 
+Secret Adapters
+---------------
+
+The ``system`` adapter is built in. The other adapters ship as separate plugin
+packages, pulled in by extras on the same install:
+
+.. code-block:: shell
+
+    # Install every adapter
+    uv tool install "fujin-cli[bw,op,env,doppler]"
+
+    # Or just the ones you use
+    uv tool install "fujin-cli[bw]"
+
+.. list-table::
+   :header-rows: 1
+
+   * - Extra
+     - Adapter
+   * - ``bw``
+     - ``bitwarden`` — Bitwarden / Vaultwarden
+   * - ``op`` (alias: ``onepassword``)
+     - ``onepassword`` — 1Password CLI
+   * - ``env``
+     - ``env`` — environment variables from a local file
+   * - ``doppler``
+     - ``doppler`` — Doppler
+
+Already installed? Add an adapter later with ``uv tool install
+"fujin-cli[bw]" --force``. The extras always resolve the adapter that matches
+the CLI version.
+
 If not, download a binary version from the GitHub `releases page <https://github.com/falcopackages/fujin/releases>`_ and move the downloaded file
 to a directory in your PATH.
 
