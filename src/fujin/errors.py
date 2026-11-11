@@ -100,7 +100,11 @@ class CommandError(FujinError):
 
 
 class CommandInterrupted(Exception):
-    """The user pressed Ctrl+C while a remote command was running.
+    """The user pressed Ctrl+C twice in a row while a remote command ran.
+
+    The first Ctrl+C goes to the remote process as a normal SIGINT; the second
+    one (within :data:`fujin.connection.INTERRUPT_ESCALATION_SECONDS`) hangs up
+    the remote terminal instead.
 
     Deliberately not a :class:`FujinError`: it is raised from the raw-mode
     input loop, where the terminal has already been switched back, and is

@@ -15,7 +15,12 @@ import pytest
 from ssh2.exceptions import SSH2Error
 
 from fujin.config import HostConfig
-from fujin.connection import SPOOL_THRESHOLD_BYTES, SSH2Connection, should_spool
+from fujin.connection import (
+    INTERRUPT_ESCALATION_SECONDS,
+    SPOOL_THRESHOLD_BYTES,
+    SSH2Connection,
+    should_spool,
+)
 from fujin.errors import CommandError, CommandInterrupted, ConnectionError, UploadError
 from fujin.exit_codes import EXIT_HOST_UNREACHABLE
 
@@ -567,6 +572,7 @@ def _raw_mode(monkeypatch, ready, stdin_bytes):
         POLLHUP=16,
         poll=lambda: _FakePoll(ready),
     )
+    reads = list(stdin_bytes)
     monkeypatch.setattr("fujin.connection.select", fake_select)
     monkeypatch.setattr("fujin.connection.sys.stdin", _FakeStdin())
     monkeypatch.setattr("fujin.connection.tty.setraw", lambda fd: None)
@@ -575,24 +581,59 @@ def _raw_mode(monkeypatch, ready, stdin_bytes):
         "fujin.connection.termios.tcsetattr",
         lambda stream, when, attrs: None,
     )
-    monkeypatch.setattr("fujin.connection.os.read", lambda fd, size: stdin_bytes)
+    monkeypatch.setattr(
+        "fujin.connection.os.read",
+        lambda fd, size: reads.pop(0) if reads else b"",
+    )
 
 
-def test_ctrl_c_in_a_pty_session_aborts_without_forwarding_sigint(
+def test_first_ctrl_c_is_forwarded_to_the_remote_app(
     connection, mock_ssh_components, monkeypatch
 ):
-    """Ctrl+C must not reach the remote app: a forwarded SIGINT makes it print
-    a ``KeyboardInterrupt`` traceback. Closing the channel hangs up the remote
-    pty instead, which stops the command quietly."""
+    """Ctrl+C keeps its usual meaning: the remote command gets the SIGINT."""
     _, mock_channel, _ = mock_ssh_components
-    _raw_mode(monkeypatch, [[(99, 1)]], b"\x03")
+    mock_channel.write.return_value = (1, b"\x03")
+    mock_channel.eof.return_value = True
+    _raw_mode(monkeypatch, [[(99, 1)]], [b"\x03"])
+
+    connection.run("long-running", pty=True, hide=True)
+
+    mock_channel.write.assert_called_once_with(b"\x03")
+
+
+def test_second_ctrl_c_hangs_up_the_remote_terminal(
+    connection, mock_ssh_components, monkeypatch
+):
+    """Two presses in a row force the session down. The hang-up is what stops
+    a command that ignores SIGINT, and it does so without a traceback."""
+    _, mock_channel, _ = mock_ssh_components
+    mock_channel.write.return_value = (1, b"\x03")
+    mock_channel.eof.return_value = False
+    _raw_mode(monkeypatch, [[(99, 1)], [(99, 1)]], [b"\x03", b"\x03"])
 
     with pytest.raises(CommandInterrupted):
         connection.run("long-running", pty=True, hide=True)
 
-    mock_channel.write.assert_not_called()
+    mock_channel.write.assert_called_once_with(b"\x03")
     # The channel is closed, so sshd hangs up the remote pseudo-terminal.
     mock_channel.close.assert_called()
+
+
+def test_ctrl_c_presses_far_apart_do_not_hang_up(
+    connection, mock_ssh_components, monkeypatch
+):
+    """An interactive command (Django shell, REPL) survives repeated Ctrl+C
+    presses spread over a session."""
+    _, mock_channel, _ = mock_ssh_components
+    mock_channel.write.return_value = (1, b"\x03")
+    mock_channel.eof.side_effect = [False, True]
+    _raw_mode(monkeypatch, [[(99, 1)], [(99, 1)]], [b"\x03", b"\x03"])
+    clock = iter([0.0, INTERRUPT_ESCALATION_SECONDS + 1])
+    monkeypatch.setattr("fujin.connection.time.monotonic", lambda: next(clock))
+
+    connection.run("shell", pty=True, hide=True)
+
+    assert mock_channel.write.call_count == 2
 
 
 def test_normal_input_is_still_forwarded_in_a_pty_session(
@@ -601,7 +642,7 @@ def test_normal_input_is_still_forwarded_in_a_pty_session(
     _, mock_channel, _ = mock_ssh_components
     mock_channel.write.return_value = (1, b"x")
     mock_channel.eof.return_value = True
-    _raw_mode(monkeypatch, [[(99, 1)]], b"x")
+    _raw_mode(monkeypatch, [[(99, 1)]], [b"x"])
 
     connection.run("prompt", pty=True, hide=True)
 

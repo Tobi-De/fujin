@@ -352,9 +352,10 @@ services (whose units use ``EnvironmentFile=``).
 
 .. note::
 
-   Pressing Ctrl+C stops the remote command and exits ``1`` without printing a
-   Python traceback: Fujin hangs up the remote terminal instead of forwarding
-   the interrupt.
+   Ctrl+C is forwarded to the remote command, so it behaves like a normal
+   interrupt. Press it **twice in a row** to hang up the remote terminal when a
+   command ignores it; Fujin then exits ``1`` quietly, without a Python
+   traceback.
 
 .. important::
 

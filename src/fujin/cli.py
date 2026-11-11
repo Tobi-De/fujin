@@ -15,9 +15,11 @@ def quiet_interrupts() -> Iterator[None]:
     """Stop on Ctrl+C without dumping a traceback.
 
     Pressing Ctrl+C is a normal way to end a long remote command, not a bug.
-    Both the local ``KeyboardInterrupt`` and the :class:`CommandInterrupted`
-    raised by the raw-mode loop turn into the documented "user abort" exit
-    code, with the shell prompt starting on a fresh line.
+    A single press is forwarded to the remote command, which handles it the
+    usual way; pressing twice in a row hangs up the remote terminal and lands
+    here. Both that and the local ``KeyboardInterrupt`` turn into the
+    documented "user abort" exit code, with the shell prompt starting on a
+    fresh line.
     """
     try:
         yield

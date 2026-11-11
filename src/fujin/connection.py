@@ -47,6 +47,13 @@ SPOOL_THRESHOLD_BYTES = 4096
 #: simply writes this byte to stdin.
 _CTRL_C = b"\x03"
 
+#: Two Ctrl+C presses closer together than this mean "stop it now": the first
+#: one is forwarded so the remote command gets a normal SIGINT, the second
+#: hangs up the remote terminal (see ``_execute``). The window keeps an
+#: interactive command such as a Django shell usable, where Ctrl+C is pressed
+#: repeatedly over a session to clear the current line.
+INTERRUPT_ESCALATION_SECONDS = 2.0
+
 #: OpenSSH control socket shared by every external ``ssh``/``rsync`` process
 #: (``get()`` here, the staging transfer in :mod:`fujin.transfer`), so they
 #: reuse one master connection instead of paying a full TCP+SSH handshake
@@ -302,6 +309,7 @@ class SSH2Connection:
                 poller.register(sock_fd, select.POLLIN)
 
                 progress = [0]  # real payload bytes seen; drives the idle deadline
+                last_interrupt: float | None = None
 
                 def drain_channel() -> None:
                     while True:
@@ -363,15 +371,23 @@ class SSH2Connection:
                                 data = os.read(stdin_fd, 8192)
                                 if data:
                                     # In raw mode Ctrl+C never becomes a local
-                                    # SIGINT: it arrives as a 0x03 byte. Sending
-                                    # it on makes the remote Python process print
-                                    # a KeyboardInterrupt traceback, so abort
-                                    # instead and let the cleanup close the
-                                    # channel, which hangs up the remote pty.
+                                    # SIGINT: it arrives as a 0x03 byte. The
+                                    # first one is forwarded so the remote
+                                    # command gets the interrupt it expects; a
+                                    # second one hard-stops the session by
+                                    # hanging up the remote pty, which kills
+                                    # the command without a Python traceback.
                                     if is_interactive and _CTRL_C in data:
-                                        raise CommandInterrupted(
-                                            "Interrupted by the user"
-                                        )
+                                        now = time.monotonic()
+                                        if (
+                                            last_interrupt is not None
+                                            and now - last_interrupt
+                                            <= INTERRUPT_ESCALATION_SECONDS
+                                        ):
+                                            raise CommandInterrupted(
+                                                "Interrupted by the user"
+                                            )
+                                        last_interrupt = now
                                     rc, _ = channel.write(data)
                                     while rc == LIBSSH2_ERROR_EAGAIN:
                                         poller.modify(sock_fd, select.POLLOUT)

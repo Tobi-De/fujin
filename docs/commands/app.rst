@@ -290,9 +290,11 @@ This runs commands via your application binary, equivalent to:
 
 .. note::
 
-   Pressing Ctrl+C stops the remote command and exits ``1`` without printing a
-   Python traceback: Fujin hangs up the remote terminal instead of forwarding
-   the interrupt, so the remote app never sees a ``KeyboardInterrupt``.
+   Ctrl+C is forwarded to the remote command, so it behaves like a normal
+   interrupt — in an interactive command such as ``fa exec shell`` it clears
+   the current input instead of ending the session. Press it **twice in a row**
+   to hang up the remote terminal; Fujin then exits ``1`` quietly, without a
+   Python traceback.
 
 .. tip::
 
