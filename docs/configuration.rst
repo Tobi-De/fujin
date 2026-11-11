@@ -63,6 +63,18 @@ Optional environment variable containing the password for the service account, s
    [secrets.options]
    password_env = "BW_PASSWORD"
 
+options.cache_session
+~~~~~~~~~~~~~~~~~~~~~
+Boolean flag, defaults to ``false``. Only the Bitwarden CLI adapter uses it: after an interactive unlock, keep the session in the user's runtime directory so later deploys (in any terminal tab) reuse it. The file is stored under ``$XDG_RUNTIME_DIR/fujin/bitwarden-session`` with mode ``0600``, is removed at logout, and is discarded as soon as Bitwarden rejects the session. This is a convenience, not a security boundary: any process running as the same user can read it.
+
+.. code-block:: toml
+
+   [secrets]
+   adapter = "bitwarden"
+
+   [secrets.options]
+   cache_session = true
+
 Unknown keys in ``[secrets]`` and ``[secrets.options]`` are hard errors.
 
 Per-host override

@@ -58,20 +58,29 @@ adapter = "bitwarden"
 [secrets.options]
 password_env = "BW_PASSWORD"  # optional; omit to be prompted
 folders = ["fujin/myapp/prod", "fujin/shared"]
+cache_session = true  # optional; reuse the unlocked session across deploys
 ```
 
 | Option | Type | Description |
 | --- | --- | --- |
 | `password_env` | string | Name of the environment variable holding the vault password. Used to unlock the vault when `BW_SESSION` is not set. Optional: when the variable is unset (or the option is omitted) Fujin prompts for the master password. |
 | `folders` | string or list of strings | Bitwarden folder names to resolve refs from, in lookup order (first match wins). A single name is accepted as a one-element order. An empty list is rejected at config load; omit the option for whole-vault name lookup. |
+| `cache_session` | boolean | Keep the session returned by an interactive unlock in a per-user runtime file so later deploys reuse it. Defaults to `false`. The file is mode `0600`, lives on tmpfs (removed at logout), and is cleared when Bitwarden rejects the session. |
 
 Alternatively, set the `BW_SESSION` environment variable (`export BW_SESSION="$(bw unlock --raw)"`).
 When `BW_SESSION` is present, Fujin uses it directly and `password_env` is not
 required. When neither is available (including a configured `password_env`
 whose variable is unset), Fujin prompts once for the master
 password, unlocks with `bw unlock --raw` and keeps the returned session in
-memory for the rest of the process (it is never written to disk or shell
-history). The prompt runs before the build and pauses the deploy's progress
+memory for the rest of the process (it is never written to shell history).
+
+With `cache_session = true`, that session is also written to
+`$XDG_RUNTIME_DIR/fujin/bitwarden-session/session` (mode `0600`) and reused by
+later deploys in any terminal tab. It expires with the login session (tmpfs)
+or when Bitwarden invalidates the token; the next deploy then prompts again.
+This is convenience, not isolation: any process running as the same user can
+read the file, so keep using `BW_SESSION` or `password_env` where that matters.
+The prompt runs before the build and pauses the deploy's progress
 display, so it appears on a clean line; while the vault syncs, the deploy
 keeps showing what it is doing instead of looking stuck. `fujin deploy
 --no-input` disables that prompt, so unattended deploys must set `BW_SESSION`

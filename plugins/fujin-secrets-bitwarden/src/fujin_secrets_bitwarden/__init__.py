@@ -20,8 +20,12 @@ from fujin.secrets import (
     split_env_template,
 )
 
+from . import cache as session_cache
+
 #: Session returned by an interactive ``bw unlock`` in this process. The
-#: master password is asked at most once per run and never stored.
+#: master password is asked at most once per run and never stored. The
+#: resulting session may additionally be cached for the user when
+#: ``options.cache_session`` is enabled.
 _interactive_session: str | None = None
 
 
@@ -36,6 +40,9 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
         - With neither, prompt for the master password once and unlock the
           vault (disabled by ``fujin deploy --no-input``)
         - Optional folders: lookup order for folder-scoped resolution
+        - Optional ``cache_session = true``: after an interactive unlock, keep
+          the session in the user's runtime dir so later deploys (in any tab)
+          reuse it until Bitwarden invalidates it or the user logs out
 
     Example fujin.toml:
         [secrets]
@@ -44,6 +51,7 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
         [secrets.options]
         password_env = "BW_PASSWORD"  # Optional
         folders = ["fujin/myapp/prod", "fujin/shared"]  # Optional
+        cache_session = true  # Optional
 
     Without ``folders`` every ``$REF`` is resolved by name across the whole
     vault (one ``bw get password`` per ref, as before). With ``folders``, each
@@ -69,11 +77,30 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
     if not refs:
         return render_env(values)
 
-    session = _session(secret_config)
+    session, from_cache = _session(secret_config)
 
     # ``bw list``/``bw get`` read the local cache, so refresh it once before
     # any lookup; a folder or item created server-side is otherwise invisible.
-    _sync(session)
+    try:
+        _sync(session)
+    except _SyncError as exc:
+        if not from_cache:
+            raise
+        # A cached token is allowed to expire. Forget it so the next run does
+        # not retry a dead token, and only ask for the password again when
+        # Bitwarden actually rejected it. A network failure is re-raised as-is.
+        session_cache.clear()
+        if not exc.session_rejected:
+            raise
+        if not prompts_allowed():
+            raise SecretResolutionError(
+                "The cached Bitwarden session is no longer valid and prompting "
+                "is disabled (--no-input): set the BW_SESSION environment "
+                "variable or options.password_env",
+                adapter="bitwarden",
+            ) from exc
+        session = _authenticate(secret_config)
+        _sync(session)
 
     folders = _folders_option(secret_config)
     if folders is None:
@@ -86,19 +113,30 @@ def bitwarden(env_content: str, secret_config: SecretConfig) -> str:
     return render_env(values)
 
 
-def _session(secret_config: SecretConfig) -> str:
-    """Return a Bitwarden session token.
+def _session(secret_config: SecretConfig) -> tuple[str, bool]:
+    """Return a Bitwarden session token and whether it came from the cache.
 
     ``BW_SESSION`` wins, then a session from an earlier interactive unlock in
-    this process, then ``options.password_env``. Without any of those (or when
-    the configured ``password_env`` variable is unset) the master password is
+    this process, then the cached session (when ``options.cache_session`` is
+    enabled), then ``options.password_env``. Without any of those (or when the
+    configured ``password_env`` variable is unset) the master password is
     asked for once, unless prompting is disabled (e.g. ``fujin deploy
     --no-input``).
     """
     session = os.getenv("BW_SESSION") or _interactive_session
     if session:
-        return session
+        return session, False
 
+    if session_cache.enabled(secret_config):
+        cached = session_cache.load()
+        if cached:
+            return cached, True
+
+    return _authenticate(secret_config), False
+
+
+def _authenticate(secret_config: SecretConfig) -> str:
+    """Unlock with ``password_env`` when available, otherwise prompt."""
     password_env = secret_config.options.get("password_env")
     if password_env and os.environ.get(password_env):
         return _signin(password_env)
@@ -117,7 +155,15 @@ def _session(secret_config: SecretConfig) -> str:
             "options.password_env",
             adapter="bitwarden",
         )
-    return _unlock_interactively()
+    return _unlock_and_remember(secret_config)
+
+
+def _unlock_and_remember(secret_config: SecretConfig) -> str:
+    """Prompt for the master password, unlock, and cache the session if opted in."""
+    session = _unlock_interactively()
+    if session_cache.enabled(secret_config):
+        session_cache.save(session)
+    return session
 
 
 def _unlock_interactively() -> str:
@@ -209,8 +255,8 @@ def _resolve_folders(
     loader = _FolderLoader(session)
     # Eager: one API call per configured folder, regardless of ref count.
     progress("Reading secrets from the vault...")
-    for folder in folders:
-        loader.items(folder)
+    for configured in folders:
+        loader.items(configured)
 
     resolved: dict[str, str] = {}
     for key, ref in refs.items():
@@ -339,6 +385,30 @@ class _FolderLoader:
         return items
 
 
+#: ``bw sync`` diagnostics that mean the session token itself was rejected,
+#: as opposed to a network/server failure. The output is never echoed.
+_SESSION_REJECTION_MARKERS = (
+    "session",
+    "unauthorized",
+    "not logged in",
+    "login required",
+    "401",
+)
+
+
+class _SyncError(SecretResolutionError):
+    """``bw sync`` failed; ``session_rejected`` records whether the token died."""
+
+    def __init__(self, session_rejected: bool):
+        super().__init__("Bitwarden vault sync failed", adapter="bitwarden")
+        self.session_rejected = session_rejected
+
+
+def _session_rejected(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _SESSION_REJECTION_MARKERS)
+
+
 def _sync(session: str) -> None:
     """Refresh the local vault cache before the first lookup.
 
@@ -354,7 +424,7 @@ def _sync(session: str) -> None:
         text=True,
     )
     if result.returncode != 0:
-        raise SecretResolutionError("Bitwarden vault sync failed", adapter="bitwarden")
+        raise _SyncError(_session_rejected(result.stderr))
 
 
 def _run_bw(args: list[str], session: str, action: str) -> str:

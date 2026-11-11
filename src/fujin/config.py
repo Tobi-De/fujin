@@ -25,9 +25,10 @@ class InstallationMode(StrEnum):
 class SecretConfig(msgspec.Struct, forbid_unknown_fields=True):
     adapter: str
     # Adapter options are passed through verbatim: adapters define their own
-    # keys, and some accept lists (e.g. the bitwarden adapter's ``folders``).
-    # ``__post_init__`` keeps the value shapes meaningful (scalars and
-    # non-empty homogeneous string lists only).
+    # keys, and some accept lists (e.g. the bitwarden adapter's ``folders``)
+    # or flags (e.g. its ``cache_session``).
+    # ``__post_init__`` keeps the value shapes meaningful (strings, booleans
+    # and non-empty homogeneous string lists only).
     options: dict[str, Any] = msgspec.field(default_factory=dict)
 
     def __post_init__(self):
@@ -37,7 +38,7 @@ class SecretConfig(msgspec.Struct, forbid_unknown_fields=True):
                 "Adapter names must be lowercase alphanumeric with hyphens or underscores."
             )
         for name, value in self.options.items():
-            if isinstance(value, str):
+            if isinstance(value, (str, bool)):
                 continue
             if isinstance(value, list):
                 if not value:
@@ -52,8 +53,8 @@ class SecretConfig(msgspec.Struct, forbid_unknown_fields=True):
                     "must be strings."
                 )
             raise ImproperlyConfiguredError(
-                f"Invalid value for secret option '{name}': expected a string "
-                f"or a list of strings, got {type(value).__name__}."
+                f"Invalid value for secret option '{name}': expected a string, "
+                f"a boolean or a list of strings, got {type(value).__name__}."
             )
 
 

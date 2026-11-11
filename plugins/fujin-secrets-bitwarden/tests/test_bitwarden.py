@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import fujin_secrets_bitwarden as adapter
 import fujin.secrets as secrets_mod
 from fujin.config import SecretConfig
 from fujin.errors import ImproperlyConfiguredError, SecretResolutionError
+from fujin_secrets_bitwarden import cache as session_cache
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +92,9 @@ if session_index + 1 >= len(argv) or not argv[session_index + 1]:
 if argv[:1] == ["sync"]:
     if len(argv) != 4 or argv[1] != "--session" or argv[3] != "--nointeraction":
         contract_violation("sync must be: sync --session TOKEN --nointeraction")
+    if argv[2] in state.get("rejected_sessions", []):
+        sys.stderr.write("Invalid session.\\n")
+        raise SystemExit(1)
     if state.get("sync_fails"):
         sys.stderr.write("fake bw: sync exploded\\n")
         raise SystemExit(1)
@@ -152,11 +157,13 @@ class FakeBw:
         items_by_folder: dict[str, list[dict]] | None = None,
         sync_fails: bool = False,
         expected_password: str | None = None,
+        rejected_sessions: list[str] | None = None,
     ):
         self.folders = folders or []
         self.items_by_folder = items_by_folder or {}
         self.sync_fails = sync_fails
         self.expected_password = expected_password
+        self.rejected_sessions = rejected_sessions or []
         self.log_path: Path | None = None
 
     @property
@@ -182,6 +189,12 @@ class FakeBw:
 @pytest.fixture(autouse=True)
 def reset_interactive_session(monkeypatch):
     monkeypatch.setattr(adapter, "_interactive_session", None)
+
+
+@pytest.fixture(autouse=True)
+def isolated_session_cache(tmp_path, monkeypatch):
+    """Never read or write the developer's real session cache."""
+    monkeypatch.setenv(session_cache.CACHE_DIR_ENV, str(tmp_path / "bw-sessions"))
 
 
 @pytest.fixture
@@ -225,6 +238,7 @@ def install_bw(tmp_path, monkeypatch):
                     "items_by_folder": fake.items_by_folder,
                     "sync_fails": fake.sync_fails,
                     "expected_password": fake.expected_password,
+                    "rejected_sessions": fake.rejected_sessions,
                 }
             ),
             encoding="utf-8",
@@ -645,6 +659,160 @@ def test_prompted_session_is_reused_across_resolutions(
     assert len([call for call in fake.calls if call[0] == "unlock"]) == 1
 
 
+# ---------------------------------------------------------------------------
+# Session cache (opt-in)
+# ---------------------------------------------------------------------------
+
+
+def test_cache_session_reuses_the_session_in_a_later_process(
+    monkeypatch, install_bw, prompts
+):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    fake = install_bw(
+        FakeBw(
+            items_by_folder={PROD: [login("A", "va")]},
+            expected_password="master-password",
+        )
+    )
+    config = secret_config(cache_session=True)
+
+    assert adapter.bitwarden("A=$A", config) == "A=va"
+    assert len(prompts) == 1
+    assert session_cache.load() == "unlocked-session"
+
+    # The second deploy is a new process: only the file can carry the session.
+    monkeypatch.setattr(adapter, "_interactive_session", None)
+    assert adapter.bitwarden("A=$A", config) == "A=va"
+
+    assert len(prompts) == 1
+    assert len([call for call in fake.calls if call[:1] == ["unlock"]]) == 1
+    assert fake.sync_calls()[-1] == [
+        "sync",
+        "--session",
+        "unlocked-session",
+        "--nointeraction",
+    ]
+
+
+def test_cache_session_is_off_by_default(monkeypatch, install_bw, prompts):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    install_bw(
+        FakeBw(
+            items_by_folder={PROD: [login("A", "va")]},
+            expected_password="master-password",
+        )
+    )
+
+    assert adapter.bitwarden("A=$A", secret_config()) == "A=va"
+
+    assert len(prompts) == 1
+    assert session_cache.load() is None
+
+
+def test_cached_session_file_is_private(monkeypatch, install_bw, prompts):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    install_bw(
+        FakeBw(
+            items_by_folder={PROD: [login("A", "va")]},
+            expected_password="master-password",
+        )
+    )
+
+    adapter.bitwarden("A=$A", secret_config(cache_session=True))
+
+    path = session_cache.path()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_expired_cached_session_is_replaced_after_one_prompt(
+    monkeypatch, install_bw, prompts
+):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    fake = install_bw(
+        FakeBw(
+            items_by_folder={PROD: [login("A", "va")]},
+            expected_password="master-password",
+            rejected_sessions=["expired-session"],
+        )
+    )
+    assert session_cache.save("expired-session")
+
+    assert adapter.bitwarden("A=$A", secret_config(cache_session=True)) == "A=va"
+
+    assert len(prompts) == 1
+    assert session_cache.load() == "unlocked-session"
+    assert len([call for call in fake.calls if call[:1] == ["unlock"]]) == 1
+
+
+def test_expired_cached_session_without_prompting_fails_closed(monkeypatch, install_bw):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    monkeypatch.setattr(adapter, "prompts_allowed", lambda: False)
+    fake = install_bw(
+        FakeBw(
+            items_by_folder={PROD: [login("A", "va")]},
+            rejected_sessions=["expired-session"],
+        )
+    )
+    assert session_cache.save("expired-session")
+
+    with pytest.raises(SecretResolutionError) as excinfo:
+        adapter.bitwarden("A=$A", secret_config(cache_session=True))
+
+    message = error_message(excinfo.value)
+    assert "--no-input" in message
+    assert "BW_SESSION" in message
+    assert session_cache.load() is None
+    assert [call for call in fake.calls if call[:1] == ["unlock"]] == []
+
+
+def test_cached_session_is_used_with_prompting_disabled(
+    monkeypatch, install_bw, prompts
+):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    install_bw(
+        FakeBw(
+            items_by_folder={PROD: [login("A", "va")]},
+            expected_password="master-password",
+        )
+    )
+    config = secret_config(cache_session=True)
+
+    assert adapter.bitwarden("A=$A", config) == "A=va"
+    monkeypatch.setattr(adapter, "_interactive_session", None)
+    monkeypatch.setattr(adapter, "prompts_allowed", lambda: False)
+
+    assert adapter.bitwarden("A=$A", config) == "A=va"
+    assert len(prompts) == 1
+
+
+def test_non_session_sync_failure_clears_cache_without_prompting(
+    monkeypatch, install_bw, prompts
+):
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    install_bw(
+        FakeBw(
+            items_by_folder={PROD: [login("A", "va")]},
+            sync_fails=True,
+        )
+    )
+    assert session_cache.save("cached-session")
+
+    with pytest.raises(SecretResolutionError) as excinfo:
+        adapter.bitwarden("A=$A", secret_config(cache_session=True))
+
+    assert error_message(excinfo.value) == "Bitwarden vault sync failed"
+    assert prompts == []
+    assert session_cache.load() is None
+
+
+def test_invalid_cache_session_option_fails_closed():
+    with pytest.raises(SecretResolutionError) as excinfo:
+        session_cache.enabled(secret_config(cache_session="maybe"))
+
+    assert "cache_session" in error_message(excinfo.value)
+
+
 def test_unset_password_env_falls_back_to_prompt(monkeypatch, install_bw, prompts):
     monkeypatch.delenv("BW_SESSION", raising=False)
     monkeypatch.delenv("BW_PASSWORD", raising=False)
@@ -782,6 +950,12 @@ def test_secret_config_accepts_a_single_string_folder():
     )
 
     assert decoded.options["folders"] == PROD
+
+
+def test_secret_config_accepts_boolean_options():
+    config = SecretConfig(adapter="bitwarden", options={"cache_session": True})
+
+    assert config.options["cache_session"] is True
 
 
 def test_secret_config_rejects_non_string_option_values():

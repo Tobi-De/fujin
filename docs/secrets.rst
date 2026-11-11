@@ -81,12 +81,23 @@ Configuration with folder-scoped resolution:
     [secrets.options]
     password_env = "BW_PASSWORD"  # Optional; omit to be prompted
     folders = ["fujin/myapp/prod", "fujin/shared"]
+    cache_session = true  # Optional; reuse the session across deploys
 
 If ``BW_SESSION`` is unset and no password is available through
 ``password_env`` (unset or naming an unset variable), Fujin asks for the
-master password once per run and unlocks the vault with ``bw unlock``;
-the resulting session is kept in memory for the rest of the process and is
-never written to disk or shell history. The prompt appears after the deploy
+master password once per run and unlocks the vault with ``bw unlock``.
+The resulting session is kept in memory for the rest of the process and is
+never written to shell history. By default it is not written to disk either.
+
+Set ``cache_session = true`` to keep the session in a per-user runtime file
+(``$XDG_RUNTIME_DIR/fujin/bitwarden-session/session``, mode ``0600``) so later
+deploys - in the same tab or any other - reuse it without asking again. The
+cache lives on tmpfs and is removed at logout, and it is discarded as soon as
+Bitwarden rejects the session, so the next deploy prompts again. This is a
+convenience, not a security boundary: any process running as the same user can
+read the file; use ``BW_SESSION`` or ``password_env`` if you need isolation.
+
+The prompt appears after the deploy
 confirmation and before the build starts, so it owns the terminal; the deploy
 shows the adapter's progress (unlocking, syncing the vault, reading secrets)
 while it waits, so a slow sync never looks stuck. ``fujin deploy --no-input``
@@ -110,6 +121,13 @@ disables the prompt (an unattended deploy never blocks), so CI must set
         A bare string is accepted as a one-element order. An empty list is
         rejected at config load; omit the option to resolve every ref by item
         name across the whole vault.
+    * - ``cache_session``
+      - boolean
+      - Keep the session returned by an interactive unlock in the user's
+        runtime directory so later deploys reuse it. Defaults to ``false``.
+        The file is mode ``0600``, lives for the login session (tmpfs, removed
+        at logout), and is cleared when Bitwarden invalidates the token. Only
+        applies to the ``bitwarden`` CLI adapter.
 
 Recommended folder layout — app secrets live under ``fujin/`` so personal
 logins cannot collide with app env refs:
