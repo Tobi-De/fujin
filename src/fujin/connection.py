@@ -29,7 +29,12 @@ from ssh2.session import (
 )
 
 from fujin.config import HostConfig
-from fujin.errors import ConnectionError, SSHAuthenticationError, CommandError
+from fujin.errors import (
+    ConnectionError,
+    SSHAuthenticationError,
+    CommandError,
+    CommandInterrupted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,10 @@ logger = logging.getLogger(__name__)
 #: ``sh <file>``. Sending a large script as one exec-channel string can wedge
 #: libssh2 forever (see deploy._write_remote_manifest for the same lesson).
 SPOOL_THRESHOLD_BYTES = 4096
+
+#: ETX. In raw mode the terminal stops generating SIGINT, so pressing Ctrl+C
+#: simply writes this byte to stdin.
+_CTRL_C = b"\x03"
 
 #: OpenSSH control socket shared by every external ``ssh``/``rsync`` process
 #: (``get()`` here, the staging transfer in :mod:`fujin.transfer`), so they
@@ -353,6 +362,16 @@ class SSH2Connection:
                             try:
                                 data = os.read(stdin_fd, 8192)
                                 if data:
+                                    # In raw mode Ctrl+C never becomes a local
+                                    # SIGINT: it arrives as a 0x03 byte. Sending
+                                    # it on makes the remote Python process print
+                                    # a KeyboardInterrupt traceback, so abort
+                                    # instead and let the cleanup close the
+                                    # channel, which hangs up the remote pty.
+                                    if is_interactive and _CTRL_C in data:
+                                        raise CommandInterrupted(
+                                            "Interrupted by the user"
+                                        )
                                     rc, _ = channel.write(data)
                                     while rc == LIBSSH2_ERROR_EAGAIN:
                                         poller.modify(sock_fd, select.POLLOUT)

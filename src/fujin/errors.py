@@ -97,3 +97,14 @@ class ConnectionError(FujinError):
 
 class CommandError(FujinError):
     """SSH command execution errors."""
+
+
+class CommandInterrupted(Exception):
+    """The user pressed Ctrl+C while a remote command was running.
+
+    Deliberately not a :class:`FujinError`: it is raised from the raw-mode
+    input loop, where the terminal has already been switched back, and is
+    turned into a quiet :data:`fujin.exit_codes.EXIT_USER_ABORTED` exit at the
+    CLI boundary. Rendering it as an error message would just replace the
+    remote traceback with a local one.
+    """

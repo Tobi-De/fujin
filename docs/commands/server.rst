@@ -350,6 +350,12 @@ Variables from ``current/.env`` are exported to the child process (``set -a``),
 so commands that read environment variables see the same values as the running
 services (whose units use ``EnvironmentFile=``).
 
+.. note::
+
+   Pressing Ctrl+C stops the remote command and exits ``1`` without printing a
+   Python traceback: Fujin hangs up the remote terminal instead of forwarding
+   the interrupt.
+
 .. important::
 
    **User Context:** Commands run with different permissions depending on the flag:

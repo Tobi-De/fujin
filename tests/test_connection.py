@@ -16,7 +16,7 @@ from ssh2.exceptions import SSH2Error
 
 from fujin.config import HostConfig
 from fujin.connection import SPOOL_THRESHOLD_BYTES, SSH2Connection, should_spool
-from fujin.errors import CommandError, ConnectionError, UploadError
+from fujin.errors import CommandError, CommandInterrupted, ConnectionError, UploadError
 from fujin.exit_codes import EXIT_HOST_UNREACHABLE
 
 
@@ -529,3 +529,80 @@ def test_get_key_filename_option_kept(connection, tmp_path, monkeypatch):
         "-i",
         os.path.expanduser("~/.ssh/id_ed25519"),
     ]
+
+
+# ============================================================================
+# Ctrl+C in a raw-mode (pty) session
+# ============================================================================
+
+
+class _FakePoll:
+    def __init__(self, ready: list[list[tuple[int, int]]]):
+        self._ready = ready
+
+    def register(self, fd, events):  # pragma: no cover - trivial
+        pass
+
+    def modify(self, fd, events):  # pragma: no cover - trivial
+        pass
+
+    def poll(self, timeout=None):
+        return self._ready.pop(0) if self._ready else []
+
+
+class _FakeStdin:
+    def isatty(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return 99
+
+
+def _raw_mode(monkeypatch, ready, stdin_bytes):
+    """Put ``_execute`` in its interactive raw-mode branch with fake input."""
+    fake_select = SimpleNamespace(
+        POLLIN=1,
+        POLLOUT=2,
+        POLLERR=8,
+        POLLHUP=16,
+        poll=lambda: _FakePoll(ready),
+    )
+    monkeypatch.setattr("fujin.connection.select", fake_select)
+    monkeypatch.setattr("fujin.connection.sys.stdin", _FakeStdin())
+    monkeypatch.setattr("fujin.connection.tty.setraw", lambda fd: None)
+    monkeypatch.setattr("fujin.connection.termios.tcgetattr", lambda stream: ["saved"])
+    monkeypatch.setattr(
+        "fujin.connection.termios.tcsetattr",
+        lambda stream, when, attrs: None,
+    )
+    monkeypatch.setattr("fujin.connection.os.read", lambda fd, size: stdin_bytes)
+
+
+def test_ctrl_c_in_a_pty_session_aborts_without_forwarding_sigint(
+    connection, mock_ssh_components, monkeypatch
+):
+    """Ctrl+C must not reach the remote app: a forwarded SIGINT makes it print
+    a ``KeyboardInterrupt`` traceback. Closing the channel hangs up the remote
+    pty instead, which stops the command quietly."""
+    _, mock_channel, _ = mock_ssh_components
+    _raw_mode(monkeypatch, [[(99, 1)]], b"\x03")
+
+    with pytest.raises(CommandInterrupted):
+        connection.run("long-running", pty=True, hide=True)
+
+    mock_channel.write.assert_not_called()
+    # The channel is closed, so sshd hangs up the remote pseudo-terminal.
+    mock_channel.close.assert_called()
+
+
+def test_normal_input_is_still_forwarded_in_a_pty_session(
+    connection, mock_ssh_components, monkeypatch
+):
+    _, mock_channel, _ = mock_ssh_components
+    mock_channel.write.return_value = (1, b"x")
+    mock_channel.eof.return_value = True
+    _raw_mode(monkeypatch, [[(99, 1)]], b"x")
+
+    connection.run("prompt", pty=True, hide=True)
+
+    mock_channel.write.assert_called_once_with(b"x")

@@ -83,6 +83,12 @@ so they are intentionally outside this taxonomy: a remote status of ``4`` or
 ``5`` there means whatever the remote command says it means, not a deploy
 failure or an unreachable host.
 
+Pressing Ctrl+C while such a remote command runs exits ``1`` (user abort)
+instead of Python's ``130``/traceback: Fujin closes the SSH channel, which
+hangs up the remote terminal and stops the command quietly. Interactive
+``fujin app shell`` sessions are different — they run through the system
+``ssh`` client, so Ctrl+C keeps its usual meaning inside the shell.
+
 Dry runs
 --------
 

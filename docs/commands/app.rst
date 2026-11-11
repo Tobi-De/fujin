@@ -288,6 +288,12 @@ This runs commands via your application binary, equivalent to:
    # Custom management command
    fujin app exec my_command
 
+.. note::
+
+   Pressing Ctrl+C stops the remote command and exits ``1`` without printing a
+   Python traceback: Fujin hangs up the remote terminal instead of forwarding
+   the interrupt, so the remote app never sees a ``KeyboardInterrupt``.
+
 .. tip::
 
    **Why use app exec:** Commands run as the app user (e.g., ``bookstore``), which has write access to ``db.sqlite3`` and other app-owned files. Running as the deploy user would fail with "read-only database" errors.
