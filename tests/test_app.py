@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import shlex
+import subprocess
+import sys
+from unittest.mock import MagicMock, patch
 
 import cappa
 import msgspec
 import pytest
 
+from fujin.commands import app_env_command
 from fujin.commands.app import App
 from fujin.config import Config
 
@@ -290,3 +294,93 @@ def test_get_available_options(app_test_env):
         # Check socket and timer
         assert "api.socket" in result
         assert "api.timer" in result
+
+
+# ---------------------------------------------------------------------------
+# current/.env is exported to the child process
+# ---------------------------------------------------------------------------
+
+
+def test_app_env_command_exports_variables_to_child_process(tmp_path):
+    app_dir = tmp_path / "app"
+    (app_dir / "current").mkdir(parents=True)
+    (app_dir / "current" / ".env").write_text(
+        'FUJIN_TEST_SECRET=visible\nFUJIN_TEST_QUOTED="plain value"\n',
+        encoding="utf-8",
+    )
+
+    command = app_env_command(
+        str(app_dir),
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote(
+            "import os; print(os.environ['FUJIN_TEST_SECRET']); "
+            "print(os.environ['FUJIN_TEST_QUOTED'])"
+        ),
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command], capture_output=True, text=True, check=True
+    )
+
+    assert result.stdout.splitlines() == ["visible", "plain value"]
+
+
+def test_shell_runs_the_command_with_the_exported_env(app_test_env, tmp_path):
+    app_test_env.apps_dir = str(tmp_path)
+    app_dir = tmp_path / "testapp"
+    (app_dir / "current").mkdir(parents=True)
+    (app_dir / "current" / ".env").write_text(
+        "FUJIN_TEST_SECRET=visible\n", encoding="utf-8"
+    )
+
+    child = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
+        "import os; print(os.environ['FUJIN_TEST_SECRET'])"
+    )
+
+    with (
+        patch("fujin.config.Config.read", return_value=app_test_env),
+        patch("fujin.commands.app.subprocess.run") as mock_run,
+    ):
+        App().shell(command=child)
+
+    remote = mock_run.call_args[0][0][-1]
+    result = subprocess.run(
+        ["bash", "-c", remote], capture_output=True, text=True, check=True
+    )
+
+    assert result.stdout.strip() == "visible"
+
+
+def test_exec_runs_the_binary_with_the_exported_env(app_test_env, tmp_path):
+    app_test_env.apps_dir = str(tmp_path)
+    app_dir = tmp_path / "testapp"
+    (app_dir / "current").mkdir(parents=True)
+    (app_dir / "current" / ".env").write_text(
+        "FUJIN_TEST_SECRET=visible\n", encoding="utf-8"
+    )
+    binary = app_dir / "current" / "venv" / "bin" / "testapp"
+    binary.parent.mkdir(parents=True)
+    binary.write_text(
+        f"#!{sys.executable}\nimport os\nprint(os.environ['FUJIN_TEST_SECRET'])\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+
+    conn = MagicMock()
+    conn.run.return_value = ("", True)
+    with (
+        patch("fujin.config.Config.read", return_value=app_test_env),
+        patch("fujin.commands.app.connection.connection") as mock_connection,
+    ):
+        mock_connection.return_value.__enter__.return_value = conn
+        App().exec(command="")
+
+    outer = conn.run.call_args[0][0]
+    parts = shlex.split(outer)
+    assert parts[:5] == ["sudo", "-u", "testapp", "bash", "-c"]
+
+    result = subprocess.run(
+        ["bash", "-c", parts[5]], capture_output=True, text=True, check=True
+    )
+
+    assert result.stdout.strip() == "visible"

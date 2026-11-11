@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import cappa
@@ -632,3 +633,46 @@ def test_harden_post_install_validation_failure_rolls_back_without_success_claim
     # The script, not the client, owns the restore.
     assert 'cp -a "$BACKUP" "$SUDOERS"' in cmd
     assert 'mv -f "$DROPIN_BAK" "$DROPIN"' in cmd
+
+
+# ============================================================================
+# server exec --appenv
+# ============================================================================
+
+
+def test_exec_with_appenv_exports_the_release_env_to_the_child(
+    minimal_config, tmp_path
+):
+    """``--appenv`` must export current/.env, not only source it."""
+    minimal_config.apps_dir = str(tmp_path)
+    app_dir = tmp_path / "testapp"
+    (app_dir / "current").mkdir(parents=True)
+    (app_dir / "current" / ".env").write_text(
+        "FUJIN_TEST_SECRET=visible\n", encoding="utf-8"
+    )
+
+    child = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
+        "import os; print(os.environ['FUJIN_TEST_SECRET'])"
+    )
+    conn = FakeConn()
+
+    with (
+        patch("fujin.config.Config.read", return_value=minimal_config),
+        patch(
+            "fujin.connection.connection",
+            return_value=MagicMock(
+                __enter__=lambda x: conn, __exit__=lambda *args: False
+            ),
+        ),
+    ):
+        Server().exec(command=child, appenv=True)
+
+    outer = conn.commands[-1]
+    parts = shlex.split(outer)
+    assert parts[:5] == ["sudo", "-u", "testapp", "bash", "-c"]
+
+    result = subprocess.run(
+        ["bash", "-c", parts[5]], capture_output=True, text=True, check=True
+    )
+
+    assert result.stdout.strip() == "visible"

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### 🚀 Features
+
+- *(secrets)* Cache the Bitwarden session for later deploys
+
 ## [0.28.0b8] - 2026-11-04
 
 ### 🐛 Bug Fixes

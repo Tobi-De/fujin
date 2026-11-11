@@ -17,7 +17,7 @@ from rich.table import Table
 from fujin import caddy
 from fujin import serverops
 from fujin import sudoers
-from fujin.commands import BaseCommand
+from fujin.commands import BaseCommand, app_env_command
 from fujin.config import tomllib
 from fujin import connection
 from fujin.errors import SSHKeyError
@@ -545,7 +545,7 @@ class Server(BaseCommand):
         with connection.connection(host=self.selected_host) as conn:
             if not appenv:
                 return conn.run(command, pty=True)
-            cmd = f"cd {self.config.app_dir} && source current/.env && {command}"
+            cmd = app_env_command(self.config.app_dir, command)
             conn.run(
                 f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
                 pty=True,

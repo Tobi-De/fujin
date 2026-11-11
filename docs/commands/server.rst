@@ -344,7 +344,11 @@ This is equivalent to:
 
 .. code-block:: bash
 
-   cd /path/to/app && source current/.env && your-command
+   cd /path/to/app && set -a && . current/.env && set +a && your-command
+
+Variables from ``current/.env`` are exported to the child process (``set -a``),
+so commands that read environment variables see the same values as the running
+services (whose units use ``EnvironmentFile=``).
 
 .. important::
 

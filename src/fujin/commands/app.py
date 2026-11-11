@@ -10,7 +10,7 @@ import cappa
 import tomli_w
 from rich.table import Table
 
-from fujin.commands import BaseCommand
+from fujin.commands import BaseCommand, app_env_command
 from fujin.config import tomllib
 from fujin import connection
 from fujin.discovery import DeployedUnit
@@ -247,9 +247,7 @@ class App(BaseCommand):
         if host.key_filename:
             ssh_cmd.extend(["-i", str(host.key_filename)])
 
-        full_remote_cmd = (
-            f"cd {self.config.app_dir} && source current/.env && {command}"
-        )
+        full_remote_cmd = app_env_command(self.config.app_dir, command)
         ssh_cmd.extend([ssh_target, full_remote_cmd])
         subprocess.run(ssh_cmd)
 
@@ -259,7 +257,9 @@ class App(BaseCommand):
         command: Annotated[str, cappa.Arg(help="Command to execute")],
     ):
         with connection.connection(host=self.selected_host) as conn:
-            cmd = f"cd {self.config.app_dir} && source current/.env && {self.config.app_bin} {command}"
+            cmd = app_env_command(
+                self.config.app_dir, f"{self.config.app_bin} {command}"
+            )
             conn.run(
                 f"sudo -u {self.config.app_user} bash -c {shlex.quote(cmd)}",
                 pty=True,

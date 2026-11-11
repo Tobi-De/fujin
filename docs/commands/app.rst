@@ -225,7 +225,7 @@ Open an interactive shell on the server in your app's directory.
       bookstore@server:/opt/fujin/bookstore$ bookstore createsuperuser
       bookstore@server:/opt/fujin/bookstore$ bookstore migrate
 
-   The command runs as the app user with the release environment sourced, so it has the correct permissions without manual ``sudo``.
+   The command runs as the app user with the release environment exported, so it has the correct permissions and environment variables without manual ``sudo``.
 
 This is useful for:
 
@@ -270,7 +270,7 @@ This runs commands via your application binary, equivalent to:
 
 .. code-block:: bash
 
-   cd /path/to/app && source current/.env && myapp your-command
+   cd /path/to/app && set -a && . current/.env && set +a && myapp your-command
 
 **Examples:**
 

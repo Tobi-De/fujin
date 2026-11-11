@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -13,6 +14,20 @@ from fujin.config import Config, HostConfig
 from fujin.redaction import install_log_filter, redact
 
 _logging_configured = False
+
+
+def app_env_command(app_dir: str, command: str) -> str:
+    """Run ``command`` with the deployed ``current/.env`` exported.
+
+    The generated env file uses shell assignment syntax (systemd loads it as an
+    ``EnvironmentFile``). Sourcing it alone only creates shell variables, which
+    a child process such as the app binary or an interactive shell never
+    inherits; ``set -a`` turns the assignments into exported environment
+    variables for the duration of the command.
+    """
+    return (
+        f"cd {shlex.quote(app_dir)} && set -a && . current/.env && set +a && {command}"
+    )
 
 
 @dataclass
